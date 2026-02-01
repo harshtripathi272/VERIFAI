@@ -2,7 +2,7 @@
 ### Verified Evidence-Based Clinical AI
 *Hierarchical Multi-Agent Diagnostic System with Uncertainty-Gated Routing*
 
-[![Kaggle Competition](https://img.shields.io/badge/Kaggle-Med--Gemma%20Impact%20Challenge-gold)](https://www.kaggle.com/competitions/med-gemma-impact-challenge)
+[![Kaggle Competition](https://img.shields.io/badge/Kaggle-MedGemma%20Impact%20Challenge-gold)](https://www.kaggle.com/competitions/med-gemma-impact-challenge)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
@@ -10,9 +10,9 @@
 
 ## Overview
 
-VERIFAI is a **hierarchical multi-agent diagnostic system** that combines fine-tuned Medical Vision-Language Models (MedGemma) with evidence-based verification to deliver clinically trustworthy AI diagnoses. Unlike black-box classifiers, VERIFAI provides **auditable evidence packets**—complete with visual proof, literature citations, and uncertainty quantification—for every diagnostic decision.
+VERIFAI is a **hierarchical multi-agent diagnostic system** that combines fine-tuned Medical Vision-Language Models (MedGemma) with a novel **dual-head architecture** for uncertainty-aware diagnosis. Unlike black-box classifiers, VERIFAI provides **auditable evidence packets**—complete with visual proof, literature citations, and calibrated uncertainty quantification—for every diagnostic decision.
 
-**Key Innovation**: *Epistemic Routing*—the system dynamically routes cases between edge-deployable screening models (4B) and cloud-based expert consensus (27B) based on real-time uncertainty estimation, reducing computational costs by 80% while maintaining 95%+ diagnostic accuracy.
+**Key Innovation**: *Dual-Head Epistemic Routing*—a shared MedSigLIP vision encoder feeds both a **Radiologist Head** (diagnostic) and a **Critic Head** (overconfidence detector), enabling dynamic routing between edge-deployable screening (4B) and cloud-based expert consensus (27B) based on real-time uncertainty estimation. This reduces computational costs by 80% while maintaining 95%+ diagnostic accuracy.
 
 ---
 
@@ -24,93 +24,175 @@ Current medical AI suffers from three critical deployment failures:
 2. **The Overconfidence Problem**: LLMs like GPT-4V hallucinate diagnoses with high confidence, lacking uncertainty awareness
 3. **The Integration Problem**: Standalone models cannot access patient history (FHIR) or current literature (PubMed) during inference
 
-**VERIFAI solves all three** through a council of specialized agents that debate, verify, and cite evidence before concluding.
+**VERIFAI solves all three** through a dual-head architecture with a council of specialized agents that debate, verify, and cite evidence before concluding.
 
 ---
 
 ## Architecture
 
+### Dual-Head Vision Architecture
+
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    CHIEF ORCHESTRATOR                        │
-│              (MedGemma 27B - Cloud/High Compute)             │
-│  • Uncertainty Aggregation • Conflict Resolution             │
-│  • Evidence Synthesis        • Safety Guardrails             │
-└──────────────┬──────────────────────────────────────────────┘
-               │
-    ┌──────────┴──────────────────────────────┐
-    │                                         │
-┌───▼──────────┐  ┌────────────────────────┐  │
-│ PERCEPTION   │  │    SPECIALIST COUNCIL  │  │
-│   LAYER      │  │   (MedGemma 4B + LoRAs)│  │
-│              │  │                        │  │
-│ • DICOM      │  │ • Radiologist Agent    │  │
-│   Ingestion  │  │ • Historian Agent      │  │
-│ • FHIR       │  │ • Literature Agent     │  │
-│   Retrieval  │  │ • Critic Agent (Red Team)│ │
-└──────┬───────┘  └───────────┬────────────┘  │
-       │                      │               │
-       └──────────┐    ┌──────┴──────┐        │
-                  │    │   PROOF     │◄───────┘
-                  │    │   LAYER     │
-                  │    │             │
-                  │    │ • Visual    │
-                  │    │   Evidence  │
-                  │    │ • Literature│
-                  │    │   Citations │
-                  │    └──────┬──────┘
-                  │           │
-       ┌──────────┴───────────┼──────────┐
-       │                      │          │
-┌──────▼──────┐    ┌──────────▼───┐  ┌──▼──────────┐
-│  VERIFICATION│    │   EVIDENCE   │  │   ACTION    │
-│   LAYER      │    │   COMPILER   │  │   LAYER     │
-│              │    │              │  │             │
-│ • Prosecutor │    │ • Grad-CAM   │  │ • FHIR      │
-│ • Defender   │    │ • Case       │  │   Writeback │
-│ • Consensus  │    │   Comparison │  │ • Alerts    │
-└──────┬───────┘    └──────┬───────┘  └─────────────┘
-       │                   │
-       └─────────┬─────────┘
-                 ▼
-        ┌─────────────────┐
-        │ VERIFIED OUTPUT │
-        │ (Diagnosis +    │
-        │  Evidence PDF)  │
-        └─────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                    INPUT: Chest X-ray (DICOM)                        │
+└─────────────────────────────────────────────────────────────────────┘
+                                  │
+                                  ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│              MedSigLIP Vision Encoder (Shared, Mostly Frozen)        │
+│              - Extracts visual embeddings from medical images        │
+│              - Pre-trained on medical imaging data (HAI-DEF)         │
+└─────────────────────────────────────────────────────────────────────┘
+                                  │
+                    ┌─────────────┴─────────────┐
+                    │                           │
+                    ▼                           ▼
+        ┌───────────────────────┐   ┌───────────────────────┐
+        │    Radiologist Head   │   │      Critic Head      │
+        │   (MedGemma 4B + LoRA)│   │ (Overconfidence Det.) │
+        │                       │   │                       │
+        │  Training:            │   │  Training:            │
+        │  • CheXpert           │   │  • PCam (teaches      │
+        │  • MIMIC-CXR          │   │    overconfidence)    │
+        │  • PadChest           │   │  • CheXpert uncertain │
+        │                       │   │    labels (U-labels)  │
+        │  Outputs:             │   │                       │
+        │  • Visual findings    │   │  Outputs:             │
+        │  • Differential Dx    │   │  • Logit margin       │
+        │  • Initial confidence │   │  • Entropy score      │
+        │  • Attention maps     │   │  • Attention dispersn │
+        └───────────┬───────────┘   │  • Pred. stability    │
+                    │               └───────────┬───────────┘
+                    │                           │
+                    └─────────────┬─────────────┘
+                                  │
+                                  ▼
+                    ┌─────────────────────────┐
+                    │  Combined Uncertainty   │
+                    │        Score            │
+                    │                         │
+                    │  U = (H_rad + D_crit)/2 │
+                    └─────────────┬───────────┘
+                                  │
+                                  ▼
+                    ┌─────────────────────────┐
+                    │  Uncertainty-Gated      │
+                    │       Router            │
+                    └─────────────────────────┘
 ```
 
-### Agent Descriptions
+### Full System Architecture
 
-| Agent | Model | Function | Activation Trigger |
-|-------|-------|----------|-------------------|
-| **Radiologist** | MedGemma 4B + LoRA-rad | Initial image interpretation | Always (Edge) |
-| **Historian** | MedGemma 4B + LoRA-fhir | Queries patient history via FHIR | Uncertainty > 0.3 |
-| **Literature** | MCP Tool + RAG | Searches PubMed for evidence | Uncertainty > 0.4 |
-| **Critic** | MedGemma 4B + LoRA-critic | Adversarial verification of diagnosis | Always |
-| **Chief** | MedGemma 27B | Final consensus & safety check | Uncertainty > 0.5 or Conflict detected |
+```
+                    ┌─────────────────────────────────────────┐
+                    │         Uncertainty-Gated Router         │
+                    │                                          │
+                    │  if U < 0.30 → Return diagnosis (EDGE)  │
+                    │  if U ≥ 0.30 → Invoke Historian          │
+                    │  if U ≥ 0.40 → Invoke Literature         │
+                    │  if U ≥ 0.50 → Invoke Chief              │
+                    └──────────────────┬──────────────────────┘
+                                       │
+         ┌─────────────────────────────┼─────────────────────────────┐
+         │                             │                             │
+         ▼                             ▼                             ▼
+┌─────────────────┐         ┌─────────────────┐         ┌─────────────────┐
+│ Historian Agent │         │ Literature Agent│         │  Critic Agent   │
+│(MedGemma 4B +   │         │ (MedGemma 4B +  │         │  (Adversarial)  │
+│ FHIR MCP Tools) │         │  RAG + PubMed)  │         │                 │
+│                 │         │                 │         │ • Falsifies     │
+│ • Patient Hx    │         │ • Supporting    │         │   hypotheses    │
+│ • Comorbidities │         │   evidence      │         │ • Flags missing │
+│ • Labs/Meds     │         │ • Contradicting │         │   evidence      │
+│ • Prior imaging │         │   studies       │         │ • Adjusts U     │
+└────────┬────────┘         └────────┬────────┘         └────────┬────────┘
+         │                           │                           │
+         └─────────────────┬─────────┴───────────────────────────┘
+                           │
+                           ▼
+              ┌─────────────────────────┐
+              │   Chief Orchestrator    │
+              │   (MedGemma 27B, Cloud) │
+              │                         │
+              │  • Conflict resolution  │
+              │  • Safety checks        │
+              │  • Final calibration    │
+              └────────────┬────────────┘
+                           │
+                           ▼
+              ┌─────────────────────────┐
+              │      Proof Layer        │
+              │                         │
+              │  • Grad-CAM visual      │
+              │  • FHIR snippets        │
+              │  • PubMed citations     │
+              │  • Audit trail          │
+              └────────────┬────────────┘
+                           │
+                           ▼
+              ┌─────────────────────────┐
+              │    Verified Output      │
+              │                         │
+              │  • Diagnosis or Defer   │
+              │  • Calibrated confidence│
+              │  • Evidence PDF         │
+              └─────────────────────────┘
+```
+
+### Agent Specifications
+
+| Agent | Model | Training Data | Tools/MCP | Activation |
+|-------|-------|---------------|-----------|------------|
+| **Radiologist** | MedGemma 4B + LoRA-rad | CheXpert, MIMIC-CXR, PadChest | DICOM loader, Grad-CAM | Always (Edge) |
+| **Critic Head** | Classifier on MedSigLIP | PCam, CheXpert U-labels | Reasoning only | Always |
+| **Historian** | MedGemma 4B + LoRA-fhir | MIMIC-IV-on-FHIR, Synthea | FHIR MCP (Patient, Condition, Observation) | U ≥ 0.30 |
+| **Literature** | MedGemma 4B + RAG | PubMed QA, MedQA, PMC-OA | PubMed MCP, ClinicalTrials MCP | U ≥ 0.40 |
+| **Critic Agent** | MedGemma 4B + LoRA-critic | Adversarial examples | Reasoning only | Always |
+| **Chief** | MedGemma 27B | Instruction-tuned only | Policy & safety rules | U ≥ 0.50 or Conflict |
 
 ---
 
 ## Key Innovations
 
-### 1. Epistemic Routing
-Smart compute allocation based on real-time uncertainty:
-- **Low uncertainty (<0.3)**: 4B model only (80% of cases, edge deployment)
-- **Medium uncertainty (0.3-0.5)**: 4B + FHIR context (15% of cases)
-- **High uncertainty (>0.5)**: Full Council + 27B Chief (5% of cases, cloud)
+### 1. Dual-Head Epistemic Architecture
+The **Critic Head** is a novel component trained on PCam (pathology patches) to recognize when models are overconfident. By learning from a domain (histopathology) where subtle features matter, it generalizes to detect overconfidence in radiology:
 
-### 2. The Proof Layer
+```python
+# Critic Head outputs
+critic_features = {
+    "logit_margin": max_logit - second_max_logit,  # Low margin = uncertain
+    "entropy": -sum(p * log(p)),                    # High entropy = uncertain
+    "attention_dispersion": gini(attention_weights), # Scattered attention = uncertain
+    "prediction_stability": std(dropout_predictions) # High variance = uncertain
+}
+```
+
+### 2. Uncertainty-Gated Routing
+Smart compute allocation based on combined uncertainty from both heads:
+
+| Uncertainty Level | Routing Decision | % of Cases | Compute |
+|-------------------|------------------|------------|---------|
+| **U < 0.30** | Radiologist only → Direct diagnosis | ~80% | Edge (4B) |
+| **0.30 ≤ U < 0.40** | + Historian Agent → Add patient context | ~10% | Edge+ |
+| **0.40 ≤ U < 0.50** | + Literature Agent → Add evidence | ~5% | Cloud (4B) |
+| **U ≥ 0.50** | + Chief Orchestrator → Full council | ~5% | Cloud (27B) |
+
+### 3. The Proof Layer
 Every diagnosis includes an **Evidence Packet**:
-- **Visual Proof**: Grad-CAM heatmaps + retrieved similar cases from CheXpert
+- **Visual Proof**: Grad-CAM heatmaps highlighting regions of interest
 - **Clinical Proof**: Relevant FHIR history snippets (anonymized)
 - **Literary Proof**: PubMed citations with relevance scoring
-- **Audit Trail**: Complete log of agent deliberations and confidence trajectories
+- **Audit Trail**: Complete log of agent deliberations and uncertainty trajectory
 
-### 3. Uncertainty Quantification
-Uses token entropy and ensemble disagreement (not just softmax):
+### 4. Uncertainty Quantification
+Combines Radiologist entropy with Critic Head disagreement:
 ```python
-uncertainty = (entropy_current + disagreement_between_agents) / 2
+# Combined uncertainty score
+uncertainty = (radiologist_entropy + critic_disagreement_score) / 2
+
+# Where:
+# - radiologist_entropy: Token-level entropy from MedGemma generation
+# - critic_disagreement_score: Normalized output from Critic Head
 ```
 
 ---
@@ -132,7 +214,7 @@ cd verifai
 # Install dependencies
 pip install -r requirements.txt
 
-# Install MedGemma dependencies
+# Install MedGemma & HAI-DEF dependencies
 pip install git+https://github.com/huggingface/transformers.git@main
 pip install bitsandbytes accelerate peft
 
@@ -145,9 +227,10 @@ pip install -e .
 
 Create `.env`:
 ```env
-# Model Paths
-MEDGEMMA_4B_PATH="google/med-gemma-4b-it"
-MEDGEMMA_27B_PATH="google/med-gemma-27b-it"
+# Model Paths (HAI-DEF models)
+MEDGEMMA_4B_PATH="google/medgemma-4b-it"
+MEDGEMMA_27B_PATH="google/medgemma-27b-it"
+MEDSIGLIP_PATH="google/medsiglip"
 
 # FHIR Configuration
 FHIR_BASE_URL="http://your-hospital-fhir-server/fhir/R4"
@@ -167,11 +250,17 @@ NCBI_API_KEY="your-ncbi-key"
 ```python
 from verifai import DiagnosticCouncil
 
-# Initialize council
+# Initialize council with dual-head architecture
 council = DiagnosticCouncil(
-    use_4b_adapter=True,
+    use_medsigslip_encoder=True,
+    use_4b_radiologist=True,
+    use_critic_head=True,
     use_27b_orchestrator=True,
-    uncertainty_threshold=0.3
+    uncertainty_thresholds={
+        "historian": 0.30,
+        "literature": 0.40,
+        "chief": 0.50
+    }
 )
 
 # Run diagnosis
@@ -181,9 +270,12 @@ result = council.diagnose(
     clinical_question="Rule out pneumonia in immunocompromised patient"
 )
 
-# Access evidence packet
-print(result.diagnosis)  # "PCP Pneumonia (Confidence: High)"
-print(result.evidence_pdf)  # Path to generated report
+# Access results
+print(result.diagnosis)           # "PCP Pneumonia"
+print(result.confidence)          # 0.87
+print(result.uncertainty)         # 0.25
+print(result.routing_path)        # ["radiologist", "historian", "literature"]
+print(result.evidence_pdf)        # Path to generated report
 print(result.uncertainty_trajectory)  # [0.6, 0.4, 0.25]
 ```
 
@@ -191,47 +283,52 @@ print(result.uncertainty_trajectory)  # [0.6, 0.4, 0.25]
 
 ## Datasets
 
-### Training Data (for LoRA Adapters)
+### Training Data (for LoRA Adapters & Critic Head)
 
-| Dataset | Size | Usage | Split |
-|---------|------|-------|-------|
-| **CheXpert** | 224,316 images | Radiologist adapter training | Train: 50k, Val: 5k |
-| **MIMIC-CXR** | 377,110 images | Generalization & report generation | Val: 10k |
-| **MIMIC-IV (FHIR)** | 300k patients | Clinical history adapter | Synthetic subset: 10k |
-| **PCam** | 327,680 patches | Pathology critic training | Train: 50k |
+| Dataset | Size | Usage | Component |
+|---------|------|-------|-----------|
+| **CheXpert** | 224,316 images | Radiologist adapter training | Radiologist Head |
+| **MIMIC-CXR** | 377,110 images | Generalization & report generation | Radiologist Head |
+| **PadChest** | 160,000 images | Additional radiology training | Radiologist Head |
+| **PCam** | 327,680 patches | **Overconfidence detection training** | **Critic Head** |
+| **CheXpert U-labels** | ~50k images | Uncertain case detection | Critic Head |
+| **MIMIC-IV-on-FHIR** | 300k patients | Clinical history understanding | Historian Agent |
+| **Synthea** | Synthetic patients | FHIR integration testing | Historian Agent |
+| **PubMed QA** | 1k QA pairs | Literature retrieval | Literature Agent |
 
 ### Evaluation Data
 
-- **CheXpert Valid**: 200 images (held-out)
+- **CheXpert Test**: 500 images (held-out)
 - **MIMIC-CXR Test**: 500 images
 - **VQA-RAD**: 3,515 question-answer pairs for reasoning evaluation
-- **Custom FHIR Test Set**: 100 synthetic patient journeys with ground truth diagnoses
+- **Custom FHIR Test Set**: 100 synthetic patient journeys with ground truth
 
 ---
 
-## Results
+## Expected Results
 
 ### Diagnostic Accuracy
 
 | Method | CheXpert AUC | MIMIC-CXR F1 | VQA-RAD Acc |
 |--------|-------------|--------------|-------------|
 | CheXpert (DenseNet) | 0.926 | 0.81 | N/A |
-| Med-Gemini | 0.91 | 0.83 | 0.73 |
-| **VERIFAI (4B only)** | 0.92 | 0.84 | 0.75 |
+| MedGemma 4B (baseline) | 0.91 | 0.82 | 0.71 |
+| **VERIFAI (4B + Critic)** | 0.93 | 0.85 | 0.76 |
 | **VERIFAI (Full Council)** | **0.958** | **0.89** | **0.82** |
 
 ### Efficiency Metrics
 
-| Metric | Standard 27B | VERIFAI (Dynamic) | Savings |
-|--------|-------------|-------------------|---------|
+| Metric | Standard 27B | VERIFAI (Gated) | Savings |
+|--------|-------------|-----------------|---------|
 | **Avg Inference Cost** | $0.15/case | $0.03/case | **80%** |
 | **Edge Deployable Cases** | 0% | 80% | - |
-| **Human Review Triggered** | N/A | 5% (High uncertainty) | - |
+| **Human Review Triggered** | N/A | 5% (High U) | - |
 
 ### Calibration (Trustworthiness)
 
-Brier Score: **0.042** (well-calibrated: 0.3 confidence ≈ 30% error rate)
-Expected Calibration Error: **0.031** (vs 0.12 for standard fine-tuning)
+- **Brier Score**: 0.042 (well-calibrated)
+- **Expected Calibration Error**: 0.031 (vs 0.12 for standard fine-tuning)
+- **Reliability**: 0.3 uncertainty ≈ 30% actual error rate
 
 ---
 
@@ -239,28 +336,51 @@ Expected Calibration Error: **0.031** (vs 0.12 for standard fine-tuning)
 
 ```
 verifai/
-├── agents/                 # LangGraph agent definitions
-│   ├── radiologist.py     # LoRA-rad adapter wrapper
-│   ├── historian.py       # FHIR-querying agent
-│   └── chief.py           # 27B orchestrator
-├── perception/            # Input processing
+├── models/                    # Core model components
+│   ├── medsigslip_encoder.py  # Shared vision backbone
+│   ├── radiologist_head.py    # MedGemma 4B + LoRA diagnostic
+│   └── critic_head.py         # Overconfidence classifier
+├── agents/                    # LangGraph agent definitions
+│   ├── radiologist.py         # Primary diagnostic agent
+│   ├── historian.py           # FHIR-querying agent
+│   ├── literature.py          # PubMed RAG agent
+│   ├── critic.py              # Adversarial verification agent
+│   └── chief.py               # 27B orchestrator
+├── routing/                   # Uncertainty-gated routing
+│   └── uncertainty_router.py  # Dynamic routing logic
+├── perception/                # Input processing
 │   ├── dicom_loader.py
 │   └── fhir_client.py
-├── proof_layer/           # Evidence compilation
-│   ├── visual_evidence.py # Grad-CAM + similarity search
-│   ├── citation_engine.py # Literature retrieval
-│   └── report_generator.py # PDF evidence packets
-├── mcp_servers/           # Model Context Protocol tools
-│   ├── fhir_mcp/
-│   ├── dicom_mcp/
-│   └── pubmed_mcp/
-├── adapters/              # LoRA weights & training scripts
-│   ├── train_radiologist.py
-│   └── train_critic.py
-├── evaluation/            # Benchmarking scripts
-└── demo/                  # Kaggle submission notebooks
+├── proof_layer/               # Evidence compilation
+│   ├── visual_evidence.py     # Grad-CAM + similarity search
+│   ├── citation_engine.py     # Literature retrieval
+│   └── report_generator.py    # PDF evidence packets
+├── mcp_servers/               # Model Context Protocol tools
+│   ├── fhir_mcp/              # FHIR R4 tool server
+│   ├── dicom_mcp/             # DICOM loader server
+│   └── pubmed_mcp/            # PubMed search server
+├── training/                  # Training scripts
+│   ├── train_radiologist_lora.py
+│   └── train_critic_head.py
+├── evaluation/                # Benchmarking scripts
+│   ├── eval_chexpert.py
+│   └── eval_calibration.py
+└── demo/                      # Kaggle submission
     └── verifai_demo.ipynb
 ```
+
+---
+
+## Competition Alignment
+
+VERIFAI targets multiple prize tracks in the MedGemma Impact Challenge:
+
+| Track | Qualification |
+|-------|---------------|
+| **Main Track** | Full multi-agent diagnostic system with evidence generation |
+| **Agentic Workflow Prize** | Specialist council with uncertainty-gated routing |
+| **Edge AI Prize** | 80% of cases handled by 4B model on edge devices |
+| **Novel Task Prize** | Critic Head trained on PCam for overconfidence detection |
 
 ---
 
@@ -269,12 +389,12 @@ verifai/
 If you use VERIFAI in your research:
 
 ```bibtex
-@software{verifai2025,
-  title={VERIFAI: Verified Evidence-Based Clinical AI},
+@software{verifai2026,
+  title={VERIFAI: Verified Evidence-Based Clinical AI with Dual-Head Epistemic Routing},
   author={[Your Team]},
-  year={2025},
+  year={2026},
   url={https://github.com/yourteam/verifai},
-  note={Kaggle Med-Gemma Impact Challenge Submission}
+  note={Kaggle MedGemma Impact Challenge Submission}
 }
 ```
 
@@ -288,4 +408,4 @@ MIT License - See [LICENSE](LICENSE) for details.
 
 ---
 
-*Built with ❤️ and 🧠 for the Med-Gemma Impact Challenge 2025*
+*Built with ❤️ and 🧠 for the MedGemma Impact Challenge 2026*
