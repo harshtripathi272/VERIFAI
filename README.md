@@ -391,9 +391,9 @@ If you use VERIFAI in your research:
 ```bibtex
 @software{verifai2026,
   title={VERIFAI: Verified Evidence-Based Clinical AI with Dual-Head Epistemic Routing},
-  author={[Your Team]},
+  author={Harsh Tripathi},
   year={2026},
-  url={https://github.com/yourteam/verifai},
+  url={https://github.com/harshtripathi272/VERIFAI},
   note={Kaggle MedGemma Impact Challenge Submission}
 }
 ```
