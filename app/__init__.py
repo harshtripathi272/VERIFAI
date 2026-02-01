@@ -1,1 +1,1 @@
-# VERIFAI Application Package
+from .config import settings
