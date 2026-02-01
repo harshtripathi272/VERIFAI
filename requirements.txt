@@ -1,0 +1,15 @@
+# VERIFAI Core Dependencies
+
+langchain==0.3.14
+langgraph==0.2.60
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+streamlit==1.41.1
+pydantic==2.10.4
+python-multipart==0.0.18
+pillow==11.0.0
+numpy>=1.26.0
+
+# Optional for full model inference (currently mocked)
+# torch>=2.2.0
+# transformers>=4.48.0
