@@ -335,38 +335,68 @@ print(result.uncertainty_trajectory)  # [0.6, 0.4, 0.25]
 ## Project Structure
 
 ```
-verifai/
-├── models/                    # Core model components
-│   ├── medsigslip_encoder.py  # Shared vision backbone
-│   ├── radiologist_head.py    # MedGemma 4B + LoRA diagnostic
-│   └── critic_head.py         # Overconfidence classifier
-├── agents/                    # LangGraph agent definitions
-│   ├── radiologist.py         # Primary diagnostic agent
-│   ├── historian.py           # FHIR-querying agent
-│   ├── literature.py          # PubMed RAG agent
-│   ├── critic.py              # Adversarial verification agent
-│   └── chief.py               # 27B orchestrator
-├── routing/                   # Uncertainty-gated routing
-│   └── uncertainty_router.py  # Dynamic routing logic
-├── perception/                # Input processing
-│   ├── dicom_loader.py
-│   └── fhir_client.py
-├── proof_layer/               # Evidence compilation
-│   ├── visual_evidence.py     # Grad-CAM + similarity search
-│   ├── citation_engine.py     # Literature retrieval
-│   └── report_generator.py    # PDF evidence packets
-├── mcp_servers/               # Model Context Protocol tools
-│   ├── fhir_mcp/              # FHIR R4 tool server
-│   ├── dicom_mcp/             # DICOM loader server
-│   └── pubmed_mcp/            # PubMed search server
-├── training/                  # Training scripts
-│   ├── train_radiologist_lora.py
-│   └── train_critic_head.py
-├── evaluation/                # Benchmarking scripts
-│   ├── eval_chexpert.py
-│   └── eval_calibration.py
-└── demo/                      # Kaggle submission
-    └── verifai_demo.ipynb
+├── 📁 agents
+│   ├── 📁 chief
+│   │   ├── 🐍 __init__.py
+│   │   └── 🐍 agent.py
+│   ├── 📁 critic
+│   │   ├── 🐍 __init__.py
+│   │   ├── 🐍 agent.py
+│   │   └── 🐍 model.py
+│   ├── 📁 historian
+│   │   ├── 🐍 __init__.py
+│   │   ├── 🐍 agent.py
+│   │   └── 🐍 fhir_client.py
+│   ├── 📁 literature
+│   │   ├── 🐍 __init__.py
+│   │   ├── 🐍 agent.py
+│   │   ├── 🐍 europe_pmc.py
+│   │   ├── 🐍 pubmed_entrez.py
+│   │   └── 🐍 semantic_scholar.py
+│   └── 📁 radiologist
+│       ├── 🐍 __init__.py
+│       ├── 🐍 agent.py
+│       ├── 🐍 model.py
+│       └── 🐍 prompts.py
+├── 📁 app
+│   ├── 🐍 __init__.py
+│   ├── 🐍 api.py
+│   ├── 🐍 config.py
+│   └── 🐍 main.py
+├── 📁 data
+│   ├── 📁 embeddings
+│   ├── 📁 sample_dicom
+│   └── 📁 sample_fhir
+├── 📁 docker
+│   ├── 🐳 Dockerfile
+│   └── ⚙️ docker-compose.yml
+├── 📁 graph
+│   ├── 🐍 __init__.py
+│   ├── 🐍 router.py
+│   ├── 🐍 state.py
+│   └── 🐍 workflow.py
+├── 📁 proof_layer
+│   ├── 🐍 __init__.py
+│   ├── 🐍 citations.py
+│   ├── 🐍 compiler.py
+│   └── 🐍 visual.py
+├── 📁 tests
+│   ├── 🐍 __init__.py
+│   └── 🐍 test_router.py
+├── 📁 tools
+│   ├── 🐍 __init__.py
+│   └── 🐍 registry.py
+├── 📁 ui
+│   ├── 🐍 __init__.py
+│   └── 🐍 streamlit_app.py
+├── ⚙️ .gitignore
+├── 📝 ARCHITECTURE_DEEP_DIVE.md
+├── 🐳 Dockerfile
+├── 📝 README.md
+├── 🐍 create_structure.py
+├── 📄 requirements.txt
+├── 📄 structure.txt
+└── 🐍 test_workflow.py
 ```
 
 ---
