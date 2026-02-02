@@ -35,7 +35,7 @@ CHIEF_USER_PROMPT = """Given the following structured agent outputs, perform saf
 
 Provide either:
 (A) Final diagnosis with calibrated confidence and explanation
-(B) Explicit deferral with reason andМинимал recommended next steps for human review
+(B) Explicit deferral with reason and recommended next steps for human review
 
 Output in structured JSON format."""
 

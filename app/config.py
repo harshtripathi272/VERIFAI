@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     MEDGEMMA_27B_MODEL: str = "google/medgemma-27b-it"
     
     # === FHIR Configuration ===
-    FHIR_BASE_URL: str = "http://hapi.fhir.org/baseR4"  # Public test server
+    FHIR_BASE_URL: str = "https://fhir.mimic-iv-demo.physionet.org/fhir"  # Public test server
     FHIR_AUTH_TOKEN: str | None = None
     
     # === Uncertainty Thresholds ===
