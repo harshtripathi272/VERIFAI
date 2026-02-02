@@ -157,3 +157,4 @@ class FHIRClient:
         }
 
 
+fhir_client = FHIRClient()
