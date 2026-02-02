@@ -1,0 +1,62 @@
+verifai/
+├── app/
+│   ├── __init__.py
+│   ├── main.py
+│   ├── api.py
+│   └── config.py
+├── graph/
+│   ├── __init__.py
+│   ├── state.py
+│   ├── router.py
+│   └── workflow.py
+├── agents/
+│   ├── __init__.py
+│   ├── radiologist/
+│   │   ├── __init__.py
+│   │   ├── agent.py
+│   │   ├── model.py
+│   │   └── prompts.py
+│   ├── critic/
+│   │   ├── __init__.py
+│   │   ├── agent.py
+│   │   └── model.py
+│   ├── historian/
+│   │   ├── __init__.py
+│   │   ├── agent.py
+│   │   └── fhir_client.py
+│   ├── literature/
+│   │   ├── __init__.py
+│   │   ├── agent.py
+│   │   ├── pubmed_entrez.py
+│   │   ├── europe_pmc.py
+│   │   └── semantic_scholar.py
+│   └── chief/
+│       ├── __init__.py
+│       └── agent.py
+├── tools/
+│   ├── __init__.py
+│   └── registry.py
+├── proof_layer/
+│   ├── __init__.py
+│   ├── visual.py
+│   ├── citations.py
+│   └── compiler.py
+├── ui/
+│   ├── __init__.py
+│   ├── streamlit_app.py
+│   └── components.py
+├── data/
+│   ├── sample_dicom/
+│   ├── sample_fhir/
+│   └── embeddings/
+├── cache/
+├── tests/
+│   ├── test_router.py
+│   ├── test_critic.py
+│   └── test_literature_tools.py
+├── docker/
+│   ├── Dockerfile
+│   └── docker-compose.yml
+├── requirements.txt
+├── .env.example
+└── README.md

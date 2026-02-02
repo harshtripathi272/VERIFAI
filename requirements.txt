@@ -1,0 +1,30 @@
+# VERIFAI Core Dependencies
+
+# Core Stack
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+streamlit==1.41.1
+pydantic==2.10.4
+python-multipart==0.0.18
+pillow==11.0.0
+numpy>=1.26.0
+python-dotenv==1.0.1
+
+# LangGraph & Orchestration
+langchain==0.3.14
+langgraph==0.2.60
+
+# ML & Foundation Models
+torch>=2.2.0
+transformers>=4.48.0
+accelerate>=0.27.0
+peft>=0.9.0
+bitsandbytes>=0.42.0  # For 4-bit loading
+scikit-learn>=1.4.0   # For Critic
+
+# Bioinformatics & Medical APIs
+biopython>=1.83       # For NCBI E-utilities
+requests>=2.31.0
+fhir.resources>=7.1.0 # Pydantic models for FHIR
+lxml>=5.1.0           # For XML parsing
+beautifulsoup4>=4.12.0 # For scraping abstracts if needed

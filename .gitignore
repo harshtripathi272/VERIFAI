@@ -1,0 +1,12 @@
+.env
+/.venv
+__pycache__/
+*.py[cod]
+
+# Optional: cache from other tools
+*.pyo
+*.pyd
+
+logs/
+
+/output
