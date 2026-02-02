@@ -1,0 +1,27 @@
+services:
+  postgres:
+    image: postgres:15
+    container_name: postgres
+    environment:
+      POSTGRES_DB: hapi
+      POSTGRES_USER: hapi
+      POSTGRES_PASSWORD: hapi
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hapi"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+
+  hapi-fhir:
+    image: hapiproject/hapi:v6.10.0
+    container_name: hapi-fhir
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./hapi.application.yaml:/app/config/application.yaml

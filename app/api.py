@@ -22,10 +22,8 @@ from tools.registry import registry
 router = APIRouter()
 
 
-# =============================================================================
-# RESPONSE MODELS
-# =============================================================================
 
+# RESPONSE MODELS
 class HealthResponse(BaseModel):
     status: str
     version: str
@@ -49,10 +47,8 @@ class ToolsResponse(BaseModel):
     total: int
 
 
-# =============================================================================
-# ENDPOINTS
-# =============================================================================
 
+# ENDPOINTS
 @router.get("/health", response_model=HealthResponse)
 async def health_check():
     """Health check endpoint."""
