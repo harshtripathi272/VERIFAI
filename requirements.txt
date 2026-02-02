@@ -28,3 +28,5 @@ requests>=2.31.0
 fhir.resources>=7.1.0 # Pydantic models for FHIR
 lxml>=5.1.0           # For XML parsing
 beautifulsoup4>=4.12.0 # For scraping abstracts if needed
+duckdb
+pydantic_settings
