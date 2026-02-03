@@ -9,11 +9,19 @@ Supports ImagingStudy → Patient → Condition/Observation workflow.
 import duckdb
 import json
 import base64
+import os
 from typing import Dict
 from .hyp_code_map import CHEST_HYPOTHESIS_CODE_MAP, normalize_hypothesis
 
 class FHIRClient:
-    def __init__(self, db_path="../../verifai_fhir.duckdb"):
+    def __init__(self, db_path=None):
+        if db_path is None:
+            # Resolve verifai_fhir.duckdb in the project root
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            # Agents/Historian -> Agents -> Root
+            root_dir = os.path.dirname(os.path.dirname(current_dir))
+            db_path = os.path.join(root_dir, "verifai_fhir.duckdb")
+            
         self.con = duckdb.connect(db_path)
 
     
@@ -21,28 +29,29 @@ class FHIRClient:
     def fetch_evidence_for_hypothesis(
         self, patient_id: str, hypothesis: str
     ) -> Dict:
+        hypothesis_key = normalize_hypothesis(hypothesis)
+        plan = CHEST_HYPOTHESIS_CODE_MAP.get(hypothesis_key)
 
-        hypothesis = normalize_hypothesis(hypothesis)
-        plan = CHEST_HYPOTHESIS_CODE_MAP.get(hypothesis)
+        # We fetch everything relevant to provide full context
+        evidence = self._empty_evidence()
+        
+        # 1. Fetch Structured Data (Conditions, Labs, Meds)
+        if plan:
+            evidence["conditions"] = self._query_conditions(patient_id, plan["conditions"])
+            evidence["observations"] = self._query_observations(patient_id, plan["labs"])
+        
+        evidence["medications"] = self._query_medications(patient_id)
+        
+        # 2. Fetch Additional Context (Procedures, Allergies, Encounters)
+        evidence["procedures"] = self._query_procedures(patient_id)
+        evidence["allergies"] = self._query_allergies(patient_id)
+        evidence["encounters"] = self._query_encounters(patient_id)
 
-        if not plan:
-            return self._empty_evidence()
+        # 3. Fetch Document-based evidence (Radiology reports, etc.)
+        evidence["documents"] = self._fetch_documents(patient_id)
 
-        # Try structured evidence first
-        structured = self._fetch_structured(patient_id, plan)
-
-        if self._has_structured_signal(structured):
-            structured["source"] = "structured"
-            return structured
-
-        # allback to document-based evidence
-        documents = self._fetch_documents(patient_id)
-
-        return {
-            **self._empty_evidence(),
-            "documents": documents,
-            "source": "documents"
-        }
+        evidence["source"] = "hybrid"
+        return evidence
     # STRUCTURED PATH
 
     def _fetch_structured(self, patient_id: str, plan: Dict) -> Dict:
@@ -75,7 +84,8 @@ class FHIRClient:
                 docs.append({
                     "resourceType": r["resourceType"],
                     "id": r["id"],
-                    "text": text
+                    "text": text,
+                    "category": r.get("category", [{}])[0].get("coding", [{}])[0].get("display", "Clinical Note")
                 })
         return docs
 
@@ -92,6 +102,9 @@ class FHIRClient:
                 att = c.get("attachment", {})
                 if "data" in att:
                     return self._decode_base64(att["data"])
+                # Sometimes it might be in content.attachment.url or title if not data
+                if "title" in att:
+                    return att["title"]
 
         return None
 
@@ -106,30 +119,35 @@ class FHIRClient:
     def _query_conditions(self, patient_id, codes):
         if not codes:
             return []
-
-        return self._query_by_codes(
-            "Condition", patient_id, codes, "$.code.coding"
-        )
+        return self._query_by_codes("Condition", patient_id, codes)
 
     def _query_observations(self, patient_id, codes):
         if not codes:
             return []
-
-        return self._query_by_codes(
-            "Observation", patient_id, codes, "$.code.coding"
-        )
+        return self._query_by_codes("Observation", patient_id, codes)
 
     def _query_medications(self, patient_id):
-        rows = self.con.execute("""
+        return self._query_all_by_rtype("MedicationRequest", patient_id)
+
+    def _query_procedures(self, patient_id):
+        return self._query_all_by_rtype("Procedure", patient_id)
+
+    def _query_allergies(self, patient_id):
+        return self._query_all_by_rtype("AllergyIntolerance", patient_id)
+
+    def _query_encounters(self, patient_id):
+        return self._query_all_by_rtype("Encounter", patient_id)
+
+    def _query_all_by_rtype(self, rtype, patient_id):
+        rows = self.con.execute(f"""
             SELECT json
             FROM fhir
-            WHERE resourceType = 'MedicationRequest'
+            WHERE resourceType = '{rtype}'
               AND patient_id = ?
         """, [patient_id]).fetchall()
-
         return [json.loads(r[0]) for r in rows]
 
-    def _query_by_codes(self, rtype, patient_id, codes, coding_path):
+    def _query_by_codes(self, rtype, patient_id, codes):
         rows = self.con.execute(f"""
             SELECT json
             FROM fhir
@@ -140,11 +158,11 @@ class FHIRClient:
         matches = []
         for (raw,) in rows:
             r = json.loads(raw)
+            # Handle list of codings
             for coding in r.get("code", {}).get("coding", []):
                 if coding.get("code") in codes:
                     matches.append(r)
                     break
-
         return matches
     # UTILS
 
@@ -153,8 +171,10 @@ class FHIRClient:
             "conditions": [],
             "observations": [],
             "medications": [],
+            "procedures": [],
+            "allergies": [],
+            "encounters": [],
             "documents": []
         }
-
 
 fhir_client = FHIRClient()

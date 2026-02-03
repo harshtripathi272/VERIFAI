@@ -2,9 +2,9 @@ import json
 from pathlib import Path
 import duckdb
 
-# -----------------------
+
 # CONFIG
-# -----------------------
+
 
 FHIR_DIR = Path("output/fhir")
 DB_PATH = "verifai_fhir.duckdb"
@@ -13,14 +13,19 @@ RELEVANT_RESOURCES = {
     "Patient",
     "Condition",
     "Observation",
-    "MedicationRequest"
+    "MedicationRequest",
+    "DiagnosticReport",
+    "DocumentReference",
+    "Procedure",
+    "AllergyIntolerance",
+    "Encounter"
 }
 
-# -----------------------
-# HELPERS
-# -----------------------
 
-def normalize_reference(ref: str) -> str | None:
+# HELPERS
+
+
+def normalize_reference(ref: str | None) -> str | None:
     if not ref:
         return None
     if ref.startswith("urn:uuid:"):
@@ -32,18 +37,20 @@ def extract_patient_id(resource: dict) -> str | None:
     if resource["resourceType"] == "Patient":
         return resource.get("id")
 
-    subject = resource.get("subject") or resource.get("patient")
-    if subject and "reference" in subject:
-        ref = normalize_reference(subject["reference"])
-        if ref and ref.startswith("Patient/"):
-            return ref.split("/")[-1]
+    # Use a priority list for the patient reference
+    for key in ["subject", "patient"]:
+        participant = resource.get(key)
+        if participant and "reference" in participant:
+            ref = normalize_reference(participant["reference"])
+            if ref and ref.startswith("Patient/"):
+                return ref.split("/")[-1]
 
     return None
 
 
-# -----------------------
+
 # MAIN EXTRACTION
-# -----------------------
+
 
 def main():
     con = duckdb.connect(DB_PATH)
@@ -56,6 +63,9 @@ def main():
             json TEXT
         )
     """)
+
+    # Clear existing data to ensure a clean run
+    con.execute("DELETE FROM fhir")
 
     total = 0
 
@@ -77,11 +87,12 @@ def main():
             rid = resource.get("id")
             patient_id = extract_patient_id(resource)
 
-            # Normalize references in-place
-            if "subject" in resource and "reference" in resource["subject"]:
-                resource["subject"]["reference"] = normalize_reference(
-                    resource["subject"]["reference"]
-                )
+            # Normalize references in-place for both common keys
+            for ref_key in ["subject", "patient"]:
+                if ref_key in resource and "reference" in resource[ref_key]:
+                    resource[ref_key]["reference"] = normalize_reference(
+                        resource[ref_key]["reference"]
+                    )
 
             con.execute(
                 "INSERT INTO fhir VALUES (?, ?, ?, ?)",
