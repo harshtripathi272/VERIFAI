@@ -12,3 +12,4 @@ logs/
 /output
 venv
 agents/radiologist/CheXpert_Dataset
+.env

@@ -3,93 +3,142 @@ Literature Agent Node
 
 RAG-style retrieval from PubMed, PMC, and Semantic Scholar.
 """
+import json
+import re
+from transformers import AutoTokenizer, AutoModelForCausalLM
 
-from graph.state import VerifaiState, LiteratureOutput, LiteratureCitation
-from .pubmed_entrez import search_pubmed
-from .europe_pmc import search_europe_pmc
-from .semantic_scholar import search_semantic_scholar
+from app.config import settings
+from agents.literature.tools import LITERATURE_TOOLS
+from agents.literature.prompt import SYSTEM_PROMPT
 
 
-def literature_node(state: VerifaiState) -> dict:
-    """
-    Literature Agent: Retrieve and rank evidence from biomedical literature.
-    
-    Given hypotheses and clinical context, performs:
-    1. Query formulation from hypotheses
-    2. Multi-source search (PubMed, Europe PMC, Semantic Scholar)
-    3. Deduplication and relevance ranking
-    4. Evidence strength scoring
-    
-    Returns top-5 articles with relevance summaries.
-    """
-    rad_output = state.get("radiologist_output")
-    hist_output = state.get("historian_output")
-    
-    # Formulate search query from hypotheses
-    query_parts = []
-    if rad_output and rad_output.hypotheses:
-        top_dx = rad_output.hypotheses[0].diagnosis
-        query_parts.append(f'"{top_dx}"')
-    
-    # Add clinical context if available
-    if hist_output and hist_output.supporting_facts:
-        # Extract key conditions for query
-        for fact in hist_output.supporting_facts[:2]:
-            if "diabetes" in fact.description.lower():
-                query_parts.append("diabetes")
-    
-    # Default query components
-    query_parts.extend(["chest radiograph", "diagnosis"])
-    query = " ".join(query_parts)
-    
-    # Multi-source search
-    all_citations = []
-    
-    # Primary: PubMed
-    pubmed_results = search_pubmed(query, max_results=5)
-    all_citations.extend(pubmed_results)
-    
-    # Secondary: Europe PMC (may have additional content)
-    europepmc_results = search_europe_pmc(query, max_results=3)
-    all_citations.extend(europepmc_results)
-    
-    # Tertiary: Semantic Scholar
-    ss_results = search_semantic_scholar(query, max_results=3)
-    all_citations.extend(ss_results)
-    
-    # Deduplicate by PMID/title
-    seen = set()
-    unique_citations = []
-    for cit in all_citations:
-        key = cit.pmid or cit.title[:50]
-        if key not in seen:
-            seen.add(key)
-            unique_citations.append(cit)
-    
-    # Take top 5
-    top_citations = unique_citations[:5]
-    
-    # Determine overall evidence strength
-    high_count = sum(1 for c in top_citations if c.evidence_strength == "high")
-    if high_count >= 2:
-        overall_strength = "high"
-    elif len(top_citations) >= 3:
-        overall_strength = "medium"
-    else:
-        overall_strength = "low"
-    
-    output = LiteratureOutput(
-        citations=top_citations,
-        overall_evidence_strength=overall_strength
+import json
+from typing import Dict, Any
+
+from agents.literature.tools import LITERATURE_TOOLS
+from agents.literature.prompt import SYSTEM_PROMPT
+
+
+
+def load_medgemma():
+    tokenizer = AutoTokenizer.from_pretrained(
+        settings.MEDGEMMA_4B_MODEL,
+        token=settings.HUGGINGFACE_TOKEN
     )
-    
-    trace_entry = (
-        f"LITERATURE: Retrieved {len(top_citations)} citations. "
-        f"Sources: PubMed={len(pubmed_results)}, EuropePMC={len(europepmc_results)}, "
-        f"S2={len(ss_results)}. Strength={overall_strength}"
+    model = AutoModelForCausalLM.from_pretrained(
+        settings.MEDGEMMA_4B_MODEL,
+        device_map="auto",
+        torch_dtype="auto",
+        token=settings.HUGGINGFACE_TOKEN
     )
-    
+    return model, tokenizer
+
+class ReActStepError(Exception):
+    pass
+
+
+class MedGemmaAgent:
+    def __init__(self, model, tokenizer, max_steps: int = 5):
+        self.model = model
+        self.tokenizer = tokenizer
+        self.max_steps = max_steps
+
+    def _generate(self, prompt: str) -> str:
+        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
+        outputs = self.model.generate(
+            **inputs,
+            max_new_tokens=600,
+            temperature=0.1
+        )
+        return self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+    def _extract_json(self, text: str) -> Dict[str, Any]:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start == -1 or end == -1:
+            raise ReActStepError("No JSON object found in model output")
+        try:
+            return json.loads(text[start:end + 1])
+        except json.JSONDecodeError as e:
+            raise ReActStepError(f"Invalid JSON: {e}")
+
+    def _run_tool(self, action: Dict[str, Any]) -> Dict[str, Any]:
+        if "tool" not in action or "input" not in action:
+            raise ReActStepError("Action must contain 'tool' and 'input'")
+
+        tool_name = action["tool"]
+        tool_input = action["input"]
+
+        if not isinstance(tool_input, str):
+            raise ReActStepError("Tool input must be a string")
+
+        if tool_name not in LITERATURE_TOOLS:
+            raise ReActStepError(f"Unknown tool: {tool_name}")
+
+        result = LITERATURE_TOOLS[tool_name](tool_input)
+
+        # Convert observations to pure JSON
+        return {
+            "tool": tool_name,
+            "input": tool_input,
+            "results": [r.model_dump() for r in result]
+        }
+
+    def run(self, user_query: str) -> str:
+        prompt = (
+            f"{SYSTEM_PROMPT}\n\n"
+            f"USER QUERY:\n{user_query}\n"
+        )
+
+        for step in range(self.max_steps):
+            raw_output = self._generate(prompt)
+            parsed = self._extract_json(raw_output)
+
+            if "final" in parsed:
+                return parsed["final"]
+
+            if "action" not in parsed:
+                raise ReActStepError("Expected 'action' or 'final'")
+
+            observation = self._run_tool(parsed["action"])
+
+            prompt += (
+                "\nASSISTANT_ACTION:\n"
+                f"{json.dumps(parsed['action'], indent=2)}\n"
+                "\nOBSERVATION:\n"
+                f"{json.dumps(observation, indent=2)}\n"
+            )
+
+        raise ReActStepError("Exceeded maximum reasoning steps")
+
+
+
+def literature_agent_node(state):
+    model, tokenizer = load_medgemma()
+
+    agent = MedGemmaAgent(
+        model=model,
+        tokenizer=tokenizer,
+        max_steps=5
+    )
+
+    query = f"""
+Primary diagnosis hypothesis:
+{state.radiologist_output.hypotheses[0].diagnosis}
+
+Clinical history summary:
+{state.historian_output.clinical_summary}
+
+Retrieve supporting or contradicting biomedical literature.
+"""
+
+    answer = agent.run(query)
+
     return {
-        "literature_output": output,
-        "trace": [trace_entry]
+        "literature_output": answer,
+        "trace": [
+            "LITERATURE_AGENT: MedGemma ReAct loop executed",
+            "TOOLS: PubMed / EuropePMC / SemanticScholar"
+        ]
     }
+
