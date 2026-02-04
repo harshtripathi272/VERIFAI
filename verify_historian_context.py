@@ -1,6 +1,6 @@
 import sys
 import os
-
+ 
 # Add current dir to path
 sys.path.append(os.getcwd())
 
@@ -11,13 +11,20 @@ import json
 # Pick a patient ID from the DB
 import duckdb
 con = duckdb.connect("verifai_fhir.duckdb")
-patient_id = con.execute("SELECT patient_id FROM fhir WHERE patient_id IS NOT NULL LIMIT 1").fetchone()[0]
+# patient_id = con.execute("SELECT patient_id FROM fhir WHERE patient_id IS NOT NULL LIMIT 1").fetchone()[0]
 
-print(f"Testing for Patient ID: {patient_id}")
+# print(f"Testing for Patient ID: {patient_id}")
 
-evidence = fhir_client.fetch_evidence_for_hypothesis(patient_id, "pneumonia")
-summary = summarize_fhir_evidence(evidence)
+# evidence = fhir_client.fetch_evidence_for_hypothesis(patient_id, "pneumonia")
+# summary = summarize_fhir_evidence(evidence)
 
-print("\n--- SUMMARIZED EVIDENCE ---")
-print(summary)
-print("\n--- END SUMMARY ---")
+# print("\n--- SUMMARIZED EVIDENCE ---")
+# print(summary)
+# print("\n--- END SUMMARY ---")
+count = con.execute("""
+    SELECT COUNT(DISTINCT patient_id)
+    FROM fhir
+    WHERE patient_id IS NOT NULL
+""").fetchone()[0]
+
+print("Unique patients in DB:", count)
