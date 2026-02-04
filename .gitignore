@@ -11,3 +11,4 @@ logs/
 
 /output
 venv
+.env
