@@ -18,6 +18,11 @@ class Settings(BaseSettings):
     SEMANTIC_SCHOLAR_API_KEY: str | None = os.getenv("SEMANTIC_SCHOLAR_API_KEY")
     HUGGINGFACE_TOKEN: str | None = os.getenv("HUGGINGFACE_TOKEN")  # For gated models
     
+    # === Multiple API Keys Support (Advanced) ===
+    # Format: [{"key": "xxx", "requests_per_second": 10}, {"key": "yyy", "requests_per_second": 1}]
+    NCBI_API_KEYS: list | None = None
+    SEMANTIC_SCHOLAR_API_KEYS: list | None = None
+    
     # === Model Paths (HAI-DEF Models) ===
     MEDSIGLIP_MODEL: str = "google/medsiglip-448"
     MEDGEMMA_4B_MODEL: str = "google/medgemma-1.5-4b-it"
@@ -34,6 +39,19 @@ class Settings(BaseSettings):
     
     # === Execution Limits ===
     MAX_ROUTING_STEPS: int = 5  # Prevent infinite loops
+    
+    # === OPTIMIZATION FLAGS ===
+    # Enable fast literature mode (parallel search without ReAct)
+    USE_FAST_LITERATURE_MODE: bool = True
+    
+    # Enable literature query caching
+    USE_LITERATURE_CACHE: bool = True
+    
+    # Enable parallel agent execution where possible
+    USE_PARALLEL_AGENTS: bool = True
+    
+    # Preload models at startup (uses more memory but faster inference)
+    PRELOAD_MODELS: bool = False
     
     # === Mock Mode ===
     # Enable to run without downloading large models (~50GB+)
