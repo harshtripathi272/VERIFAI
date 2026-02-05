@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     
     # === API Keys ===
     NCBI_API_KEY: str | None = os.getenv("NCBI_API_KEY")  # For higher E-utilities rate limits
-    NCBI_EMAIL: str = os.getenv("NCBI_EMAIL")  # Required for Entrez
+    NCBI_EMAIL: str | None = os.getenv("NCBI_EMAIL")  # Required for Entrez (optional for testing)
     SEMANTIC_SCHOLAR_API_KEY: str | None = os.getenv("SEMANTIC_SCHOLAR_API_KEY")
     HUGGINGFACE_TOKEN: str | None = os.getenv("HUGGINGFACE_TOKEN")  # For gated models
     
@@ -39,6 +39,16 @@ class Settings(BaseSettings):
     
     # === Execution Limits ===
     MAX_ROUTING_STEPS: int = 5  # Prevent infinite loops
+    
+    # === DEBATE SETTINGS ===
+    # Maximum rounds of debate between Critic and Evidence Team
+    DEBATE_MAX_ROUNDS: int = 3
+    
+    # Maximum confidence disagreement for consensus (0.15 = 15%)
+    DEBATE_CONSENSUS_THRESHOLD: float = 0.15
+    
+    # Enable debate workflow (set False to use legacy routing)
+    USE_DEBATE_WORKFLOW: bool = True
     
     # === OPTIMIZATION FLAGS ===
     # Enable fast literature mode (parallel search without ReAct)
