@@ -2,12 +2,13 @@
 Literature Agent Node
 
 RAG-style retrieval from PubMed, PMC, and Semantic Scholar.
-OPTIMIZED: Singleton model loading, caching, parallel execution
+OPTIMIZED: Singleton model loading, caching, parallel execution, THREAD-SAFE
 """
 import json
 import re
 import asyncio
 import concurrent.futures
+import threading
 from functools import lru_cache
 from typing import Dict, Any, Optional
 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -16,30 +17,43 @@ from app.config import settings
 from agents.literature.tools import LITERATURE_TOOLS
 from agents.literature.prompt import SYSTEM_PROMPT
 
-# === OPTIMIZATION 1: Singleton Model Loader ===
+# === OPTIMIZATION 1: Singleton Model Loader with Thread Safety ===
 _MODEL_CACHE: Optional[tuple] = None
+_MODEL_LOCK = threading.Lock()  # NEW: Lock for thread-safe model access
+_MODEL_LOAD_LOCK = threading.Lock()  # NEW: Lock for loading
 
 def load_medgemma():
-    """Load MedGemma model once and cache it."""
+    """Load MedGemma model once and cache it. Thread-safe."""
     global _MODEL_CACHE
     
+    # Quick check without lock (performance optimization)
     if _MODEL_CACHE is not None:
         return _MODEL_CACHE
     
-    print("[LiteratureAgent] Loading MedGemma model (one-time initialization)...")
-    tokenizer = AutoTokenizer.from_pretrained(
-        settings.MEDGEMMA_4B_MODEL,
-        token=settings.HUGGINGFACE_TOKEN
-    )
-    model = AutoModelForCausalLM.from_pretrained(
-        settings.MEDGEMMA_4B_MODEL,
-        device_map="auto",
-        torch_dtype="auto",
-        token=settings.HUGGINGFACE_TOKEN
-    )
-    _MODEL_CACHE = (model, tokenizer)
-    print("[LiteratureAgent] Model loaded and cached")
-    return _MODEL_CACHE
+    # Acquire lock for loading
+    with _MODEL_LOAD_LOCK:
+        # Double-check after acquiring lock
+        if _MODEL_CACHE is not None:
+            return _MODEL_CACHE
+        
+        print("[LiteratureAgent] Loading MedGemma model (one-time initialization)...")
+        tokenizer = AutoTokenizer.from_pretrained(
+            settings.MEDGEMMA_4B_MODEL,
+            token=settings.HUGGINGFACE_TOKEN
+        )
+        model = AutoModelForCausalLM.from_pretrained(
+            settings.MEDGEMMA_4B_MODEL,
+            device_map="auto",
+            torch_dtype="auto",
+            token=settings.HUGGINGFACE_TOKEN
+        )
+        _MODEL_CACHE = (model, tokenizer)
+        print("[LiteratureAgent] Model loaded and cached")
+        return _MODEL_CACHE
+
+def get_model_lock():
+    """Get the global model lock for thread-safe inference."""
+    return _MODEL_LOCK
 
 class ReActStepError(Exception):
     pass
@@ -53,20 +67,26 @@ class MedGemmaAgent:
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=3)
 
     def _generate(self, prompt: str) -> str:
-        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
-        outputs = self.model.generate(
-            **inputs,
-            max_new_tokens=400,  # Reduced from 600
-            temperature=0.1,
-            do_sample=False,  # Deterministic for speed
-            pad_token_id=self.tokenizer.eos_token_id
-        )
-        return self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+        """Generate text with thread-safe model access."""
+        # CRITICAL: Acquire lock before using model
+        with _MODEL_LOCK:
+            print(f"[Thread-{threading.current_thread().name}] Acquired model lock for generation")
+            inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
+            outputs = self.model.generate(
+                **inputs,
+                max_new_tokens=400,  # Reduced from 600
+                temperature=0.1,
+                do_sample=False,  # Deterministic for speed
+                pad_token_id=self.tokenizer.eos_token_id
+            )
+            result = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+            print(f"[Thread-{threading.current_thread().name}] Released model lock")
+            return result
 
     def _extract_json(self, text: str) -> Dict[str, Any]:
         start = text.find("{")
         end = text.rfind("}")
-        if start == -1 or end == -1:
+        if (start == -1 or end == -1):
             raise ReActStepError("No JSON object found in model output")
         try:
             return json.loads(text[start:end + 1])
