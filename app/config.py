@@ -52,7 +52,8 @@ class Settings(BaseSettings):
     
     # === OPTIMIZATION FLAGS ===
     # Enable fast literature mode (parallel search without ReAct)
-    USE_FAST_LITERATURE_MODE: bool = True
+    # Set to False to use MedGemma for literature reasoning (slower but potentially more accurate)
+    USE_FAST_LITERATURE_MODE: bool = False  # CHANGED: Now Literature uses GPU too
     
     # Enable literature query caching
     USE_LITERATURE_CACHE: bool = True
@@ -65,7 +66,7 @@ class Settings(BaseSettings):
     
     # === Mock Mode ===
     # Enable to run without downloading large models (~50GB+)
-    MOCK_MODELS: bool = True
+    MOCK_MODELS: bool = False  # CHANGED: Use real models, not mocks
     
     # === Environment ===
     ENV: str = "development"
