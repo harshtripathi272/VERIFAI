@@ -12,40 +12,10 @@ import json
 from typing import List, Optional
 from pydantic import BaseModel, Field
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from graph.state import DebateArgument, DebateRound, DebateOutput
+
 
 from app.config import settings
-
-
-class DebateArgument(BaseModel):
-    """A single argument in the debate."""
-    agent: str  # "critic", "historian", "literature"
-    position: str  # "challenge", "support", "refine"
-    argument: str
-    confidence_impact: float = Field(0.0, description="How this affects confidence (-1 to +1)")
-    evidence_refs: List[str] = Field(default_factory=list)
-
-
-class DebateRound(BaseModel):
-    """A single round of debate."""
-    round_number: int
-    critic_challenge: Optional[DebateArgument] = None
-    historian_response: Optional[DebateArgument] = None
-    literature_response: Optional[DebateArgument] = None
-    round_consensus: Optional[str] = None  # None if no consensus
-    confidence_delta: float = 0.0
-
-
-class DebateOutput(BaseModel):
-    """Final output from debate process."""
-    rounds: List[DebateRound] = Field(default_factory=list)
-    final_consensus: bool = False
-    consensus_diagnosis: Optional[str] = None
-    consensus_confidence: float = 0.0
-    escalate_to_chief: bool = False
-    escalation_reason: Optional[str] = None
-    debate_summary: str = ""
-    total_confidence_adjustment: float = 0.0
-
 
 class DebateOrchestrator:
     """
