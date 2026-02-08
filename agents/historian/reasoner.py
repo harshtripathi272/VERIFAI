@@ -1,17 +1,31 @@
 import json
 import re
+import threading
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from app.config import settings
 
-
+# Thread-safe singleton pattern
 tokenizer = None
 model = None
+_LOAD_LOCK = threading.Lock()
+_INFERENCE_LOCK = threading.Lock()  # NEW: Lock for thread-safe inference
 
 
 def load_medgemma():
+    """Load MedGemma model with thread safety."""
     global tokenizer, model
 
-    if tokenizer is None:
+    # Quick check without lock
+    if tokenizer is not None and model is not None:
+        return
+
+    # Acquire lock for loading
+    with _LOAD_LOCK:
+        # Double-check after acquiring lock
+        if tokenizer is not None and model is not None:
+            return
+        
+        print("[Historian] Loading MedGemma model...")
         tokenizer = AutoTokenizer.from_pretrained(
             settings.MEDGEMMA_4B_MODEL,
             token=settings.HUGGINGFACE_TOKEN
@@ -22,6 +36,7 @@ def load_medgemma():
             torch_dtype="auto",
             token=settings.HUGGINGFACE_TOKEN
         )
+        print("[Historian] Model loaded")
 
 
 def summarize_fhir_evidence(evidence: dict) -> str:
@@ -112,14 +127,17 @@ JSON schema:
 }}
 """
 
-    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-    outputs = model.generate(
-        **inputs,
-        max_new_tokens=500,
-        temperature=0.1
-    )
-
-    raw = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    # CRITICAL: Acquire lock before using model
+    with _INFERENCE_LOCK:
+        print(f"[Thread-{threading.current_thread().name}] Historian acquired model lock")
+        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=500,
+            temperature=0.1
+        )
+        raw = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        print(f"[Thread-{threading.current_thread().name}] Historian released model lock")
 
     match = re.search(r"\{.*\}", raw, re.DOTALL)
     if not match:
