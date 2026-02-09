@@ -357,7 +357,10 @@ def debate_node(state) -> dict:
     Debate node for LangGraph workflow.
     
     Runs adversarial debate between Critic and Evidence Team (Historian + Literature).
+    After debate, uses Kernel Language Entropy (KLE) to validate semantic consensus.
     """
+    from uncertainty.kle import compute_semantic_uncertainty
+    
     orchestrator = DebateOrchestrator(
         max_rounds=settings.DEBATE_MAX_ROUNDS if hasattr(settings, 'DEBATE_MAX_ROUNDS') else 3,
         consensus_threshold=settings.DEBATE_CONSENSUS_THRESHOLD if hasattr(settings, 'DEBATE_CONSENSUS_THRESHOLD') else 0.15
@@ -370,29 +373,87 @@ def debate_node(state) -> dict:
         literature_output=state.get("literature_output")
     )
     
+    # === KLE SEMANTIC UNCERTAINTY CHECK ===
+    # Collect all agent statements from the debate for semantic analysis
+    consensus_samples = []
+    
+    # Add the primary diagnosis
+    radiologist_output = state.get("radiologist_output")
+    if radiologist_output and radiologist_output.hypotheses:
+        primary_dx = radiologist_output.hypotheses[0].diagnosis
+        consensus_samples.append(f"Primary diagnosis: {primary_dx}")
+    
+    # Add arguments from each debate round
+    for round in debate_output.rounds:
+        if round.critic_challenge:
+            consensus_samples.append(round.critic_challenge.argument)
+        if round.historian_response:
+            consensus_samples.append(round.historian_response.argument)
+        if round.literature_response:
+            consensus_samples.append(round.literature_response.argument)
+    
+    # Compute KLE uncertainty
+    kle_uncertainty = 1.0  # Default to high uncertainty
+    if len(consensus_samples) >= 2:
+        kle_uncertainty = compute_semantic_uncertainty(consensus_samples)
+    
+    # Get threshold from settings
+    kle_threshold = getattr(settings, 'KLE_UNCERTAINTY_THRESHOLD', 0.30)
+    
+    # Override consensus based on KLE
+    # Even if debate said "consensus", KLE must also agree
+    semantic_consensus = kle_uncertainty < kle_threshold
+    
+    # Final consensus = debate consensus AND semantic consensus
+    final_consensus = debate_output.final_consensus and semantic_consensus
+    
     # Build trace
     trace_entries = [
         f"DEBATE: {len(debate_output.rounds)} rounds completed",
-        f"DEBATE: Consensus={'YES' if debate_output.final_consensus else 'NO'}",
-        f"DEBATE: Confidence adjustment={debate_output.total_confidence_adjustment:+.2%}"
+        f"DEBATE: Debate consensus={'YES' if debate_output.final_consensus else 'NO'}",
+        f"DEBATE: Confidence adjustment={debate_output.total_confidence_adjustment:+.2%}",
+        f"KLE: Semantic uncertainty={kle_uncertainty:.3f} (threshold={kle_threshold})",
+        f"KLE: Semantic consensus={'YES' if semantic_consensus else 'NO'}",
+        f"FINAL: Consensus={'REACHED' if final_consensus else 'NOT REACHED'}"
     ]
     
-    if debate_output.escalate_to_chief:
-        trace_entries.append(f"DEBATE: Escalating to Chief - {debate_output.escalation_reason}")
+    if not semantic_consensus and debate_output.final_consensus:
+        trace_entries.append("KLE: Overriding debate consensus due to high semantic uncertainty")
     
-    # Update routing decision based on debate outcome
-    routing = "finalize" if debate_output.final_consensus else "chief"
+    if not final_consensus:
+        trace_entries.append(f"DEBATE: Escalating to Chief - semantic uncertainty too high ({kle_uncertainty:.3f} >= {kle_threshold})")
     
-    # Update uncertainty based on debate
-    new_uncertainty = state.get("current_uncertainty", 0.5)
-    if debate_output.final_consensus:
-        new_uncertainty = max(0.1, new_uncertainty - 0.2)  # Reduce uncertainty on consensus
+    # Update routing decision based on final outcome
+    routing = "finalize" if final_consensus else "chief"
+    
+    # Update uncertainty to use KLE score directly
+    new_uncertainty = kle_uncertainty
+    
+    # Update debate_output with KLE results
+    # We'll modify the summary to reflect KLE
+    updated_summary = debate_output.debate_summary
+    if final_consensus:
+        updated_summary = f"Consensus validated by KLE (uncertainty={kle_uncertainty:.3f}). {debate_output.debate_summary}"
     else:
-        new_uncertainty = min(0.9, new_uncertainty + 0.1)  # Increase on no consensus
+        updated_summary = f"No semantic consensus (KLE={kle_uncertainty:.3f} >= {kle_threshold}). Escalating to Chief."
+    
+    # Create updated debate output
+    final_debate_output = DebateOutput(
+        rounds=debate_output.rounds,
+        final_consensus=final_consensus,
+        consensus_diagnosis=debate_output.consensus_diagnosis,
+        consensus_confidence=debate_output.consensus_confidence,
+        escalate_to_chief=not final_consensus,
+        escalation_reason=f"Semantic uncertainty {kle_uncertainty:.3f} >= threshold {kle_threshold}" if not final_consensus else None,
+        debate_summary=updated_summary,
+        total_confidence_adjustment=debate_output.total_confidence_adjustment
+    )
     
     return {
-        "debate_output": debate_output,
+        "debate_output": final_debate_output,
         "routing_decision": routing,
         "current_uncertainty": new_uncertainty,
+        "semantic_uncertainty": kle_uncertainty,  # NEW: expose KLE score
         "trace": trace_entries
     }
+

@@ -28,6 +28,14 @@ class Settings(BaseSettings):
     MEDGEMMA_4B_MODEL: str = "google/medgemma-1.5-4b-it"
     MEDGEMMA_27B_MODEL: str = "google/medgemma-27b-it"
     
+    # === Text Embedding Model (for KLE Uncertainty) ===
+    # Switch to any sentence-transformers compatible model
+    TEXT_EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
+    
+    # === KLE Uncertainty Settings ===
+    KLE_UNCERTAINTY_THRESHOLD: float = 0.30  # Consensus requires uncertainty < threshold
+    KLE_NUM_SAMPLES: int = 5  # Number of samples to generate for KLE
+    
     # === FHIR Configuration ===
     FHIR_BASE_URL: str = "https://fhir.mimic-iv-demo.physionet.org/fhir"  # Public test server
     FHIR_AUTH_TOKEN: str | None = None
