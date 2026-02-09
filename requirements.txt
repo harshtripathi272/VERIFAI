@@ -21,6 +21,7 @@ accelerate>=0.27.0
 peft>=0.9.0
 bitsandbytes>=0.42.0  # For 4-bit loading
 scikit-learn>=1.4.0   # For Critic
+sentence-transformers>=2.2.0  # For KLE uncertainty embeddings
 
 # Bioinformatics & Medical APIs
 biopython>=1.83       # For NCBI E-utilities

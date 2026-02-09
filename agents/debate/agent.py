@@ -357,6 +357,7 @@ def debate_node(state) -> dict:
     Debate node for LangGraph workflow.
     
     Runs adversarial debate between Critic and Evidence Team (Historian + Literature).
+    Consensus is determined solely by DebateOrchestrator's confidence impact heuristics.
     """
     orchestrator = DebateOrchestrator(
         max_rounds=settings.DEBATE_MAX_ROUNDS if hasattr(settings, 'DEBATE_MAX_ROUNDS') else 3,
@@ -396,3 +397,5 @@ def debate_node(state) -> dict:
         "current_uncertainty": new_uncertainty,
         "trace": trace_entries
     }
+
+
