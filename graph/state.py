@@ -172,6 +172,9 @@ class VerifaiState(TypedDict):
     routing_decision: str
     steps_taken: int
     
+    # === KLE Uncertainty (for logging/analysis) ===
+    radiologist_kle_uncertainty: float | None  # Early epistemic instability score
+    
     # === Final Result ===
     final_diagnosis: FinalDiagnosis | None
     
