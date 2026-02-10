@@ -213,44 +213,44 @@ def build_workflow() -> StateGraph:
 
 # === LEGACY WORKFLOW (for backward compatibility) ===
 
-def build_legacy_workflow() -> StateGraph:
-    """
-    Original workflow with uncertainty-gated routing.
-    Use this if you prefer the old behavior.
-    """
-    from graph.router import router_node, route_conditional_edge
+# def build_legacy_workflow() -> StateGraph:
+#     """
+#     Original workflow with uncertainty-gated routing.
+#     Use this if you prefer the old behavior.
+#     """
+#     from graph.router import router_node, route_conditional_edge
     
-    graph = StateGraph(VerifaiState)
+#     graph = StateGraph(VerifaiState)
     
-    graph.add_node("radiologist", radiologist_node)
-    graph.add_node("critic", critic_node)
-    graph.add_node("router", router_node)
-    graph.add_node("historian", historian_node)
-    graph.add_node("literature", literature_node)
-    graph.add_node("chief", chief_node)
-    graph.add_node("finalize", finalize_node)
+#     graph.add_node("radiologist", radiologist_node)
+#     graph.add_node("critic", critic_node)
+#     graph.add_node("router", router_node)
+#     graph.add_node("historian", historian_node)
+#     graph.add_node("literature", literature_node)
+#     graph.add_node("chief", chief_node)
+#     graph.add_node("finalize", finalize_node)
     
-    graph.add_edge(START, "radiologist")
-    graph.add_edge("radiologist", "critic")
-    graph.add_edge("critic", "router")
+#     graph.add_edge(START, "radiologist")
+#     graph.add_edge("radiologist", "critic")
+#     graph.add_edge("critic", "router")
     
-    graph.add_conditional_edges(
-        "router",
-        route_conditional_edge,
-        {
-            "historian": "historian",
-            "literature": "literature", 
-            "chief": "chief",
-            "finalize": "finalize"
-        }
-    )
+#     graph.add_conditional_edges(
+#         "router",
+#         route_conditional_edge,
+#         {
+#             "historian": "historian",
+#             "literature": "literature", 
+#             "chief": "chief",
+#             "finalize": "finalize"
+#         }
+#     )
     
-    graph.add_edge("historian", "critic")
-    graph.add_edge("literature", "critic")
-    graph.add_edge("chief", END)
-    graph.add_edge("finalize", END)
+#     graph.add_edge("historian", "critic")
+#     graph.add_edge("literature", "critic")
+#     graph.add_edge("chief", END)
+#     graph.add_edge("finalize", END)
     
-    return graph
+#     return graph
 
 
 # === Compile Workflows ===

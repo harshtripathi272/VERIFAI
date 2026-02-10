@@ -86,9 +86,9 @@ def get_image_embedding(image_path: str) -> Any:
 
 def generate_findings(embedding: Any, dicom_metadata: dict | None) -> dict:
     """
-    Generate structured findings using MedGemma-4B.
+    Generate narrative report using MedGemma-4B.
     
-    Returns dict with findings, hypotheses, signals, reasoning.
+    Returns dict with 'findings' and 'impression' text strings.
     """
     _load_models()
     
@@ -108,45 +108,101 @@ def generate_findings(embedding: Any, dicom_metadata: dict | None) -> dict:
 
 
 def _mock_generate() -> dict:
-    """Generate plausible mock output."""
-    return {
-        "findings": [
-            {
-                "location": "Right Lower Lobe",
-                "observation": "Consolidation with air bronchograms",
-                "severity": 0.75,
-                "bounding_box": None
-            },
-            {
-                "location": "Left Hilum", 
-                "observation": "Mild prominence, possible reactive lymphadenopathy",
-                "severity": 0.35,
-                "bounding_box": None
-            },
-            {
-                "location": "Cardiac Silhouette",
-                "observation": "Normal size and contour",
-                "severity": 0.0,
-                "bounding_box": None
-            }
-        ],
-        "hypotheses": [
-            {"diagnosis": "Community-Acquired Pneumonia", "confidence": 0.68, "icd10_code": "J18.9"},
-            {"diagnosis": "Viral Pneumonia", "confidence": 0.18, "icd10_code": "J12.9"},
-            {"diagnosis": "Atelectasis", "confidence": 0.10, "icd10_code": "J98.11"},
-            {"diagnosis": "Pulmonary Edema", "confidence": 0.04, "icd10_code": "J81.1"}
-        ],
-        "internal_signals": {
-            "logits_top2": [3.2, 1.4],
-            "logit_margin": 1.8,
-            "predictive_entropy": 0.58,
-            "attention_dispersion": 0.42,
-            "prediction_stability": 0.85
+    """Generate plausible mock narrative report.
+    
+    Includes some random variation to simulate model stochasticity
+    for multi-sample KLE uncertainty estimation.
+    """
+    import random
+    
+    # Vary findings slightly each time
+    variants = [
+        {
+            "findings": (
+                "FINDINGS:\n"
+                "Right lower lobe demonstrates consolidation with air bronchograms. "
+                "The opacity is dense and homogeneous, measuring approximately 4-5 cm. "
+                "Left hilum shows mild prominence, possibly representing reactive lymphadenopathy. "
+                "Cardiac silhouette is normal in size and contour. "
+                "No pleural effusion or pneumothorax is identified."
+            ),
+            "impression": (
+                "IMPRESSION:\n"
+                "Right lower lobe consolidation most consistent with community-acquired pneumonia. "
+                "Differential diagnosis includes viral pneumonia or atypical infection. "
+                "Mild hilar prominence likely reactive. "
+                "Clinical correlation recommended."
+            )
         },
-        "reasoning": (
-            "Right lower lobe demonstrates dense consolidation with visible air bronchograms, "
-            "a pattern highly suggestive of bacterial pneumonia. The consolidation is lobar in "
-            "distribution without significant volume loss, distinguishing it from atelectasis. "
-            "Cardiac silhouette is within normal limits, making cardiogenic pulmonary edema less likely."
-        )
-    }
+        {
+            "findings": (
+                "FINDINGS:\n"
+                "There is a focal area of increased density in the right lower lobe with visible air bronchograms. "
+                "The finding measures roughly 4 cm and appears relatively homogeneous. "
+                "Left hilum is mildly prominent, which may represent lymphadenopathy. "
+                "Heart size is within normal limits. "
+                "No significant pleural abnormality detected."
+            ),
+            "impression": (
+                "IMPRESSION:\n"
+                "Findings are suggestive of right lower lobe pneumonia, likely bacterial in etiology. "
+                "Atypical pneumonia or early organizing pneumonia should also be considered. "
+                "Hilar prominence possibly reactive in nature. "
+                "Close clinical follow-up is advised."
+            )
+        },
+        {
+            "findings": (
+                "FINDINGS:\n"
+                "Dense consolidation is present in the right lower lobe region with air bronchograms noted. "
+                "The consolidation spans approximately 4-5 cm in maximal dimension. "
+                "Mild left hilar fullness is observed. "
+                "Cardiac silhouette appears unremarkable. "
+                "No pneumothorax or large pleural effusion identified."
+            ),
+            "impression": (
+                "IMPRESSION:\n"
+                "Right lower lobe consolidation, most likely representing community-acquired pneumonia. "
+                "Differential considerations include aspiration pneumonia or less likely atelectasis with infection. "
+                "Left hilar prominence may be reactive or inflammatory. "
+                "Recommend clinical correlation and follow-up imaging if symptoms persist."
+            )
+        },
+        {
+            "findings": (
+                "FINDINGS:\n"
+                "Right lower lobe opacity with air bronchograms consistent with airspace disease. "
+                "The consolidation measures approximately 4 cm and demonstrates homogeneous density. "
+                "Subtle left hilar prominence noted, likely reactive. "
+                "Heart size normal. "
+                "No definite pleural effusion or pneumothorax."
+            ),
+            "impression": (
+                "IMPRESSION:\n"
+                "Airspace disease in the right lower lobe, findings raise concern for bacterial pneumonia. "
+                "Alternative diagnoses to consider include viral pneumonia or organizing pneumonia. "
+                "Hilar findings likely benign/reactive. "
+                "Clinical correlation is recommended."
+            )
+        },
+        {
+            "findings": (
+                "FINDINGS:\n"
+                "Consolidation identified in the right lower lobe with characteristic air bronchograms. "
+                "The affected area is approximately 4-5 cm with dense, homogeneous opacification. "
+                "Left hilum shows mild prominence. "
+                "Cardiac size and contour are normal. "
+                "No pleural complications visualized."
+            ),
+            "impression": (
+                "IMPRESSION:\n"
+                "Right lower lobe consolidation consistent with pneumonia, most likely community-acquired. "
+                "Differential includes viral etiology or early empyema, though less likely given the appearance. "
+                "Hilar prominence may represent reactive adenopathy. "
+                "Follow-up recommended based on clinical response."
+            )
+        }
+    ]
+    
+    # Return a random variant to simulate sampling variability
+    return random.choice(variants)
