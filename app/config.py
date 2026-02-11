@@ -72,6 +72,10 @@ class Settings(BaseSettings):
     # Preload models at startup (uses more memory but faster inference)
     PRELOAD_MODELS: bool = False
     
+    # === LLM CRITIC FLAGS ===
+    # Enable second-stage MedGemma semantic critic in Critic agent
+    ENABLE_LLM_CRITIC: bool = False
+    
     # === Mock Mode ===
     # Enable to run without downloading large models (~50GB+)
     MOCK_MODELS: bool = False  # CHANGED: Use real models, not mocks
