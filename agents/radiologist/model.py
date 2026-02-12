@@ -32,13 +32,74 @@ VIEW_TOKENS = ["<AP>", "<PA>", "<Lateral>"]
 
 
 class VisionProjector(nn.Module):
-    """Projects MedSigLIP embeddings to MedGemma dimension."""
-    def __init__(self, input_dim=1152, output_dim=2048):  # SigLIP-So400m -> Gemma-2B/4B
-        super().__init__()
-        self.linear = nn.Linear(input_dim, output_dim)
+    """
+    Projects mean-pooled SigLIP features to MedGemma hidden dim.
 
-    def forward(self, x):
-        return self.linear(x)
+    Architecture:  Linear → GELU → LayerNorm
+    Initialisation: Xavier-uniform with gain 0.1 (small scale to avoid
+    disturbing the quantised LLM embeddings at the start of training).
+    """
+
+    def __init__(self, vision_hidden_size: int, lm_hidden_size: int):
+        super().__init__()
+        self.linear = nn.Linear(vision_hidden_size, lm_hidden_size)
+        self.act = nn.GELU()
+        self.ln = nn.LayerNorm(lm_hidden_size)
+
+        nn.init.xavier_uniform_(self.linear.weight, gain=0.1)
+        nn.init.zeros_(self.linear.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.ln(self.act(self.linear(x)))
+
+
+def get_image_embedding(image_path: str) -> torch.Tensor:
+    """
+    Return projected visual embedding (1 vector per image)
+    Shape: [1, hidden_size]
+    """
+    _load_models()
+
+    image = Image.open(image_path).convert("RGB")
+    inputs = _image_processor(images=image, return_tensors="pt")
+
+    pixel_values = inputs.pixel_values.to(
+        _vision_encoder.device,
+        dtype=_vision_encoder.dtype
+    )
+
+    with torch.no_grad():
+        vision_outputs = _vision_encoder(pixel_values=pixel_values)
+        patch_embeddings = vision_outputs.last_hidden_state  # [1, 576, 1152]
+
+        pooled = patch_embeddings.mean(dim=1)  # [1, 1152]
+        projected = _projector(pooled)         # [1, hidden_size]
+
+    return projected
+
+def inject_vision_hook(projected_embeds, image_token_id, input_ids):
+    """
+    Registers forward hook to replace <image> token embedding.
+    """
+
+    embed_layer = _llm.get_input_embeddings()
+
+    image_mask = input_ids == image_token_id
+    b_idx, s_idx = image_mask.nonzero(as_tuple=True)
+
+    assert len(b_idx) == projected_embeds.shape[0], \
+        f"<image> count ({len(b_idx)}) != image count ({projected_embeds.shape[0]})"
+
+    def hook(module, inputs, output):
+        new_output = output.clone()
+        new_output[b_idx, s_idx] = projected_embeds.to(
+            device=output.device,
+            dtype=output.dtype
+        )
+        return new_output
+
+    handle = embed_layer.register_forward_hook(hook)
+    return handle
 
 
 def _load_models():
@@ -101,7 +162,10 @@ def _load_models():
 
     # 3. Projector
     print("Loading Projector...")
-    _projector = VisionProjector(input_dim=1152, output_dim=_llm.config.hidden_size)
+    _projector = VisionProjector(
+        _vision_encoder.config.hidden_size,
+        _llm.config.hidden_size
+    )
     
     if settings.MEDGEMMA_PROJECTOR_WEIGHTS and "path/to" not in settings.MEDGEMMA_PROJECTOR_WEIGHTS:
         weights = torch.load(settings.MEDGEMMA_PROJECTOR_WEIGHTS, map_location=device)
@@ -109,110 +173,42 @@ def _load_models():
     else:
         print("WARNING: Projector weights not found. Using random init (will output garbage).")
         
-    _projector.to(device=device, dtype=torch.float16) # Projector usually stays in float16
+    embed_device = _llm.get_input_embeddings().weight.device
+    _projector.to(device=embed_device, dtype=torch.float16)
     _projector.eval()
 
     _models_loaded = True
     print("[Radiologist] Models loaded.")
 
 
-def get_image_embedding(image_path: str) -> torch.Tensor:
-    """Get projected visual embedding (Projector(Encoder(Image)))."""
-    _load_models()
-    
-    image = Image.open(image_path).convert("RGB")
-    
-    # Preprocess
-    inputs = _image_processor(images=image, return_tensors="pt")
-    pixel_values = inputs.pixel_values.to(_vision_encoder.device, dtype=_vision_encoder.dtype)
-    
-    with torch.no_grad():
-        # Encode
-        vision_outputs = _vision_encoder(pixel_values=pixel_values)
-        image_embeds = vision_outputs.last_hidden_state  # [1, 576, 1152] for 384x384
-        
-        # Project
-        projected_embeds = _projector(image_embeds) # [1, 576, 2048]
-        
-    return projected_embeds
-
 
 def generate_findings(image_path: str, view: str = "AP") -> dict:
-    """
-    Generate findings using hook-based VLM inference.
-    
-    Args:
-        image_path: Path to chest X-ray.
-        view: "AP", "PA", or "Lateral".
-    """
     from .prompts import INSTRUCTION
-    
+
     _load_models()
-    
-    # 1. Get Visual Embeddings
-    visual_embeds = get_image_embedding(image_path) # [1, S, H]
-    
-    # 2. Construct Prompt
-    # <image> <VIEW> INSTRUCTION
+
+    device = _llm.device
+
+    # 1️⃣ Get projected image embedding (1 vector)
+    projected = get_image_embedding(image_path)  # [1, hidden]
+
+    # 2️⃣ Construct prompt
     view_token = f"<{view}>" if f"<{view}>" in VIEW_TOKENS else "<AP>"
     prompt = f"{IMAGE_TOKEN} {view_token}\n{INSTRUCTION}"
-    
-    inputs = _tokenizer(prompt, return_tensors="pt").to(_llm.device)
-    
-    # Find <image> token position
+
+    inputs = _tokenizer(prompt, return_tensors="pt").to(device)
     input_ids = inputs.input_ids
+    attention_mask = inputs.attention_mask
+
     image_token_id = _tokenizer.convert_tokens_to_ids(IMAGE_TOKEN)
-    
-    # Find where image token is
-    # Assuming only 1 image token at the start
-    has_image = (input_ids == image_token_id).any()
-    
-    # 3. Define Hook for Injection
-    def forward_hook(module, input, output):
-        # input is tuple (embeddings,)
-        # output is tensor [batch, seq, hidden]
-        if not has_image:
-            return output
-            
-        # Locate indices of <image> tokens
-        # We need to replace the single <image> embedding with the sequence of visual embeddings
-        # NOTE: This approach (replacing 1 token with N) requires recalculating position IDs 
-        # or constructing inputs_embeds manually BEFORE calling generate.
-        #
-        # Better approach: Construct inputs_embeds manually.
-        pass
-        
-    # === BETTER APPROACH: Construct inputs_embeds directly ===
-    # This avoids complex hooking logic for sequence length changes
-    
-    # Embed all text tokens
-    token_embeds = _llm.model.embed_tokens(input_ids) # [1, L, H]
-    
-    # Find index of <image>
-    batch_indices, seq_indices = torch.where(input_ids == image_token_id)
-    
-    if len(seq_indices) > 0:
-        idx = seq_indices[0]
-        
-        # Split: [prefix, image_token, suffix]
-        prefix_embeds = token_embeds[:, :idx, :]
-        suffix_embeds = token_embeds[:, idx+1:, :]
-        
-        # Concatenate: [prefix, visual_embeds, suffix]
-        # visual_embeds is [1, 576, H]
-        inputs_embeds = torch.cat([prefix_embeds, visual_embeds, suffix_embeds], dim=1)
-        
-        # New attention mask
-        seq_len = inputs_embeds.shape[1]
-        attention_mask = torch.ones((1, seq_len), device=_llm.device)
-    else:
-        inputs_embeds = token_embeds
-        attention_mask = inputs.attention_mask
-        
-    # 4. Generate
+
+    # 3️⃣ Register hook (exact training behavior)
+    hook_handle = inject_vision_hook(projected, image_token_id, input_ids)
+
+    # 4️⃣ Generate normally (IMPORTANT: pass input_ids)
     with torch.no_grad():
         output_ids = _llm.generate(
-            inputs_embeds=inputs_embeds,
+            input_ids=input_ids,
             attention_mask=attention_mask,
             max_new_tokens=300,
             do_sample=True,
@@ -221,12 +217,14 @@ def generate_findings(image_path: str, view: str = "AP") -> dict:
             use_cache=True,
             pad_token_id=_tokenizer.eos_token_id
         )
-    
-    # Decode
+
+    # Remove hook after generation
+    hook_handle.remove()
+
     generated_text = _tokenizer.decode(output_ids[0], skip_special_tokens=True)
-    
-    # 5. Parse Output
+
     return _parse_report(generated_text)
+
 
 
 def _parse_report(text: str) -> dict:
