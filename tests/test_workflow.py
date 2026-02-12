@@ -1,6 +1,6 @@
 """Quick test of the VERIFAI LangGraph workflow."""
 
-from app.graph import verifai_graph
+from graph.workflow import app as verifai_graph
 
 # Initialize state
 initial_state = {

@@ -9,7 +9,7 @@ sys.path.insert(0, '.')
 
 from graph.state import (
     VerifaiState, RadiologistOutput, CriticOutput, HistorianOutput,
-    VisualFinding, DiagnosisHypothesis, InternalSignals, HistorianFact
+    HistorianFact
 )
 from agents.debate.agent import DebateOrchestrator, debate_node
 
@@ -18,34 +18,10 @@ def create_mock_state():
     """Create a mock state for testing."""
     
     # Mock radiologist output
+    # Mock radiologist output
     radiologist_output = RadiologistOutput(
-        findings=[
-            VisualFinding(
-                location="RLL",
-                observation="Consolidation with air bronchograms",
-                severity=0.7
-            )
-        ],
-        hypotheses=[
-            DiagnosisHypothesis(
-                diagnosis="Community-Acquired Pneumonia",
-                confidence=0.75,
-                icd10_code="J18.9"
-            ),
-            DiagnosisHypothesis(
-                diagnosis="Atelectasis",
-                confidence=0.15,
-                icd10_code="J98.11"
-            )
-        ],
-        internal_signals=InternalSignals(
-            logits_top2=[2.5, 1.2],
-            logit_margin=1.3,
-            predictive_entropy=0.45,
-            attention_dispersion=0.3,
-            prediction_stability=0.12
-        ),
-        reasoning="Lobar consolidation pattern consistent with bacterial pneumonia"
+        findings="FINDINGS:\nRight lower lobe consolidation with air bronchograms. Severity: High.",
+        impression="IMPRESSION:\nLobar consolidation pattern consistent with bacterial pneumonia. Differential includes atypical pneumonia."
     )
     
     # Mock critic output (moderate overconfidence concern)

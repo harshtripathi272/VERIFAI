@@ -1,208 +1,271 @@
 """
 Radiologist Model
 
-MedSigLIP (vision encoder) + MedGemma-4B-IT (reasoning) wrapper.
-Supports mock mode for development without GPU.
+Real MedGemma-4B VLM Inference with LoRA and Hook-based Vision Injection.
 """
 
 import torch
-from typing import Any
+import torch.nn as nn
+from typing import Any, Tuple
+from PIL import Image
+from transformers import (
+    AutoTokenizer, 
+    AutoModelForCausalLM, 
+    AutoProcessor, 
+    BitsAndBytesConfig,
+    AutoImageProcessor
+)
+from peft import PeftModel
 from app.config import settings
 
-# Lazy imports for optional ML dependencies
+# Global model cache
 _models_loaded = False
 _vision_encoder = None
 _llm = None
-_processor = None
 _tokenizer = None
+_image_processor = None
+_projector = None
+
+# Special tokens
+IMAGE_TOKEN = "<image>"
+VIEW_TOKENS = ["<AP>", "<PA>", "<Lateral>"]
+
+
+class VisionProjector(nn.Module):
+    """Projects MedSigLIP embeddings to MedGemma dimension."""
+    def __init__(self, input_dim=1152, output_dim=2048):  # SigLIP-So400m -> Gemma-2B/4B
+        super().__init__()
+        self.linear = nn.Linear(input_dim, output_dim)
+
+    def forward(self, x):
+        return self.linear(x)
 
 
 def _load_models():
-    """Lazy-load models on first inference."""
-    global _models_loaded, _vision_encoder, _llm, _processor, _tokenizer
+    """Load MedSigLIP, MedGemma (4-bit + LoRA), and Projector."""
+    global _models_loaded, _vision_encoder, _llm, _tokenizer, _image_processor, _projector
     
     if _models_loaded:
         return
-    
-    if settings.MOCK_MODELS:
-        print("[Radiologist] Running in MOCK mode - no models loaded")
-        _models_loaded = True
-        return
-    
-    try:
-        from transformers import AutoModel, AutoProcessor, AutoModelForCausalLM, AutoTokenizer
-        
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        dtype = torch.float16 if device == "cuda" else torch.float32
-        
-        print(f"[Radiologist] Loading MedSigLIP on {device}...")
-        _processor = AutoProcessor.from_pretrained(settings.MEDSIGLIP_MODEL)
-        _vision_encoder = AutoModel.from_pretrained(
-            settings.MEDSIGLIP_MODEL,
-            torch_dtype=dtype,
-            device_map="auto"
-        )
-        
-        print(f"[Radiologist] Loading MedGemma-4B on {device}...")
-        _tokenizer = AutoTokenizer.from_pretrained(settings.MEDGEMMA_4B_MODEL)
-        _llm = AutoModelForCausalLM.from_pretrained(
-            settings.MEDGEMMA_4B_MODEL,
-            torch_dtype=dtype,
-            device_map="auto"
-        )
-        
-        _models_loaded = True
-        print("[Radiologist] Models loaded successfully")
-        
-    except Exception as e:
-        print(f"[Radiologist] Failed to load models: {e}")
-        print("[Radiologist] Falling back to MOCK mode")
-        settings.MOCK_MODELS = True
-        _models_loaded = True
 
+    print("[Radiologist] Loading real VLM models...")
+    
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    # 1. Vision Encoder (MedSigLIP)
+    print(f"Loading MedSigLIP: {settings.MEDSIGLIP_MODEL}")
+    _image_processor = AutoImageProcessor.from_pretrained(
+        settings.MEDSIGLIP_MODEL,
+        size={"height": 384, "width": 384}  # User requested 384
+    )
+    # Load vision model (can use AutoModel or just the vision tower if available)
+    from transformers import SiglipVisionModel
+    _vision_encoder = SiglipVisionModel.from_pretrained(
+        settings.MEDSIGLIP_MODEL,
+        torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+        device_map=device
+    ).eval()
 
-def get_image_embedding(image_path: str) -> Any:
-    """
-    Extract visual embedding using MedSigLIP.
-    
-    Returns embedding tensor or None in mock mode.
-    """
-    _load_models()
-    
-    if settings.MOCK_MODELS:
-        return None
-    
-    from PIL import Image
-    
-    image = Image.open(image_path).convert("RGB")
-    inputs = _processor(images=image, return_tensors="pt").to(_vision_encoder.device)
-    
-    with torch.no_grad():
-        outputs = _vision_encoder(**inputs)
-        embedding = outputs.last_hidden_state
-    
-    return embedding
-
-
-def generate_findings(embedding: Any, dicom_metadata: dict | None) -> dict:
-    """
-    Generate narrative report using MedGemma-4B.
-    
-    Returns dict with 'findings' and 'impression' text strings.
-    """
-    _load_models()
-    
-    if settings.MOCK_MODELS:
-        return _mock_generate()
-    
-    from .prompts import RADIOLOGIST_SYSTEM_PROMPT, RADIOLOGIST_USER_PROMPT
-    
-    # Format prompt
-    user_prompt = RADIOLOGIST_USER_PROMPT.format(
-        dicom_metadata=dicom_metadata or {}
+    # 2. LLM (MedGemma-4B with 4-bit LoRA)
+    print(f"Loading MedGemma: {settings.MEDGEMMA_4B_MODEL}")
+    bnb_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype=torch.float16,
+        bnb_4bit_use_double_quant=True
     )
     
-    # TODO: Implement actual VLM inference with embedding projection
-    # For now, return mock until proper VLM pipeline is set up
-    return _mock_generate()
-
-
-def _mock_generate() -> dict:
-    """Generate plausible mock narrative report.
+    _tokenizer = AutoTokenizer.from_pretrained(settings.MEDGEMMA_4B_MODEL)
+    _tokenizer.padding_side = "right"
     
-    Includes some random variation to simulate model stochasticity
-    for multi-sample KLE uncertainty estimation.
+    # Add special tokens
+    _tokenizer.add_tokens([IMAGE_TOKEN] + VIEW_TOKENS, special_tokens=True)
+    image_token_id = _tokenizer.convert_tokens_to_ids(IMAGE_TOKEN)
+    
+    _llm = AutoModelForCausalLM.from_pretrained(
+        settings.MEDGEMMA_4B_MODEL,
+        quantization_config=bnb_config,
+        device_map="auto"
+    )
+    
+    # Resize embeddings for new tokens
+    _llm.resize_token_embeddings(len(_tokenizer))
+    _llm.config.image_token_id = image_token_id  # Set config
+    
+    # Load LoRA adapters
+    if settings.MEDGEMMA_LORA_ADAPTERS and "path/to" not in settings.MEDGEMMA_LORA_ADAPTERS:
+        print(f"Loading LoRA adapters from {settings.MEDGEMMA_LORA_ADAPTERS}")
+        _llm = PeftModel.from_pretrained(_llm, settings.MEDGEMMA_LORA_ADAPTERS)
+    else:
+        print("WARNING: LoRA adapter path not set. Using base model.")
+
+    # 3. Projector
+    print("Loading Projector...")
+    _projector = VisionProjector(input_dim=1152, output_dim=_llm.config.hidden_size)
+    
+    if settings.MEDGEMMA_PROJECTOR_WEIGHTS and "path/to" not in settings.MEDGEMMA_PROJECTOR_WEIGHTS:
+        weights = torch.load(settings.MEDGEMMA_PROJECTOR_WEIGHTS, map_location=device)
+        _projector.load_state_dict(weights)
+    else:
+        print("WARNING: Projector weights not found. Using random init (will output garbage).")
+        
+    _projector.to(device=device, dtype=torch.float16) # Projector usually stays in float16
+    _projector.eval()
+
+    _models_loaded = True
+    print("[Radiologist] Models loaded.")
+
+
+def get_image_embedding(image_path: str) -> torch.Tensor:
+    """Get projected visual embedding (Projector(Encoder(Image)))."""
+    _load_models()
+    
+    image = Image.open(image_path).convert("RGB")
+    
+    # Preprocess
+    inputs = _image_processor(images=image, return_tensors="pt")
+    pixel_values = inputs.pixel_values.to(_vision_encoder.device, dtype=_vision_encoder.dtype)
+    
+    with torch.no_grad():
+        # Encode
+        vision_outputs = _vision_encoder(pixel_values=pixel_values)
+        image_embeds = vision_outputs.last_hidden_state  # [1, 576, 1152] for 384x384
+        
+        # Project
+        projected_embeds = _projector(image_embeds) # [1, 576, 2048]
+        
+    return projected_embeds
+
+
+def generate_findings(image_path: str, view: str = "AP") -> dict:
     """
-    import random
+    Generate findings using hook-based VLM inference.
     
-    # Vary findings slightly each time
-    variants = [
-        {
-            "findings": (
-                "FINDINGS:\n"
-                "Right lower lobe demonstrates consolidation with air bronchograms. "
-                "The opacity is dense and homogeneous, measuring approximately 4-5 cm. "
-                "Left hilum shows mild prominence, possibly representing reactive lymphadenopathy. "
-                "Cardiac silhouette is normal in size and contour. "
-                "No pleural effusion or pneumothorax is identified."
-            ),
-            "impression": (
-                "IMPRESSION:\n"
-                "Right lower lobe consolidation most consistent with community-acquired pneumonia. "
-                "Differential diagnosis includes viral pneumonia or atypical infection. "
-                "Mild hilar prominence likely reactive. "
-                "Clinical correlation recommended."
-            )
-        },
-        {
-            "findings": (
-                "FINDINGS:\n"
-                "There is a focal area of increased density in the right lower lobe with visible air bronchograms. "
-                "The finding measures roughly 4 cm and appears relatively homogeneous. "
-                "Left hilum is mildly prominent, which may represent lymphadenopathy. "
-                "Heart size is within normal limits. "
-                "No significant pleural abnormality detected."
-            ),
-            "impression": (
-                "IMPRESSION:\n"
-                "Findings are suggestive of right lower lobe pneumonia, likely bacterial in etiology. "
-                "Atypical pneumonia or early organizing pneumonia should also be considered. "
-                "Hilar prominence possibly reactive in nature. "
-                "Close clinical follow-up is advised."
-            )
-        },
-        {
-            "findings": (
-                "FINDINGS:\n"
-                "Dense consolidation is present in the right lower lobe region with air bronchograms noted. "
-                "The consolidation spans approximately 4-5 cm in maximal dimension. "
-                "Mild left hilar fullness is observed. "
-                "Cardiac silhouette appears unremarkable. "
-                "No pneumothorax or large pleural effusion identified."
-            ),
-            "impression": (
-                "IMPRESSION:\n"
-                "Right lower lobe consolidation, most likely representing community-acquired pneumonia. "
-                "Differential considerations include aspiration pneumonia or less likely atelectasis with infection. "
-                "Left hilar prominence may be reactive or inflammatory. "
-                "Recommend clinical correlation and follow-up imaging if symptoms persist."
-            )
-        },
-        {
-            "findings": (
-                "FINDINGS:\n"
-                "Right lower lobe opacity with air bronchograms consistent with airspace disease. "
-                "The consolidation measures approximately 4 cm and demonstrates homogeneous density. "
-                "Subtle left hilar prominence noted, likely reactive. "
-                "Heart size normal. "
-                "No definite pleural effusion or pneumothorax."
-            ),
-            "impression": (
-                "IMPRESSION:\n"
-                "Airspace disease in the right lower lobe, findings raise concern for bacterial pneumonia. "
-                "Alternative diagnoses to consider include viral pneumonia or organizing pneumonia. "
-                "Hilar findings likely benign/reactive. "
-                "Clinical correlation is recommended."
-            )
-        },
-        {
-            "findings": (
-                "FINDINGS:\n"
-                "Consolidation identified in the right lower lobe with characteristic air bronchograms. "
-                "The affected area is approximately 4-5 cm with dense, homogeneous opacification. "
-                "Left hilum shows mild prominence. "
-                "Cardiac size and contour are normal. "
-                "No pleural complications visualized."
-            ),
-            "impression": (
-                "IMPRESSION:\n"
-                "Right lower lobe consolidation consistent with pneumonia, most likely community-acquired. "
-                "Differential includes viral etiology or early empyema, though less likely given the appearance. "
-                "Hilar prominence may represent reactive adenopathy. "
-                "Follow-up recommended based on clinical response."
-            )
-        }
-    ]
+    Args:
+        image_path: Path to chest X-ray.
+        view: "AP", "PA", or "Lateral".
+    """
+    from .prompts import INSTRUCTION
     
-    # Return a random variant to simulate sampling variability
-    return random.choice(variants)
+    _load_models()
+    
+    # 1. Get Visual Embeddings
+    visual_embeds = get_image_embedding(image_path) # [1, S, H]
+    
+    # 2. Construct Prompt
+    # <image> <VIEW> INSTRUCTION
+    view_token = f"<{view}>" if f"<{view}>" in VIEW_TOKENS else "<AP>"
+    prompt = f"{IMAGE_TOKEN} {view_token}\n{INSTRUCTION}"
+    
+    inputs = _tokenizer(prompt, return_tensors="pt").to(_llm.device)
+    
+    # Find <image> token position
+    input_ids = inputs.input_ids
+    image_token_id = _tokenizer.convert_tokens_to_ids(IMAGE_TOKEN)
+    
+    # Find where image token is
+    # Assuming only 1 image token at the start
+    has_image = (input_ids == image_token_id).any()
+    
+    # 3. Define Hook for Injection
+    def forward_hook(module, input, output):
+        # input is tuple (embeddings,)
+        # output is tensor [batch, seq, hidden]
+        if not has_image:
+            return output
+            
+        # Locate indices of <image> tokens
+        # We need to replace the single <image> embedding with the sequence of visual embeddings
+        # NOTE: This approach (replacing 1 token with N) requires recalculating position IDs 
+        # or constructing inputs_embeds manually BEFORE calling generate.
+        #
+        # Better approach: Construct inputs_embeds manually.
+        pass
+        
+    # === BETTER APPROACH: Construct inputs_embeds directly ===
+    # This avoids complex hooking logic for sequence length changes
+    
+    # Embed all text tokens
+    token_embeds = _llm.model.embed_tokens(input_ids) # [1, L, H]
+    
+    # Find index of <image>
+    batch_indices, seq_indices = torch.where(input_ids == image_token_id)
+    
+    if len(seq_indices) > 0:
+        idx = seq_indices[0]
+        
+        # Split: [prefix, image_token, suffix]
+        prefix_embeds = token_embeds[:, :idx, :]
+        suffix_embeds = token_embeds[:, idx+1:, :]
+        
+        # Concatenate: [prefix, visual_embeds, suffix]
+        # visual_embeds is [1, 576, H]
+        inputs_embeds = torch.cat([prefix_embeds, visual_embeds, suffix_embeds], dim=1)
+        
+        # New attention mask
+        seq_len = inputs_embeds.shape[1]
+        attention_mask = torch.ones((1, seq_len), device=_llm.device)
+    else:
+        inputs_embeds = token_embeds
+        attention_mask = inputs.attention_mask
+        
+    # 4. Generate
+    with torch.no_grad():
+        output_ids = _llm.generate(
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            max_new_tokens=300,
+            do_sample=True,
+            temperature=0.2,
+            top_p=0.9,
+            use_cache=True,
+            pad_token_id=_tokenizer.eos_token_id
+        )
+    
+    # Decode
+    generated_text = _tokenizer.decode(output_ids[0], skip_special_tokens=True)
+    
+    # 5. Parse Output
+    return _parse_report(generated_text)
+
+
+def _parse_report(text: str) -> dict:
+    """Parse raw text into separate findings and impression sections."""
+    text = text.strip()
+    
+    # Normalize headers
+    lower_text = text.lower()
+    
+    findings_start = lower_text.find("findings:")
+    impression_start = lower_text.find("impression:")
+    
+    findings = ""
+    impression = ""
+    
+    if findings_start != -1 and impression_start != -1:
+        if findings_start < impression_start:
+            findings = text[findings_start + 9 : impression_start].strip()
+            impression = text[impression_start + 11:].strip()
+        else:
+            # Impression first? Unusual but possible
+            impression = text[impression_start + 11 : findings_start].strip()
+            findings = text[findings_start + 9:].strip()
+    elif findings_start != -1:
+        findings = text[findings_start + 9:].strip()
+    elif impression_start != -1:
+        impression = text[impression_start + 11:].strip()
+    else:
+        # No headers, treat whole text as findings? or verify user instruction execution failed
+        # Fallback: split by double newline
+        parts = text.split("\n\n")
+        if len(parts) >= 2:
+            findings = parts[0]
+            impression = "\n".join(parts[1:])
+        else:
+            findings = text
+            impression = "No distinct impression section generated."
+            
+    return {
+        "findings": findings or "No findings generated.",
+        "impression": impression or "No impression generated."
+    }

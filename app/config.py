@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     MEDGEMMA_4B_MODEL: str = "google/medgemma-1.5-4b-it"
     MEDGEMMA_27B_MODEL: str = "google/medgemma-27b-it"
     
+    # === MedGemma 4B Fine-Tuned Paths ===
+    MEDGEMMA_LORA_ADAPTERS: str = os.getenv("MEDGEMMA_LORA_ADAPTERS", "path/to/lora/adapters")
+    MEDGEMMA_PROJECTOR_WEIGHTS: str = os.getenv("MEDGEMMA_PROJECTOR_WEIGHTS", "path/to/projector.pt")
+    
     # === Text Embedding Model (for KLE Uncertainty) ===
     # Switch to any sentence-transformers compatible model
     TEXT_EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
@@ -71,6 +75,10 @@ class Settings(BaseSettings):
     
     # Preload models at startup (uses more memory but faster inference)
     PRELOAD_MODELS: bool = False
+    
+    # === LLM CRITIC FLAGS ===
+    # Enable second-stage MedGemma semantic critic in Critic agent
+    ENABLE_LLM_CRITIC: bool = False
     
     # === Mock Mode ===
     # Enable to run without downloading large models (~50GB+)

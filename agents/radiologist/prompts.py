@@ -42,3 +42,10 @@ DICOM Metadata: {dicom_metadata}
 
 Generate your report now:
 """
+INSTRUCTION = (
+    "You are an expert radiologist.\n\n"
+    "Analyze the provided chest X-rays and write a careful radiology report "
+    "using appropriate clinical language.\n\n"
+    "FINDINGS:\n"
+    "IMPRESSION:\n"
+)

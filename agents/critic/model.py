@@ -3,10 +3,19 @@ Critic Model
 
 Overconfidence detector that evaluates consistency between linguistic certainty
 in the radiology report and the externally computed KLE-based uncertainty score.
+
+Integration points (marked with # >>> LLM-CRITIC):
+  - Second-stage MedGemma semantic critic gated behind settings.ENABLE_LLM_CRITIC
+  - Merges LLM output into rule-based results without overriding them
 """
 
-from app.config import settings
+import logging
 import re
+
+from app.config import settings
+from .llm_critic import medgemma_critic  # >>> LLM-CRITIC
+
+logger = logging.getLogger(__name__)
 
 
 class CriticModel:
@@ -87,6 +96,10 @@ class CriticModel:
         Returns:
             Tuple of (is_overconfident, concern_flags, recommended_hedging, safety_score)
         """
+        # ----------------------------------------------------------------
+        # Stage 1: Rule-based linguistic analysis  (unchanged)
+        # ----------------------------------------------------------------
+
         # Analyze linguistic certainty in the impression
         linguistic_certainty, markers = self._analyze_linguistic_certainty(impression)
         
@@ -131,7 +144,71 @@ class CriticModel:
         
         if is_overconfident:
             safety_score = min(safety_score, 0.5)  # Cap safety if overconfident
-        
+
+        # ----------------------------------------------------------------
+        # Stage 2: LLM-based semantic critic  >>> LLM-CRITIC
+        # ----------------------------------------------------------------
+        # Only invoked when:
+        #   1. ENABLE_LLM_CRITIC is True
+        #   2. KLE uncertainty is high OR rule-based already flagged overconfidence
+        # This prevents unnecessary latency on low-risk cases.
+
+        if settings.ENABLE_LLM_CRITIC and (kle_uncertainty > 0.3 or is_overconfident):
+            try:
+                llm_output = medgemma_critic.critique(
+                    findings=findings,
+                    impression=impression,
+                    kle_uncertainty=kle_uncertainty,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "CRITIC-LLM: Semantic critic raised exception: %s — using rule-based output only", exc
+                )
+                llm_output = None
+
+            if llm_output is not None:
+                # -- Merge: is_overconfident ----------------------------------
+                if llm_output.overconfidence_reason is not None:
+                    is_overconfident = True
+                    concern_flags.append(
+                        f"[LLM] Overconfidence: {llm_output.overconfidence_reason}"
+                    )
+
+                # -- Merge: justification_gap ---------------------------------
+                if llm_output.justification_gap:
+                    concern_flags.append(
+                        f"[LLM] Justification gap: {llm_output.justification_gap}"
+                    )
+
+                # -- Merge: missing_differentials -----------------------------
+                if llm_output.missing_differentials:
+                    formatted = ", ".join(llm_output.missing_differentials)
+                    concern_flags.append(
+                        f"[LLM] Missing differentials: {formatted}"
+                    )
+
+                # -- Merge: recommended_hedging (LLM takes priority) ----------
+                if llm_output.suggested_hedging:
+                    recommended_hedging = llm_output.suggested_hedging
+
+                # -- Merge: safety_score adjustment ---------------------------
+                # Never let LLM directly SET safety_score; only penalise.
+                if llm_output.semantic_risk_score > 0.5:
+                    safety_score *= (1.0 - 0.3 * llm_output.semantic_risk_score)
+                    safety_score = max(0.0, min(1.0, safety_score))
+
+                # -- Trace logging --------------------------------------------
+                logger.info(
+                    "CRITIC-LLM: Semantic risk=%.2f, Missing differentials=%d",
+                    llm_output.semantic_risk_score,
+                    len(llm_output.missing_differentials),
+                )
+            else:
+                # LLM failed — log and continue with rule-based output only
+                logger.warning(
+                    "CRITIC-LLM: Semantic critic unavailable — using rule-based output only"
+                )
+
         return is_overconfident, concern_flags, recommended_hedging, safety_score
 
 
