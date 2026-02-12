@@ -147,17 +147,16 @@ def _build_evidence_packet(state: VerifaiState) -> dict[str, Any]:
         "visual": None,
         "clinical": None,
         "literature": None,
-        "critic": None
+        "critic": None,
+        "debate": None
     }
     
-    # Visual evidence
+    # Visual evidence (Radiologist)
     rad = state.get("radiologist_output")
     if rad:
         packet["visual"] = {
-            "findings": [f.model_dump() for f in rad.findings],
-            "hypotheses": [h.model_dump() for h in rad.hypotheses],
-            "reasoning": rad.reasoning,
-            "internal_signals": rad.internal_signals.model_dump()
+            "findings": rad.findings,      # Now a plain string
+            "impression": rad.impression   # Now a plain string
         }
     
     # Clinical context
@@ -182,10 +181,20 @@ def _build_evidence_packet(state: VerifaiState) -> dict[str, Any]:
     critic = state.get("critic_output")
     if critic:
         packet["critic"] = {
-            "overconfidence_probability": critic.overconfidence_probability,
-            "counter_hypotheses": critic.counter_hypotheses,
-            "concern_signals": critic.concern_signals,
-            "calculated_uncertainty": critic.calculated_uncertainty
+            "is_overconfident": critic.is_overconfident,
+            "concern_flags": critic.concern_flags,
+            "recommended_hedging": critic.recommended_hedging,
+            "safety_score": critic.safety_score
+        }
+    
+    # Debate history
+    debate = state.get("debate_output")
+    if debate:
+        packet["debate"] = {
+            "rounds": [round.model_dump() for round in debate.rounds],
+            "final_consensus": debate.final_consensus,
+            "debate_summary": debate.debate_summary,
+            "total_confidence_adjustment": debate.total_confidence_adjustment
         }
     
     return packet

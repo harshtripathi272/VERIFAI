@@ -259,6 +259,6 @@ def build_workflow() -> StateGraph:
 workflow = build_workflow()
 app = workflow.compile()
 
-# Legacy workflow available if needed
-legacy_workflow = build_legacy_workflow()
-legacy_app = legacy_workflow.compile()
+# # Legacy workflow available if needed
+# legacy_workflow = build_legacy_workflow()
+# legacy_app = legacy_workflow.compile()

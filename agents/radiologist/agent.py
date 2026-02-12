@@ -6,7 +6,7 @@ Uses KLE-based epistemic uncertainty estimation via multiple text samples.
 """
 
 from graph.state import VerifaiState, RadiologistOutput
-from .model import get_image_embedding, generate_findings
+from .model import generate_findings
 from app.config import settings
 from uncertainty.kle import compute_semantic_uncertainty
 
@@ -22,11 +22,6 @@ def radiologist_node(state: VerifaiState) -> dict:
     Uncertainty is computed externally and stored separately from the report text.
     """
     image_path = state["image_path"]
-    dicom_metadata = state.get("dicom_metadata")
-    
-    # Get visual embedding
-    embedding = get_image_embedding(image_path)
-    
     # === MULTI-SAMPLE GENERATION FOR KLE ===
     # Generate N independent samples for uncertainty estimation
     n_samples = getattr(settings, 'KLE_NUM_SAMPLES', 5)
@@ -34,8 +29,22 @@ def radiologist_node(state: VerifaiState) -> dict:
     samples = []
     primary_report = None
     
+    # Verify file exists
+    import os
+    if not os.path.exists(image_path):
+        return {
+            "radiologist_output": None,
+            "trace": [f"RADIOLOGIST: Error - Image not found: {image_path}"]
+        }
+        
+    # Determine view (heuristic or default)
+    # Since we can't use metadata, we default to "AP" or try to infer from filename if possible
+    # For now, safe default as per request
+    view = "AP"
+    
     for i in range(n_samples):
-        raw_output = generate_findings(embedding, dicom_metadata)
+        # Call model with image path and view
+        raw_output = generate_findings(image_path, view=view)
         
         if i == 0:
             # Use first sample as the primary report
