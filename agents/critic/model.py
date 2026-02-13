@@ -83,15 +83,20 @@ class CriticModel:
         self,
         findings: str,
         impression: str,
-        kle_uncertainty: float
+        kle_uncertainty: float,
+        historian_output=None,  # NEW: FHIR clinical context
+        literature_output=None   # NEW: Literature evidence
     ) -> tuple[bool, list[str], str | None, float]:
         """
-        Evaluate whether the linguistic certainty is appropriate given the epistemic uncertainty.
+        Evaluate whether the linguistic certainty is appropriate given the epistemic uncertainty
+        AND enriched clinical context.
         
         Args:
             findings: FINDINGS text section
             impression: IMPRESSION text section
             kle_uncertainty: Epistemic uncertainty score from KLE (0.0-1.0, higher = more uncertain)
+            historian_output: HistorianOutput with FHIR facts (optional)
+            literature_output: LiteratureOutput with citations (optional) or string summary
             
         Returns:
             Tuple of (is_overconfident, concern_flags, recommended_hedging, safety_score)
@@ -144,6 +149,57 @@ class CriticModel:
         
         if is_overconfident:
             safety_score = min(safety_score, 0.5)  # Cap safety if overconfident
+
+        # ----------------------------------------------------------------
+        # NEW: Stage 1.5: Context-enriched evaluation
+        # ----------------------------------------------------------------
+        # Evaluate consistency with clinical history and literature
+        context_penalty = 0.0
+        
+        # Check FHIR clinical history
+        if historian_output:
+            contradicting = historian_output.contradicting_facts if hasattr(historian_output, 'contradicting_facts') else []
+            supporting = historian_output.supporting_facts if hasattr(historian_output, 'supporting_facts') else []
+            
+            # Flag if many contradictions not addressed in impression
+            if len(contradicting) > 2:
+                concern_flags.append(
+                    f"Clinical history contains {len(contradicting)} contradicting facts not addressed in impression"
+                )
+                context_penalty += 0.10
+            
+            # Flag if strong clinical support exists but impression is overly cautious
+            if len(supporting) > 3 and linguistic_certainty < 0.4:
+                concern_flags.append(
+                    "Strong clinical support exists but impression remains overly cautious"
+                )
+                # This is actually GOOD (appropriate caution), so reduce penalty slightly
+                context_penalty -= 0.05
+        
+        # Check literature evidence
+        if literature_output:
+            # Handle both structured and string outputs
+            if isinstance(literature_output, str):
+                # String summary - check if it mentions differentials
+                if "differential" in literature_output.lower() or "alternative" in literature_output.lower():
+                    if not self._mentions_differentials(impression):
+                        concern_flags.append(
+                            "Literature suggests alternative diagnoses not mentioned in impression"
+                        )
+                        context_penalty += 0.08
+            else:
+                # Structured output
+                citations = literature_output.citations if hasattr(literature_output, 'citations') else []
+                if len(citations) > 0:
+                    # Literature found relevant studies
+                    if not self._mentions_differentials(impression):
+                        concern_flags.append(
+                            f"Literature found {len(citations)} relevant studies but impression does not mention differentials"
+                        )
+                        context_penalty += 0.08
+        
+        # Apply context penalty to safety score
+        safety_score = max(0.0, min(1.0, safety_score - context_penalty))
 
         # ----------------------------------------------------------------
         # Stage 2: LLM-based semantic critic  >>> LLM-CRITIC
@@ -210,6 +266,16 @@ class CriticModel:
                 )
 
         return is_overconfident, concern_flags, recommended_hedging, safety_score
+    
+    def _mentions_differentials(self, impression: str) -> bool:
+        """Check if impression mentions differential diagnoses."""
+        impression_lower = impression.lower()
+        differential_patterns = [
+            r'\bdifferential\b', r'\bconsider\b', r'\bvs\.?\b', 
+            r'\bversus\b', r'\balternatively\b', r'\balternative\b'
+        ]
+        return any(re.search(pattern, impression_lower) for pattern in differential_patterns)
+
 
 
 # Singleton instance

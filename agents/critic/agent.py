@@ -15,15 +15,21 @@ def critic_node(state: VerifaiState) -> dict:
     Consumes:
     - Radiologist FINDINGS and IMPRESSION text
     - KLE-based epistemic uncertainty score
+    - Historian FHIR clinical context (NEW)
+    - Literature evidence (NEW)
     
     Produces:
     - Boolean overconfidence flag
-    - Specific concern flags
+    - Specific concern flags (including contextual concerns)
     - Recommended hedging language (if needed)
-    - Safety score for routing
+    - Safety score for routing (adjusted for context)
     """
     rad_output = state.get("radiologist_output")
     kle_uncertainty = state.get("radiologist_kle_uncertainty", 0.5)
+    
+    # NEW: Get enriched context
+    hist_output = state.get("historian_output")
+    lit_output = state.get("literature_output")
     
     if not rad_output:
         return {
@@ -41,11 +47,13 @@ def critic_node(state: VerifaiState) -> dict:
     findings = rad_output.findings
     impression = rad_output.impression
     
-    # Run critic evaluation
+    # NEW: Run critic evaluation with enriched context
     is_overconfident, concern_flags, recommended_hedging, safety_score = critic_model.evaluate(
         findings=findings,
         impression=impression,
-        kle_uncertainty=kle_uncertainty
+        kle_uncertainty=kle_uncertainty,
+        historian_output=hist_output,  # NEW
+        literature_output=lit_output    # NEW
     )
     
     output = CriticOutput(
@@ -59,16 +67,21 @@ def critic_node(state: VerifaiState) -> dict:
     # Lower safety = higher uncertainty
     uncertainty = 1.0 - safety_score
     
-    # Adjust based on context (if re-evaluating with historian/literature)
-    if state.get("historian_output"):
-        uncertainty *= 0.9  # Context reduces uncertainty slightly
-    if state.get("literature_output"):
-        uncertainty *= 0.9  # Evidence reduces uncertainty slightly
+    # No additional adjustment needed - context is already factored into safety_score
     
     trace_entry = (
         f"CRITIC: Safety={safety_score:.2%}, Overconfident={'YES' if is_overconfident else 'NO'}, "
         f"KLE={kle_uncertainty:.3f}, Concerns={len(concern_flags)}"
     )
+    
+    # NEW: Add context trace if available
+    if hist_output or lit_output:
+        context_info = []
+        if hist_output:
+            context_info.append("FHIR")
+        if lit_output:
+            context_info.append("Literature")
+        trace_entry += f" [Context: {'+'.join(context_info)}]"
     
     return {
         "critic_output": output,
