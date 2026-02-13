@@ -242,11 +242,41 @@ def _cached_literature_search(query_hash: str, query: str) -> str:
 def literature_agent_node(state):
     # Load model once (singleton pattern)
     model, tokenizer = load_medgemma()
+    rad_output = state.get("radiologist_output")
+    
+    # NEW: Check for impression instead of hypotheses
+    if not rad_output or not rad_output.impression:
+        return {
+            "literature_output": "No radiologist impression available",
+            "trace": ["LITERATURE: No radiologist output"]
+        }
+    
+    # NEW: Extract diagnostic concept from impression
+    # Use first 300 chars of impression as search query
+    impression_text = rad_output.impression.strip()
+    
+    # Try to extract primary concept using simple pattern matching
+    primary_concept = impression_text
+    patterns = [
+        r'consistent with ([^.,;]+)',
+        r'suggestive of ([^.,;]+)',
+        r'findings (?:concerning for|raise concern for) ([^.,;]+)',
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, impression_text, re.IGNORECASE)
+        if match:
+            primary_concept = match.group(1).strip()
+            break
+    
+    # Limit to 300 chars for query
+    if len(primary_concept) > 300:
+        primary_concept = primary_concept[:300].strip()
 
     # Create query
     query = f"""
-Primary diagnosis hypothesis:
-{state.radiologist_output.hypotheses[0].diagnosis}
+Radiologist's diagnostic impression:
+{primary_concept}
 
 Clinical history summary:
 {state.historian_output.clinical_summary if state.get('historian_output') else 'Not available'}

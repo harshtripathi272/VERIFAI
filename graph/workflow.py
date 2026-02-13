@@ -164,33 +164,40 @@ def build_workflow() -> StateGraph:
     """
     Constructs the VERIFAI LangGraph DAG with debate mechanism.
     
-    NEW Flow:
-    START → Radiologist → Critic → Evidence Gathering (Hist + Lit parallel) → Debate →┬→ Finalize → END
-                                                                                       └→ Chief → END
+    UPDATED Flow (Sequential Reasoning Depth):
+    START → Radiologist → Evidence Gathering (Hist + Lit parallel) → Critic → Debate →┬→ Finalize → END
+                                                                                        └→ Chief → END
+    
+    CRITICAL: Evidence gathering MUST complete before Critic evaluation.
+    This ensures Critic evaluates fully enriched diagnostic context:
+    - Imaging findings (Radiologist)
+    - Clinical history (Historian FHIR data)
+    - Literature evidence (Literature citations)
+    - Epistemic uncertainty (KLE score)
     """
     graph = StateGraph(VerifaiState)
     
     # === Add Nodes ===
     graph.add_node("radiologist", radiologist_node)
+    graph.add_node("evidence_gathering", evidence_gathering_node)  # Parallel Hist + Lit
     graph.add_node("critic", critic_node)
-    graph.add_node("evidence_gathering", evidence_gathering_node)  # NEW: Parallel Hist + Lit
-    graph.add_node("debate", debate_node)  # NEW: Debate mechanism
+    graph.add_node("debate", debate_node)
     graph.add_node("chief", chief_node)
     graph.add_node("finalize", finalize_node)
     
-    # === Define Edges ===
+    # === Define Edges (UPDATED ORDER) ===
     
     # Entry: START → Radiologist
     graph.add_edge(START, "radiologist")
     
-    # Radiologist → Critic (always evaluate first)
-    graph.add_edge("radiologist", "critic")
+    # NEW: Radiologist → Evidence Gathering (gather context FIRST)
+    graph.add_edge("radiologist", "evidence_gathering")
     
-    # Critic → Evidence Gathering (ALWAYS run Historian + Literature)
-    graph.add_edge("critic", "evidence_gathering")
+    # NEW: Evidence Gathering → Critic (evaluate WITH full context)
+    graph.add_edge("evidence_gathering", "critic")
     
-    # Evidence Gathering → Debate
-    graph.add_edge("evidence_gathering", "debate")
+    # Critic → Debate (adversarial reconciliation with enriched context)
+    graph.add_edge("critic", "debate")
     
     # Debate → Conditional: Finalize or Chief
     graph.add_conditional_edges(
