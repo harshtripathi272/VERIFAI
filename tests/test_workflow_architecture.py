@@ -21,15 +21,19 @@ def test_workflow_edge_order():
     
     # Check critical edges exist
     edges = list(compiled.get_graph().edges)
-    edge_strings = [f"{src}->{dst}" for src, dst in edges]
+    # Handle edges that may be tuples of varying length
+    edge_strings = []
+    for edge in edges:
+        if len(edge) >= 2:
+            edge_strings.append(f"{edge[0]}->{edge[1]}")
     
     # Verify key sequence
     assert any("radiologist" in e and "evidence_gathering" in e for e in edge_strings), \
-        "Radiologist should connect to evidence_gathering"
+        f"Radiologist should connect to evidence_gathering. Found edges: {edge_strings}"
     assert any("evidence_gathering" in e and "critic" in e for e in edge_strings), \
-        "Evidence gathering should connect to critic"
+        f"Evidence gathering should connect to critic. Found edges: {edge_strings}"
     assert any("critic" in e and "debate" in e for e in edge_strings), \
-        "Critic should connect to debate"
+        f"Critic should connect to debate. Found edges: {edge_strings}"
     
     print("✓ Workflow edges are in correct sequential order")
 
