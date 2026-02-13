@@ -38,9 +38,7 @@ def radiologist_node(state: VerifaiState) -> dict:
         }
         
     # Determine view (heuristic or default)
-    # Since we can't use metadata, we default to "AP" or try to infer from filename if possible
-    # For now, safe default as per request
-    view = "AP"
+    view = state["view"]
     
     for i in range(n_samples):
         # Call model with image path and view

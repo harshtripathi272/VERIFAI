@@ -67,11 +67,17 @@ Your job is to detect:
 2. Missing reasonable differential diagnoses
 3. Unjustified certainty in the impression
 4. Logical gaps between findings and impression
+5. Inconsistencies with clinical history (if available)
+6. Failure to consider literature evidence (if available)
 
 Given:
 - FINDINGS text
 - IMPRESSION text
 - Epistemic uncertainty score (0–1)
+- Clinical history from FHIR (optional)
+- Literature evidence (optional)
+
+Consider the broader diagnostic context when evaluating.
 
 Return STRICT JSON with:
 
@@ -143,12 +149,49 @@ class MedGemmaCritic:
     # ---- prompt construction -----------------------------------------------
 
     @staticmethod
-    def _build_user_prompt(findings: str, impression: str, uncertainty: float) -> str:
-        return (
-            f"FINDINGS:\n{findings}\n\n"
-            f"IMPRESSION:\n{impression}\n\n"
+    def _build_user_prompt(
+        findings: str, 
+        impression: str, 
+        uncertainty: float,
+        historian_output=None,
+        literature_output=None
+    ) -> str:
+        """Build user prompt with enriched context."""
+        prompt_parts = [
+            f"FINDINGS:\n{findings}\n",
+            f"IMPRESSION:\n{impression}\n",
             f"Epistemic uncertainty score: {uncertainty:.4f}"
-        )
+        ]
+        
+        # Add clinical history context if available
+        if historian_output:
+            supporting = historian_output.supporting_facts if hasattr(historian_output, 'supporting_facts') else []
+            contradicting = historian_output.contradicting_facts if hasattr(historian_output, 'contradicting_facts') else []
+            
+            if supporting or contradicting:
+                prompt_parts.append("\nCLINICAL HISTORY (FHIR):")
+                if supporting:
+                    prompt_parts.append(f"Supporting facts: {len(supporting)} evidence points")
+                    for fact in supporting[:3]:  # Top 3
+                        prompt_parts.append(f"  - {fact.description}")
+                if contradicting:
+                    prompt_parts.append(f"Contradicting facts: {len(contradicting)} evidence points")
+                    for fact in contradicting[:3]:  # Top 3
+                        prompt_parts.append(f"  - {fact.description}")
+        
+        # Add literature context if available
+        if literature_output:
+            if isinstance(literature_output, str):
+                # String summary
+                if len(literature_output) > 50:  # Has meaningful content
+                    prompt_parts.append(f"\nLITERATURE EVIDENCE:\n{literature_output[:500]}")
+            else:
+                # Structured output
+                citations = literature_output.citations if hasattr(literature_output, 'citations') else []
+                if citations:
+                    prompt_parts.append(f"\nLITERATURE EVIDENCE: {len(citations)} relevant studies found")
+        
+        return "\n".join(prompt_parts)
 
     # ---- inference ---------------------------------------------------------
 
@@ -187,25 +230,39 @@ class MedGemmaCritic:
     # ---- mock inference ----------------------------------------------------
 
     @staticmethod
-    def _mock_inference(findings: str, impression: str, uncertainty: float) -> LLMCriticOutput:
+    def _mock_inference(
+        findings: str, 
+        impression: str, 
+        uncertainty: float,
+        historian_output=None,
+        literature_output=None
+    ) -> LLMCriticOutput:
         """Return a deterministic mock for testing without GPU."""
         # Simulate: if uncertainty is high and impression sounds certain, flag it
         is_assertive = any(
             kw in impression.lower()
             for kw in ("definite", "certain", "diagnostic of", "pathognomonic", "confirms")
         )
+        
+        # Check for context mismatches
+        context_issues = []
+        if historian_output:
+            contradicting = historian_output.contradicting_facts if hasattr(historian_output, 'contradicting_facts') else []
+            if len(contradicting) > 1:
+                context_issues.append("Clinical history contradictions not addressed")
+        
         if uncertainty > 0.5 and is_assertive:
             return LLMCriticOutput(
                 overconfidence_reason="Report uses definitive language despite high epistemic uncertainty.",
                 missing_differentials=["Atypical infection", "Malignancy"],
                 justification_gap="Findings do not fully support the level of certainty expressed.",
                 suggested_hedging="Consider 'findings are suggestive of' rather than definitive phrasing.",
-                semantic_risk_score=0.65,
+                semantic_risk_score=0.65 + (0.1 if context_issues else 0.0),
             )
         return LLMCriticOutput(
             overconfidence_reason=None,
             missing_differentials=[],
-            justification_gap=None,
+            justification_gap="\n".join(context_issues) if context_issues else None,
             suggested_hedging=None,
             semantic_risk_score=0.1,
         )
@@ -217,9 +274,18 @@ class MedGemmaCritic:
         findings: str,
         impression: str,
         kle_uncertainty: float,
+        historian_output=None,  # NEW: Clinical history context
+        literature_output=None   # NEW: Literature evidence
     ) -> Optional[LLMCriticOutput]:
         """
-        Run semantic critique on a radiology report.
+        Run semantic critique on a radiology report with enriched context.
+
+        Args:
+            findings: FINDINGS section text
+            impression: IMPRESSION section text
+            kle_uncertainty: Epistemic uncertainty from KLE (0-1)
+            historian_output: HistorianOutput with FHIR facts (optional)
+            literature_output: LiteratureOutput or string summary (optional)
 
         Returns ``LLMCriticOutput`` on success, or ``None`` if inference
         fails (timeout, bad JSON, exception).  The caller should treat
@@ -229,7 +295,10 @@ class MedGemmaCritic:
 
         # ------ mock path ---------------------------------------------------
         if settings.MOCK_MODELS:
-            result = self._mock_inference(findings, impression, kle_uncertainty)
+            result = self._mock_inference(
+                findings, impression, kle_uncertainty,
+                historian_output, literature_output
+            )
             logger.info(
                 "CRITIC-LLM (mock): Semantic risk=%.2f, Missing differentials=%d",
                 result.semantic_risk_score,
@@ -243,7 +312,10 @@ class MedGemmaCritic:
             return None
 
         try:
-            user_prompt = self._build_user_prompt(findings, impression, kle_uncertainty)
+            user_prompt = self._build_user_prompt(
+                findings, impression, kle_uncertainty,
+                historian_output, literature_output
+            )
             raw_output = self._run_inference(user_prompt)
 
             # Strip potential markdown fences

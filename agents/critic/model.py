@@ -101,9 +101,9 @@ class CriticModel:
         Returns:
             Tuple of (is_overconfident, concern_flags, recommended_hedging, safety_score)
         """
-        # ----------------------------------------------------------------
+
         # Stage 1: Rule-based linguistic analysis  (unchanged)
-        # ----------------------------------------------------------------
+        
 
         # Analyze linguistic certainty in the impression
         linguistic_certainty, markers = self._analyze_linguistic_certainty(impression)
@@ -150,9 +150,9 @@ class CriticModel:
         if is_overconfident:
             safety_score = min(safety_score, 0.5)  # Cap safety if overconfident
 
-        # ----------------------------------------------------------------
+        
         # NEW: Stage 1.5: Context-enriched evaluation
-        # ----------------------------------------------------------------
+        
         # Evaluate consistency with clinical history and literature
         context_penalty = 0.0
         
@@ -201,9 +201,9 @@ class CriticModel:
         # Apply context penalty to safety score
         safety_score = max(0.0, min(1.0, safety_score - context_penalty))
 
-        # ----------------------------------------------------------------
+
         # Stage 2: LLM-based semantic critic  >>> LLM-CRITIC
-        # ----------------------------------------------------------------
+        
         # Only invoked when:
         #   1. ENABLE_LLM_CRITIC is True
         #   2. KLE uncertainty is high OR rule-based already flagged overconfidence
@@ -215,6 +215,8 @@ class CriticModel:
                     findings=findings,
                     impression=impression,
                     kle_uncertainty=kle_uncertainty,
+                    historian_output=historian_output,  # NEW: Pass enriched context
+                    literature_output=literature_output  # NEW: Pass enriched context
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(

@@ -150,6 +150,7 @@ class VerifaiState(TypedDict):
     image_path: str
     patient_id: str | None
     dicom_metadata: dict[str, Any] | None
+    view : str | None
     
     # === Agent Outputs ===
     radiologist_output: RadiologistOutput | None
