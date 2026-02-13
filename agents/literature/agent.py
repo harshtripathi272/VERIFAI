@@ -243,45 +243,52 @@ def literature_agent_node(state):
     # Load model once (singleton pattern)
     model, tokenizer = load_medgemma()
     rad_output = state.get("radiologist_output")
+    chexbert_output = state.get("chexbert_output")
     
-    # NEW: Check for impression instead of hypotheses
-    if not rad_output or not rad_output.impression:
+    # Validate inputs: Require radiologist output with BOTH findings/impression
+    if not rad_output:
         return {
-            "literature_output": "No radiologist impression available",
+            "literature_output": "No radiologist output available",
             "trace": ["LITERATURE: No radiologist output"]
         }
+        
+    if not rad_output.impression or not rad_output.findings:
+        return {
+            "literature_output": "Incomplete radiologist report (missing findings or impression)",
+            "trace": ["LITERATURE: Missing findings or impression in radiologist report"]
+        }
     
-    # NEW: Extract diagnostic concept from impression
-    # Use first 300 chars of impression as search query
-    impression_text = rad_output.impression.strip()
+    # Build comprehensive search query from multiple sources
+    query_parts = []
     
-    # Try to extract primary concept using simple pattern matching
-    primary_concept = impression_text
-    patterns = [
-        r'consistent with ([^.,;]+)',
-        r'suggestive of ([^.,;]+)',
-        r'findings (?:concerning for|raise concern for) ([^.,;]+)',
-    ]
+    # 1. Add radiologist FINDINGS (detailed observations)
+    if rad_output.findings:
+        query_parts.append(f"Visual findings: {rad_output.findings[:200]}")
     
-    for pattern in patterns:
-        match = re.search(pattern, impression_text, re.IGNORECASE)
-        if match:
-            primary_concept = match.group(1).strip()
-            break
+    # 2. Add radiologist IMPRESSION (diagnostic conclusion)
+    query_parts.append(f"Diagnostic impression: {rad_output.impression[:200]}")
     
-    # Limit to 300 chars for query
-    if len(primary_concept) > 300:
-        primary_concept = primary_concept[:300].strip()
-
+    # 3. Add CheXbert structured labels - SEPARATE confirmed vs uncertain
+    if chexbert_output and chexbert_output.labels:
+        # Filter present conditions
+        confirmed = [cond for cond, status in chexbert_output.labels.items() if status == "present"]
+        # Filter uncertain conditions
+        uncertain = [cond for cond, status in chexbert_output.labels.items() if status == "uncertain"]
+        
+        # Only add if we have values
+        if confirmed:
+            query_parts.append(f"Confirmed findings: {', '.join(confirmed)}")
+        if uncertain:
+            query_parts.append(f"Uncertain findings: {', '.join(uncertain)}")
+    
     # Create query
     query = f"""
-Radiologist's diagnostic impression:
-{primary_concept}
+{chr(10).join(query_parts)}
 
 Clinical history summary:
-{state.historian_output.clinical_summary if state.get('historian_output') else 'Not available'}
+{state.get('historian_output').clinical_summary if state.get('historian_output') else 'Not available'}
 
-Retrieve supporting or contradicting biomedical literature.
+Retrieve supporting or contradicting biomedical literature for the above findings and diagnoses.
 """
 
     # Use cached search if possible
