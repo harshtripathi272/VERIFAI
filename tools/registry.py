@@ -137,11 +137,6 @@ class MCPToolRegistry:
 # Global registry instance
 registry = MCPToolRegistry()
 
-
-# =============================================================================
-# REGISTER TOOLS
-# =============================================================================
-
 # Import and register tools from agent modules
 def _register_all_tools():
     """Register all available tools from agent modules."""

@@ -8,9 +8,9 @@ from typing import TypedDict, Optional, Annotated, Any
 from pydantic import BaseModel, Field
 
 
-# =============================================================================
+
 # REDUCER FUNCTIONS
-# =============================================================================
+
 
 def append_trace(left: list[str], right: list[str]) -> list[str]:
     """Reducer to accumulate audit trail entries."""
@@ -21,9 +21,9 @@ def append_trace(left: list[str], right: list[str]) -> list[str]:
     return left + right
 
 
-# =============================================================================
+
 # DOMAIN MODELS (Pydantic for validation)
-# =============================================================================
+
 
 class VisualFinding(BaseModel):
     """A single visual finding from radiologist."""
@@ -33,36 +33,27 @@ class VisualFinding(BaseModel):
     bounding_box: list[float] | None = Field(None, description="Optional [x, y, w, h] normalized coords")
 
 
-class DiagnosisHypothesis(BaseModel):
-    """A ranked diagnostic hypothesis."""
-    diagnosis: str
-    confidence: float = Field(..., ge=0.0, le=1.0)
-    icd10_code: str | None = None
-
-
-class InternalSignals(BaseModel):
-    """Raw predictive signals from the radiologist model."""
-    logits_top2: list[float] = Field(default_factory=list, description="Top 2 logit values")
-    logit_margin: float = Field(..., description="Difference between top 2 logits")
-    predictive_entropy: float = Field(..., description="Shannon entropy of prediction distribution")
-    attention_dispersion: float = Field(..., description="Gini coefficient of attention weights")
-    prediction_stability: float = Field(..., description="Std across MC dropout runs")
-
-
 class RadiologistOutput(BaseModel):
-    """Structured output from Radiologist Agent."""
-    findings: list[VisualFinding] = Field(default_factory=list)
-    hypotheses: list[DiagnosisHypothesis] = Field(default_factory=list)
-    internal_signals: InternalSignals
-    reasoning: str = ""
+    """Plain-text output from Radiologist Agent.
+    
+    Contains only narrative FINDINGS and IMPRESSION sections.
+    No confidence scores, probabilities, or structured outputs.
+    Epistemic uncertainty is computed externally via KLE.
+    """
+    findings: str = Field(..., description="Textual FINDINGS section based on visual evidence")
+    impression: str = Field(..., description="Textual IMPRESSION section with diagnostic interpretation")
 
 
 class CriticOutput(BaseModel):
-    """Output from Critic Agent (overconfidence detector)."""
-    overconfidence_probability: float = Field(..., ge=0.0, le=1.0)
-    counter_hypotheses: list[str] = Field(default_factory=list)
-    concern_signals: list[str] = Field(default_factory=list)
-    calculated_uncertainty: float = Field(..., ge=0.0, le=1.0)
+    """Output from Critic Agent.
+    
+    Evaluates consistency between linguistic certainty in the IMPRESSION
+    and the externally computed epistemic uncertainty score (KLE).
+    """
+    is_overconfident: bool = Field(..., description="True if text is overly assertive given uncertainty")
+    concern_flags: list[str] = Field(default_factory=list, description="Specific consistency issues detected")
+    recommended_hedging: str | None = Field(None, description="Suggested rephrasing to match uncertainty")
+    safety_score: float = Field(..., ge=0.0, le=1.0, description="Overall safety/appropriateness score")
 
 
 class HistorianFact(BaseModel):
@@ -109,9 +100,9 @@ class FinalDiagnosis(BaseModel):
     explanation: str = ""
 
 
-# =============================================================================
+
 # DEBATE MODELS
-# =============================================================================
+
 
 class DebateArgument(BaseModel):
     """A single argument in the debate."""
@@ -144,9 +135,9 @@ class DebateOutput(BaseModel):
     total_confidence_adjustment: float = 0.0
 
 
-# =============================================================================
+
 # LANGGRAPH STATE
-# =============================================================================
+
 
 class VerifaiState(TypedDict):
     """
@@ -162,6 +153,7 @@ class VerifaiState(TypedDict):
     image_path: str
     patient_id: str | None
     dicom_metadata: dict[str, Any] | None
+    view : str | None
     
     # === Agent Outputs ===
     radiologist_output: RadiologistOutput | None
@@ -174,6 +166,9 @@ class VerifaiState(TypedDict):
     current_uncertainty: float
     routing_decision: str
     steps_taken: int
+    
+    # === KLE Uncertainty (for logging/analysis) ===
+    radiologist_kle_uncertainty: float | None  # Early epistemic instability score
     
     # === Final Result ===
     final_diagnosis: FinalDiagnosis | None

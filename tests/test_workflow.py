@@ -1,10 +1,11 @@
 """Quick test of the VERIFAI LangGraph workflow."""
 
-from app.graph import verifai_graph
+from graph.workflow import app as verifai_graph
 
 # Initialize state
 initial_state = {
-    "image_path": "test.png",
+    "image_path": "./img1.jpg",
+    "view": "AP",
     "patient_id": None,
     "radiologist_output": None,
     "critic_output": None,
@@ -33,7 +34,7 @@ print("\n--- RESULT ---")
 final_dx = result.get("final_diagnosis")
 if final_dx:
     print(f"Diagnosis: {final_dx.diagnosis}")
-    print(f"Confidence: {final_dx.confidence:.0%}")
+    print(f"Confidence: {final_dx.calibrated_confidence:.0%}")
     print(f"Deferred: {final_dx.deferred}")
     if final_dx.deferral_reason:
         print(f"Reason: {final_dx.deferral_reason}")

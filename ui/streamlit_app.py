@@ -144,7 +144,7 @@ with col2:
                         st.markdown(f"**Final Uncertainty:** :{unc_color}[{unc:.1%}]")
                         
                         # Tabs for evidence
-                        tabs = st.tabs(["📊 Visual", "📋 Clinical", "📚 Literature", "🎯 Critic", "📝 Trace"])
+                        tabs = st.tabs(["📊 Visual", "📋 Clinical", "📚 Literature", "🧠 Debate", "🎯 Critic", "📝 Trace"])
                         
                         evidence = data["evidence_packet"]
                         
@@ -152,13 +152,9 @@ with col2:
                             if evidence.get("visual"):
                                 v = evidence["visual"]
                                 st.subheader("Findings")
-                                for f in v.get("findings", []):
-                                    st.markdown(f"- **{f['location']}**: {f['observation']} (severity: {f['severity']:.0%})")
-                                st.subheader("Hypotheses")
-                                for h in v.get("hypotheses", []):
-                                    st.progress(h["confidence"], text=f"{h['diagnosis']}: {h['confidence']:.0%}")
-                                if v.get("reasoning"):
-                                    st.info(v["reasoning"])
+                                st.write(v.get("findings", "No findings available."))
+                                st.subheader("Impression")
+                                st.write(v.get("impression", "No impression available."))
                             else:
                                 st.caption("No visual data")
                         
@@ -184,8 +180,34 @@ with col2:
                                         st.markdown(f"**Relevance:** {cit.get('relevance_summary', '')}")
                             else:
                                 st.caption("No literature retrieved")
-                        
+
                         with tabs[3]:
+                            if evidence.get("debate"):
+                                d = evidence["debate"]
+                                st.info(d.get("debate_summary", "Debate completed."))
+                                
+                                for r in d.get("rounds", []):
+                                    with st.expander(f"Round {r['round_number']} ({'Consensus Reached' if r.get('round_consensus') else 'No Consensus'})"):
+                                        st.caption(f"Confidence Delta: {r.get('confidence_delta', 0):+.2%}")
+                                        
+                                        # Critic
+                                        if r.get("critic_challenge"):
+                                            c = r["critic_challenge"]
+                                            st.warning(f"**Critic ({c.get('position', 'challenge')}):** {c.get('argument', '')}")
+                                        
+                                        # Historian
+                                        if r.get("historian_response"):
+                                            h = r["historian_response"]
+                                            st.info(f"**Historian ({h.get('position', 'response')}):** {h.get('argument', '')}")
+                                            
+                                        # Literature
+                                        if r.get("literature_response"):
+                                            l = r["literature_response"]
+                                            st.success(f"**Literature ({l.get('position', 'response')}):** {l.get('argument', '')}")
+                            else:
+                                st.caption("No debate history")
+
+                        with tabs[4]:
                             if evidence.get("critic"):
                                 cr = evidence["critic"]
                                 st.metric("Overconfidence", f"{cr['overconfidence_probability']:.0%}")
@@ -194,7 +216,7 @@ with col2:
                             else:
                                 st.caption("No critic assessment")
                         
-                        with tabs[4]:
+                        with tabs[5]:
                             for line in data["trace"]:
                                 st.code(line, language="text")
                     else:

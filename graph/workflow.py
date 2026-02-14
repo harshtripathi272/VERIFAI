@@ -286,33 +286,40 @@ def build_workflow() -> StateGraph:
     Constructs the VERIFAI LangGraph DAG with debate mechanism.
     All nodes are wrapped with automatic SQL logging.
     
-    NEW Flow:
-    START → Radiologist → Critic → Evidence Gathering (Hist + Lit parallel) → Debate →┬→ Finalize → END
-                                                                                       └→ Chief → END
+    UPDATED Flow (Sequential Reasoning Depth):
+    START → Radiologist → Evidence Gathering (Hist + Lit parallel) → Critic → Debate →┬→ Finalize → END
+                                                                                        └→ Chief → END
+    
+    CRITICAL: Evidence gathering MUST complete before Critic evaluation.
+    This ensures Critic evaluates fully enriched diagnostic context:
+    - Imaging findings (Radiologist)
+    - Clinical history (Historian FHIR data)
+    - Literature evidence (Literature citations)
+    - Epistemic uncertainty (KLE score)
     """
     graph = StateGraph(VerifaiState)
     
-    # === Add Logged Nodes ===
-    graph.add_node("radiologist", logged_radiologist_node)
-    graph.add_node("critic", logged_critic_node)
-    graph.add_node("evidence_gathering", logged_evidence_gathering_node)
-    graph.add_node("debate", logged_debate_node)
-    graph.add_node("chief", logged_chief_node)
-    graph.add_node("finalize", logged_finalize_node)
+    # === Add Nodes ===
+    graph.add_node("radiologist", radiologist_node)
+    graph.add_node("evidence_gathering", evidence_gathering_node)  # Parallel Hist + Lit
+    graph.add_node("critic", critic_node)
+    graph.add_node("debate", debate_node)
+    graph.add_node("chief", chief_node)
+    graph.add_node("finalize", finalize_node)
     
     # === Define Edges ==
     
     # Entry: START → Radiologist
     graph.add_edge(START, "radiologist")
     
-    # Radiologist → Critic (always evaluate first)
-    graph.add_edge("radiologist", "critic")
+    # NEW: Radiologist → Evidence Gathering (gather context FIRST)
+    graph.add_edge("radiologist", "evidence_gathering")
     
-    # Critic → Evidence Gathering (ALWAYS run Historian + Literature)
-    graph.add_edge("critic", "evidence_gathering")
+    # NEW: Evidence Gathering → Critic (evaluate WITH full context)
+    graph.add_edge("evidence_gathering", "critic")
     
-    # Evidence Gathering → Debate
-    graph.add_edge("evidence_gathering", "debate")
+    # Critic → Debate (adversarial reconciliation with enriched context)
+    graph.add_edge("critic", "debate")
     
     # Debate → Conditional: Finalize or Chief
     graph.add_conditional_edges(
@@ -335,44 +342,44 @@ def build_workflow() -> StateGraph:
 
 # === LEGACY WORKFLOW (for backward compatibility) ===
 
-def build_legacy_workflow() -> StateGraph:
-    """
-    Original workflow with uncertainty-gated routing.
-    Use this if you prefer the old behavior.
-    """
-    from graph.router import router_node, route_conditional_edge
+# def build_legacy_workflow() -> StateGraph:
+#     """
+#     Original workflow with uncertainty-gated routing.
+#     Use this if you prefer the old behavior.
+#     """
+#     from graph.router import router_node, route_conditional_edge
     
-    graph = StateGraph(VerifaiState)
+#     graph = StateGraph(VerifaiState)
     
-    graph.add_node("radiologist", logged_radiologist_node)
-    graph.add_node("critic", logged_critic_node)
-    graph.add_node("router", router_node)
-    graph.add_node("historian", historian_node)
-    graph.add_node("literature", literature_node)
-    graph.add_node("chief", logged_chief_node)
-    graph.add_node("finalize", logged_finalize_node)
+#     graph.add_node("radiologist", radiologist_node)
+#     graph.add_node("critic", critic_node)
+#     graph.add_node("router", router_node)
+#     graph.add_node("historian", historian_node)
+#     graph.add_node("literature", literature_node)
+#     graph.add_node("chief", chief_node)
+#     graph.add_node("finalize", finalize_node)
     
-    graph.add_edge(START, "radiologist")
-    graph.add_edge("radiologist", "critic")
-    graph.add_edge("critic", "router")
+#     graph.add_edge(START, "radiologist")
+#     graph.add_edge("radiologist", "critic")
+#     graph.add_edge("critic", "router")
     
-    graph.add_conditional_edges(
-        "router",
-        route_conditional_edge,
-        {
-            "historian": "historian",
-            "literature": "literature", 
-            "chief": "chief",
-            "finalize": "finalize"
-        }
-    )
+#     graph.add_conditional_edges(
+#         "router",
+#         route_conditional_edge,
+#         {
+#             "historian": "historian",
+#             "literature": "literature", 
+#             "chief": "chief",
+#             "finalize": "finalize"
+#         }
+#     )
     
-    graph.add_edge("historian", "critic")
-    graph.add_edge("literature", "critic")
-    graph.add_edge("chief", END)
-    graph.add_edge("finalize", END)
+#     graph.add_edge("historian", "critic")
+#     graph.add_edge("literature", "critic")
+#     graph.add_edge("chief", END)
+#     graph.add_edge("finalize", END)
     
-    return graph
+#     return graph
 
 
 # === Compile Workflows ===
@@ -381,6 +388,6 @@ def build_legacy_workflow() -> StateGraph:
 workflow = build_workflow()
 app = workflow.compile()
 
-# Legacy workflow available if needed
-legacy_workflow = build_legacy_workflow()
-legacy_app = legacy_workflow.compile()
+# # Legacy workflow available if needed
+# legacy_workflow = build_legacy_workflow()
+# legacy_app = legacy_workflow.compile()
