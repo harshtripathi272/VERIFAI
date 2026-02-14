@@ -12,40 +12,10 @@ import json
 from typing import List, Optional
 from pydantic import BaseModel, Field
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from graph.state import DebateArgument, DebateRound, DebateOutput
+import re
 
 from app.config import settings
-
-
-class DebateArgument(BaseModel):
-    """A single argument in the debate."""
-    agent: str  # "critic", "historian", "literature"
-    position: str  # "challenge", "support", "refine"
-    argument: str
-    confidence_impact: float = Field(0.0, description="How this affects confidence (-1 to +1)")
-    evidence_refs: List[str] = Field(default_factory=list)
-
-
-class DebateRound(BaseModel):
-    """A single round of debate."""
-    round_number: int
-    critic_challenge: Optional[DebateArgument] = None
-    historian_response: Optional[DebateArgument] = None
-    literature_response: Optional[DebateArgument] = None
-    round_consensus: Optional[str] = None  # None if no consensus
-    confidence_delta: float = 0.0
-
-
-class DebateOutput(BaseModel):
-    """Final output from debate process."""
-    rounds: List[DebateRound] = Field(default_factory=list)
-    final_consensus: bool = False
-    consensus_diagnosis: Optional[str] = None
-    consensus_confidence: float = 0.0
-    escalate_to_chief: bool = False
-    escalation_reason: Optional[str] = None
-    debate_summary: str = ""
-    total_confidence_adjustment: float = 0.0
-
 
 class DebateOrchestrator:
     """
@@ -64,6 +34,42 @@ class DebateOrchestrator:
         self.consensus_threshold = consensus_threshold  # Max disagreement for consensus
         self.executor = ThreadPoolExecutor(max_workers=2)
     
+    def _extract_primary_diagnosis(self, impression: str) -> str:
+        """
+        Extract the primary diagnosis from the IMPRESSION text.
+        
+        Simple heuristic: Look for phrases after "consistent with", "suggestive of", etc.
+        """
+        if not impression:
+            return "Unknown"
+        
+        impression_lower = impression.lower()
+        
+        # Try to extract diagnosis from common patterns
+        patterns = [
+            r'consistent with ([^.;]+)',
+            r'suggestive of ([^.;]+)',
+            r'diagnosis[:\s]+([^.;]+)',
+            r'impression[:\s]+([^.;]+)',
+            r'findings.{0,30}(?:raise concern for|concerning for) ([^.;]+)'
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, impression_lower)
+            if match:
+                diagnosis = match.group(1).strip()
+                # Clean up and capitalize
+                diagnosis = diagnosis.split(',')[0]  # Take first part before comma
+                diagnosis = ' '.join(word.capitalize() for word in diagnosis.split())
+                return diagnosis
+        
+        # Fallback: extract first sentence
+        first_sentence = impression.split('.')[0].strip()
+        if len(first_sentence) < 100:
+            return first_sentence
+        
+        return "Complex diagnostic impression"
+    
     def _generate_critic_challenge(
         self,
         radiologist_output,
@@ -75,22 +81,25 @@ class DebateOrchestrator:
         
         # First round: Use initial concerns
         if round_num == 1:
-            concerns = critic_output.concern_signals if critic_output else []
-            counter_hyps = critic_output.counter_hypotheses if critic_output else []
+            concerns = critic_output.concern_flags if critic_output else []
             
-            if concerns:
-                challenge_text = f"Challenge: {'; '.join(concerns[:2])}"
-                if counter_hyps:
-                    challenge_text += f" Consider alternatives: {', '.join(counter_hyps[:2])}"
+            if concerns and critic_output.is_overconfident:
+                challenge_text = f"Safety concern detected: {'; '.join(concerns[:2])}"
+                if critic_output.recommended_hedging:
+                    challenge_text += f" Suggestion: {critic_output.recommended_hedging[:100]}"
+            elif concerns:
+                challenge_text = f"Moderate concerns: {'; '.join(concerns[:2])}"
             else:
                 challenge_text = "No significant concerns identified. Requesting evidence validation."
+            
+            confidence_impact = -0.05 if critic_output.is_overconfident else 0.0
             
             return DebateArgument(
                 agent="critic",
                 position="challenge",
                 argument=challenge_text,
-                confidence_impact=-0.05 if concerns else 0.0,
-                evidence_refs=[f"overconfidence_prob={critic_output.overconfidence_probability:.2f}" if critic_output else ""]
+                confidence_impact=confidence_impact,
+                evidence_refs=[f"safety_score={critic_output.safety_score:.2f}" if critic_output else ""]
             )
         
         # Subsequent rounds: Challenge based on previous responses
@@ -308,10 +317,19 @@ class DebateOrchestrator:
         rounds: List[DebateRound] = []
         total_adjustment = 0.0
         
-        # Initial confidence from radiologist
+        # Initial confidence: Use inverse of KLE uncertainty as proxy
+        # or extract from text if possible
         initial_confidence = 0.5
-        if radiologist_output and radiologist_output.hypotheses:
-            initial_confidence = radiologist_output.hypotheses[0].confidence
+        
+        if radiologist_output:
+            # Try to get KLE uncertainty from somewhere (would be passed in state)
+            # For now, use a default or try to infer from critic
+            if critic_output and hasattr(critic_output, 'safety_score'):
+                # Use safety score as proxy for confidence
+                initial_confidence = critic_output.safety_score
+            else:
+                # Moderate default
+                initial_confidence = 0.6
         
         current_confidence = initial_confidence
         
@@ -355,7 +373,10 @@ class DebateOrchestrator:
             
             # If consensus reached, stop
             if consensus_reached:
-                diagnosis = radiologist_output.hypotheses[0].diagnosis if radiologist_output and radiologist_output.hypotheses else None
+                # Extract diagnosis from impression text
+                diagnosis = None
+                if radiologist_output:
+                    diagnosis = self._extract_primary_diagnosis(radiologist_output.impression)
                 
                 return DebateOutput(
                     rounds=rounds,
@@ -368,7 +389,9 @@ class DebateOrchestrator:
                 )
         
         # No consensus after max rounds -> escalate to Chief
-        diagnosis = radiologist_output.hypotheses[0].diagnosis if radiologist_output and radiologist_output.hypotheses else None
+        diagnosis = None
+        if radiologist_output:
+            diagnosis = self._extract_primary_diagnosis(radiologist_output.impression)
         
         return DebateOutput(
             rounds=rounds,
@@ -387,6 +410,7 @@ def debate_node(state) -> dict:
     Debate node for LangGraph workflow.
     
     Runs adversarial debate between Critic and Evidence Team (Historian + Literature).
+    Consensus is determined solely by DebateOrchestrator's confidence impact heuristics.
     """
     orchestrator = DebateOrchestrator(
         max_rounds=settings.DEBATE_MAX_ROUNDS if hasattr(settings, 'DEBATE_MAX_ROUNDS') else 3,
@@ -426,3 +450,5 @@ def debate_node(state) -> dict:
         "current_uncertainty": new_uncertainty,
         "trace": trace_entries
     }
+
+

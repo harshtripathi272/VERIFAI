@@ -2,65 +2,90 @@
 Radiologist Agent Node
 
 LangGraph node that processes chest X-ray images.
+Uses KLE-based epistemic uncertainty estimation via multiple text samples.
 """
 
-from graph.state import (
-    VerifaiState, 
-    RadiologistOutput,
-    VisualFinding,
-    DiagnosisHypothesis,
-    InternalSignals
-)
-from .model import get_image_embedding, generate_findings
-
+from graph.state import VerifaiState, RadiologistOutput
+from .model import generate_findings
+from app.config import settings
+from uncertainty.kle import compute_semantic_uncertainty
 
 def radiologist_node(state: VerifaiState) -> dict:
     """
     Radiologist Agent: Visual analysis of chest X-ray.
     
     Uses MedSigLIP for visual encoding and MedGemma-4B for reasoning.
-    Produces structured findings, hypotheses, and internal uncertainty signals.
+    Produces plain-text FINDINGS and IMPRESSION sections.
+    
+    Computes KLE-based semantic uncertainty by generating multiple independent
+    diagnosis samples and measuring their semantic dispersion using kernel language entropy.
+    Uncertainty is computed externally and stored separately from the report text.
     """
     image_path = state["image_path"]
-    dicom_metadata = state.get("dicom_metadata")
+    # === MULTI-SAMPLE GENERATION FOR KLE ===
+    # Generate N independent samples for uncertainty estimation
+    n_samples = getattr(settings, 'KLE_NUM_SAMPLES', 5)
     
-    # Get visual embedding
-    embedding = get_image_embedding(image_path)
+    samples = []
+    primary_report = None
     
-    # Generate structured output
-    raw_output = generate_findings(embedding, dicom_metadata)
+    # Verify file exists
+    import os
+    if not os.path.exists(image_path):
+        return {
+            "radiologist_output": None,
+            "trace": [f"RADIOLOGIST: Error - Image not found: {image_path}"]
+        }
+        
+    # Determine view (heuristic or default)
+    view = state["view"]
     
-    # Parse into Pydantic models
-    findings = [
-        VisualFinding(**f) for f in raw_output.get("findings", [])
-    ]
+    for i in range(n_samples):
+        # Call model with image path and view
+        raw_output = generate_findings(image_path, view=view)
+        
+        if i == 0:
+            # Use first sample as the primary report
+            primary_report = raw_output
+        
+        # Collect impression text for KLE uncertainty calculation
+        impression_text = raw_output.get("impression", "")
+        if impression_text:
+            samples.append(impression_text)
     
-    hypotheses = [
-        DiagnosisHypothesis(**h) for h in raw_output.get("hypotheses", [])
-    ]
-    
-    signals_data = raw_output.get("internal_signals", {})
-    signals = InternalSignals(
-        logits_top2=signals_data.get("logits_top2", [0.0, 0.0]),
-        logit_margin=signals_data.get("logit_margin", 0.0),
-        predictive_entropy=signals_data.get("predictive_entropy", 1.0),
-        attention_dispersion=signals_data.get("attention_dispersion", 0.5),
-        prediction_stability=signals_data.get("prediction_stability", 0.5)
-    )
-    
+    # Create RadiologistOutput from primary sample
     output = RadiologistOutput(
-        findings=findings,
-        hypotheses=hypotheses,
-        internal_signals=signals,
-        reasoning=raw_output.get("reasoning", "")
+        findings=primary_report.get("findings", ""),
+        impression=primary_report.get("impression", "")
     )
+    
+    # === KLE SEMANTIC UNCERTAINTY ESTIMATION ===
+    kle_uncertainty = None
+    
+    if len(samples) >= 2:
+        kle_uncertainty = compute_semantic_uncertainty(samples)
     
     # Build trace entry
-    top_dx = hypotheses[0].diagnosis if hypotheses else "Unknown"
-    top_conf = hypotheses[0].confidence if hypotheses else 0.0
-    trace_entry = f"RADIOLOGIST: {len(findings)} findings, Top Dx: {top_dx} ({top_conf:.0%})"
+    findings_preview = output.findings[:100] + "..." if len(output.findings) > 100 else output.findings
+    impression_preview = output.impression[:100] + "..." if len(output.impression) > 100 else output.impression
     
-    return {
+    trace_entries = [
+        f"RADIOLOGIST: Generated report from {n_samples} samples",
+        f"RADIOLOGIST: Findings preview: {findings_preview}",
+        f"RADIOLOGIST: Impression preview: {impression_preview}"
+    ]
+    
+    if kle_uncertainty is not None:
+        trace_entries.append(f"RADIOLOGIST KLE: Epistemic uncertainty={kle_uncertainty:.3f} (from {n_samples} samples)")
+    
+    result = {
         "radiologist_output": output,
-        "trace": [trace_entry]
+        "trace": trace_entries
     }
+    
+    # Store KLE score in state for downstream use (Critic, logging)
+    if kle_uncertainty is not None:
+        result["radiologist_kle_uncertainty"] = kle_uncertainty
+    
+    return result
+
