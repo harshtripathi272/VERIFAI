@@ -32,3 +32,4 @@ beautifulsoup4>=4.12.0 # For scraping abstracts if needed
 duckdb
 pydantic_settings
 pytest
+f1chexbert
