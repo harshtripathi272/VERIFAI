@@ -205,13 +205,16 @@ def finalize_node(state: VerifaiState) -> dict:
     Finalize node: creates final diagnosis from debate consensus.
     
     Uses debate output for calibrated confidence.
+    RadiologistOutput is now plain text (findings + impression),
+    so we rely on debate consensus or impression text for diagnosis.
     """
     rad = state.get("radiologist_output")
     debate = state.get("debate_output")
     hist = state.get("historian_output")
     lit = state.get("literature_output")
+    kle_uncertainty = state.get("radiologist_kle_uncertainty", 0.5)
     
-    if not rad or not rad.hypotheses:
+    if not rad or not rad.impression:
         return {
             "final_diagnosis": FinalDiagnosis(
                 diagnosis=None,
@@ -233,9 +236,9 @@ def finalize_node(state: VerifaiState) -> dict:
         )
         trace_entry = f"FINALIZE: {final.diagnosis} (confidence={final.calibrated_confidence:.2%}) via debate consensus"
     else:
-        # Fallback to original logic
-        top_dx = rad.hypotheses[0]
-        confidence = top_dx.confidence
+        # Fallback: use impression text as diagnosis, KLE-based confidence
+        # Base confidence = 1.0 - KLE uncertainty (higher uncertainty = lower confidence)
+        confidence = max(0.1, 1.0 - kle_uncertainty)
         
         if hist:
             confidence += hist.confidence_adjustment
@@ -249,14 +252,17 @@ def finalize_node(state: VerifaiState) -> dict:
         
         confidence = max(0.0, min(0.99, confidence))
         
+        # Use impression as the diagnosis text
+        impression_preview = rad.impression[:200] if len(rad.impression) > 200 else rad.impression
+        
         final = FinalDiagnosis(
-            diagnosis=top_dx.diagnosis,
+            diagnosis=impression_preview,
             calibrated_confidence=confidence,
             deferred=False,
-            explanation=f"Based on {len(rad.findings)} visual findings with supporting context.",
+            explanation=f"Based on radiologist findings with KLE uncertainty={kle_uncertainty:.3f}. {rad.findings[:100]}...",
             recommended_next_steps=["Confirm with clinical correlation", "Consider follow-up imaging if symptoms persist"]
         )
-        trace_entry = f"FINALIZE: {final.diagnosis} (confidence={confidence:.2%})"
+        trace_entry = f"FINALIZE: {impression_preview[:80]}... (confidence={confidence:.2%})"
     
     return {
         "final_diagnosis": final,
@@ -300,14 +306,13 @@ def build_workflow() -> StateGraph:
     """
     graph = StateGraph(VerifaiState)
     
-    # === Add Nodes ===
-    graph.add_node("radiologist", radiologist_node)
-    graph.add_node("chexbert", chexbert_node)  # NEW: Structured pathology labeling
-    graph.add_node("evidence_gathering", evidence_gathering_node)  # Parallel Hist + Lit
-    graph.add_node("critic", critic_node)
-    graph.add_node("debate", debate_node)
-    graph.add_node("chief", chief_node)
-    graph.add_node("finalize", finalize_node)
+    # === Add Logged Nodes ===
+    graph.add_node("radiologist", logged_radiologist_node)
+    graph.add_node("evidence_gathering", logged_evidence_gathering_node)  # Parallel Hist + Lit
+    graph.add_node("critic", logged_critic_node)
+    graph.add_node("debate", logged_debate_node)
+    graph.add_node("chief", logged_chief_node)
+    graph.add_node("finalize", logged_finalize_node)
     
     # === Define Edges ==
     

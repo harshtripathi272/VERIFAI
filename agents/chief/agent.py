@@ -55,7 +55,9 @@ def chief_node(state: VerifaiState) -> dict:
     hist = state.get("historian_output")
     lit = state.get("literature_output")
     critic = state.get("critic_output")
+    debate = state.get("debate_output")
     uncertainty = state["current_uncertainty"]
+    kle_uncertainty = state.get("radiologist_kle_uncertainty", 0.5)
     
     # In production: format prompt and call MedGemma-27B
     # For now: heuristic-based decision
@@ -64,12 +66,15 @@ def chief_node(state: VerifaiState) -> dict:
     evidence_strength = 0
     explanation_parts = []
     
-    if rad and rad.hypotheses:
-        top_dx = rad.hypotheses[0]
-        base_confidence = top_dx.confidence
-        explanation_parts.append(f"Visual: {len(rad.findings)} findings support {top_dx.diagnosis}")
+    # RadiologistOutput is now plain text (findings + impression)
+    if rad and rad.impression:
+        # Base confidence derived from KLE uncertainty
+        base_confidence = max(0.1, 1.0 - kle_uncertainty)
+        impression_preview = rad.impression[:200] if len(rad.impression) > 200 else rad.impression
+        explanation_parts.append(f"Visual: {impression_preview}")
     else:
         base_confidence = 0.0
+        impression_preview = None
     
     if hist:
         evidence_strength += len(hist.supporting_facts)
@@ -87,14 +92,22 @@ def chief_node(state: VerifaiState) -> dict:
         explanation_parts.append(f"Literature: {len(lit.citations)} citations ({lit.overall_evidence_strength} strength)")
     
     if critic:
-        if critic.overconfidence_probability > 0.5:
+        if critic.is_overconfident:
             explanation_parts.append("CAUTION: Critic detected potential overconfidence")
+    
+    # Use debate consensus diagnosis if available
+    diagnosis_text = None
+    if debate and debate.consensus_diagnosis:
+        diagnosis_text = debate.consensus_diagnosis
+        base_confidence += debate.total_confidence_adjustment
+    elif impression_preview:
+        diagnosis_text = impression_preview
     
     # Decision logic
     if uncertainty >= 0.60 or evidence_strength < 2:
         # Defer to human
         final = FinalDiagnosis(
-            diagnosis=rad.hypotheses[0].diagnosis if rad and rad.hypotheses else None,
+            diagnosis=diagnosis_text,
             calibrated_confidence=max(0.0, min(base_confidence, 0.50)),
             deferred=True,
             deferral_reason=(
@@ -113,7 +126,7 @@ def chief_node(state: VerifaiState) -> dict:
         # Provide calibrated diagnosis
         calibrated_conf = max(0.0, min(base_confidence, 0.95))
         final = FinalDiagnosis(
-            diagnosis=rad.hypotheses[0].diagnosis if rad and rad.hypotheses else "Indeterminate",
+            diagnosis=diagnosis_text or "Indeterminate",
             calibrated_confidence=calibrated_conf,
             deferred=False,
             deferral_reason=None,
@@ -123,7 +136,7 @@ def chief_node(state: VerifaiState) -> dict:
             ],
             explanation=" | ".join(explanation_parts)
         )
-        trace_entry = f"CHIEF: DIAGNOSED {final.diagnosis} (confidence={calibrated_conf:.0%})"
+        trace_entry = f"CHIEF: DIAGNOSED {final.diagnosis[:80] if final.diagnosis else 'N/A'} (confidence={calibrated_conf:.0%})"
     
     return {
         "final_diagnosis": final,
