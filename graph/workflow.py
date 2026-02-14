@@ -309,7 +309,7 @@ def build_workflow() -> StateGraph:
     graph.add_node("chief", chief_node)
     graph.add_node("finalize", finalize_node)
     
-    # === Define Edges (UPDATED ORDER) ===
+    # === Define Edges ==
     
     # Entry: START → Radiologist
     graph.add_edge(START, "radiologist")
