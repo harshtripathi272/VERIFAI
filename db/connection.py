@@ -65,7 +65,7 @@ CREATE TABLE IF NOT EXISTS agent_invocations (
 );
 
 -- ============================================================
--- 3. RADIOLOGIST LOGS — detailed radiologist findings
+-- 3. RADIOLOGIST LOGS — plain-text findings & impression + KLE uncertainty
 -- ============================================================
 CREATE TABLE IF NOT EXISTS radiologist_logs (
     log_id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -73,61 +73,27 @@ CREATE TABLE IF NOT EXISTS radiologist_logs (
     invocation_id       INTEGER NOT NULL,
     created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     image_path          TEXT,
-    num_findings        INTEGER DEFAULT 0,
-    reasoning           TEXT,
+    findings_text       TEXT,                     -- Full FINDINGS section (plain text)
+    impression_text     TEXT,                     -- Full IMPRESSION section (plain text)
+    kle_uncertainty     REAL,                     -- KLE epistemic uncertainty score
+    num_samples         INTEGER DEFAULT 1,        -- Number of samples used for KLE
     FOREIGN KEY (session_id) REFERENCES workflow_sessions(session_id),
     FOREIGN KEY (invocation_id) REFERENCES agent_invocations(invocation_id)
 );
 
-CREATE TABLE IF NOT EXISTS radiologist_findings (
-    finding_id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    radiologist_log_id  INTEGER NOT NULL,
-    session_id          TEXT NOT NULL,
-    location            TEXT NOT NULL,
-    observation         TEXT NOT NULL,
-    severity            REAL,
-    bounding_box        TEXT,                     -- JSON [x, y, w, h]
-    FOREIGN KEY (radiologist_log_id) REFERENCES radiologist_logs(log_id),
-    FOREIGN KEY (session_id) REFERENCES workflow_sessions(session_id)
-);
-
-CREATE TABLE IF NOT EXISTS radiologist_hypotheses (
-    hypothesis_id       INTEGER PRIMARY KEY AUTOINCREMENT,
-    radiologist_log_id  INTEGER NOT NULL,
-    session_id          TEXT NOT NULL,
-    rank                INTEGER NOT NULL,         -- 1 = top hypothesis
-    diagnosis           TEXT NOT NULL,
-    confidence          REAL NOT NULL,
-    icd10_code          TEXT,
-    FOREIGN KEY (radiologist_log_id) REFERENCES radiologist_logs(log_id),
-    FOREIGN KEY (session_id) REFERENCES workflow_sessions(session_id)
-);
-
-CREATE TABLE IF NOT EXISTS radiologist_signals (
-    signal_id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    radiologist_log_id  INTEGER NOT NULL,
-    session_id          TEXT NOT NULL,
-    logits_top2         TEXT,                     -- JSON array
-    logit_margin        REAL,
-    predictive_entropy  REAL,
-    attention_dispersion REAL,
-    prediction_stability REAL,
-    FOREIGN KEY (radiologist_log_id) REFERENCES radiologist_logs(log_id),
-    FOREIGN KEY (session_id) REFERENCES workflow_sessions(session_id)
-);
-
 -- ============================================================
--- 4. CRITIC LOGS — overconfidence detection results
+-- 4. CRITIC LOGS — overconfidence detection via KLE consistency
 -- ============================================================
 CREATE TABLE IF NOT EXISTS critic_logs (
     log_id              INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id          TEXT NOT NULL,
     invocation_id       INTEGER NOT NULL,
     created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    overconfidence_prob  REAL,
-    calculated_uncertainty REAL,
-    counter_hypotheses  TEXT,                     -- JSON array of strings
-    concern_signals     TEXT,                     -- JSON array of strings
+    is_overconfident    INTEGER DEFAULT 0,        -- boolean: text assertiveness vs KLE uncertainty
+    safety_score        REAL,                     -- 0.0 to 1.0, overall safety/appropriateness
+    concern_flags       TEXT,                     -- JSON array of specific concern strings
+    recommended_hedging TEXT,                     -- Suggested rephrasing (nullable)
+    kle_uncertainty_input REAL,                   -- KLE score that critic evaluated against
     FOREIGN KEY (session_id) REFERENCES workflow_sessions(session_id),
     FOREIGN KEY (invocation_id) REFERENCES agent_invocations(invocation_id)
 );
@@ -289,17 +255,12 @@ CREATE INDEX IF NOT EXISTS idx_invocations_session_agent ON agent_invocations(se
 
 -- Radiologist indexes
 CREATE INDEX IF NOT EXISTS idx_rad_logs_session       ON radiologist_logs(session_id);
-CREATE INDEX IF NOT EXISTS idx_rad_findings_session   ON radiologist_findings(session_id);
-CREATE INDEX IF NOT EXISTS idx_rad_findings_location  ON radiologist_findings(location);
-CREATE INDEX IF NOT EXISTS idx_rad_hyp_session        ON radiologist_hypotheses(session_id);
-CREATE INDEX IF NOT EXISTS idx_rad_hyp_diagnosis      ON radiologist_hypotheses(diagnosis);
-CREATE INDEX IF NOT EXISTS idx_rad_hyp_confidence     ON radiologist_hypotheses(confidence);
-CREATE INDEX IF NOT EXISTS idx_rad_signals_session    ON radiologist_signals(session_id);
+CREATE INDEX IF NOT EXISTS idx_rad_logs_kle           ON radiologist_logs(kle_uncertainty);
 
 -- Critic indexes
 CREATE INDEX IF NOT EXISTS idx_critic_session         ON critic_logs(session_id);
-CREATE INDEX IF NOT EXISTS idx_critic_overconf        ON critic_logs(overconfidence_prob);
-CREATE INDEX IF NOT EXISTS idx_critic_uncertainty     ON critic_logs(calculated_uncertainty);
+CREATE INDEX IF NOT EXISTS idx_critic_overconf        ON critic_logs(is_overconfident);
+CREATE INDEX IF NOT EXISTS idx_critic_safety          ON critic_logs(safety_score);
 
 -- Historian indexes
 CREATE INDEX IF NOT EXISTS idx_historian_session      ON historian_logs(session_id);

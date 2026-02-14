@@ -26,10 +26,10 @@ def create_mock_state():
     
     # Mock critic output (moderate overconfidence concern)
     critic_output = CriticOutput(
-        overconfidence_probability=0.35,
-        counter_hypotheses=["Consider Atelectasis", "Rule out TB"],
-        concern_signals=["Moderate entropy detected", "Single-view limitation"],
-        calculated_uncertainty=0.42
+        is_overconfident=False,
+        concern_flags=["Moderate entropy detected", "Single-view limitation"],
+        recommended_hedging="Consider adding 'likely' qualifier to impression",
+        safety_score=0.65
     )
     
     # Mock historian output (supporting evidence)

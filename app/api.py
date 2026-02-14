@@ -104,7 +104,8 @@ async def diagnose(
             "_session_id": session_id,
             "image_path": file_path,
             "patient_id": patient_id,
-            "dicom_metadata": None,  # Would parse DICOM header if applicable
+            "dicom_metadata": None,
+            "view": None,
             "radiologist_output": None,
             "critic_output": None,
             "historian_output": None,
@@ -113,6 +114,7 @@ async def diagnose(
             "current_uncertainty": 1.0,
             "routing_decision": "",
             "steps_taken": 0,
+            "radiologist_kle_uncertainty": None,
             "final_diagnosis": None,
             "trace": [f"[INIT] Processing {image.filename}, Patient: {patient_id or 'N/A'}"]
         }
