@@ -2,7 +2,7 @@
 Test VERIFAI Database Logging System
 
 Verifies:
-1. Schema creation with all 14 tables and 35+ indexes
+1. Schema creation with all tables and indexes
 2. Logging for every agent (radiologist, critic, historian, literature, debate, chief)
 3. Full debate round-by-round logging with arguments
 4. Session lifecycle (create → log → complete)
@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from db.connection import init_db, get_db, DB_PATH
 from db.logger import AgentLogger
 from graph.state import (
-    RadiologistOutput, VisualFinding, DiagnosisHypothesis, InternalSignals,
+    RadiologistOutput,
     CriticOutput, HistorianOutput, HistorianFact,
     LiteratureOutput, LiteratureCitation,
     DebateOutput, DebateRound, DebateArgument,
@@ -58,8 +58,8 @@ def test_schema_creation():
         for idx in indexes:
             print(f"    ✓ {idx['name']}")
 
-    assert len(table_names) >= 14, f"Expected 14+ tables, got {len(table_names)}"
-    assert len(indexes) >= 35, f"Expected 35+ indexes, got {len(indexes)}"
+    assert len(table_names) >= 12, f"Expected 12+ tables, got {len(table_names)}"
+    assert len(indexes) >= 30, f"Expected 30+ indexes, got {len(indexes)}"
     print("\n  ✅ Schema creation PASSED")
 
 
@@ -82,41 +82,35 @@ def test_full_workflow_logging():
     state = {
         "image_path": "test_images/chest_xray_001.png",
         "patient_id": "patient-123",
+        "radiologist_kle_uncertainty": 0.42,
     }
 
-    # 1. RADIOLOGIST
+    # 1. RADIOLOGIST (plain-text findings + impression + KLE)
     rad_output = RadiologistOutput(
-        findings=[
-            VisualFinding(location="RLL", observation="consolidation", severity=0.8),
-            VisualFinding(location="LUL", observation="ground-glass opacity", severity=0.4),
-        ],
-        hypotheses=[
-            DiagnosisHypothesis(diagnosis="Community-Acquired Pneumonia", confidence=0.75, icd10_code="J18.9"),
-            DiagnosisHypothesis(diagnosis="Pulmonary Edema", confidence=0.15, icd10_code="J81.0"),
-        ],
-        internal_signals=InternalSignals(
-            logits_top2=[3.2, 1.1],
-            logit_margin=2.1,
-            predictive_entropy=0.42,
-            attention_dispersion=0.35,
-            prediction_stability=0.28
-        ),
-        reasoning="Consolidation in RLL with air bronchograms suggests infectious process."
+        findings="There is a dense consolidation in the right lower lobe with air bronchograms. A subtle ground-glass opacity is noted in the left upper lobe.",
+        impression="Findings are most consistent with community-acquired pneumonia involving the right lower lobe. The left upper lobe opacity may represent early involvement or an atypical infection."
     )
-    rad_result = {"radiologist_output": rad_output, "trace": ["RADIOLOGIST: 2 findings, Top Dx: Community-Acquired Pneumonia (75%)"]}
+    rad_result = {
+        "radiologist_output": rad_output,
+        "radiologist_kle_uncertainty": 0.42,
+        "trace": ["RADIOLOGIST: Generated report from 5 samples", "RADIOLOGIST KLE: Epistemic uncertainty=0.420 (from 5 samples)"]
+    }
     logger.log_radiologist(state, rad_result)
-    print("  ✓ Radiologist logged")
+    print("  ✓ Radiologist logged (plain-text + KLE)")
 
-    # 2. CRITIC
+    # 2. CRITIC (KLE-based overconfidence check)
     critic_output = CriticOutput(
-        overconfidence_probability=0.35,
-        counter_hypotheses=["Consider Pulmonary Edema (originally 15%)"],
-        concern_signals=["Moderate logit margin", "Entropy slightly elevated"],
-        calculated_uncertainty=0.38
+        is_overconfident=False,
+        concern_flags=["Moderate epistemic uncertainty (KLE=0.42)", "Impression uses assertive language despite uncertainty"],
+        recommended_hedging="Consider adding 'likely' or 'suggestive of' to the impression",
+        safety_score=0.72
     )
-    critic_result = {"critic_output": critic_output, "trace": ["CRITIC: U=38.00%, Overconf=35.00%, Concerns=2"]}
+    critic_result = {
+        "critic_output": critic_output,
+        "trace": ["CRITIC: Safety=72.00%, Overconfident=NO, KLE=0.420, Concerns=2 [Context: FHIR+Literature]"]
+    }
     logger.log_critic(state, critic_result)
-    print("  ✓ Critic logged")
+    print("  ✓ Critic logged (KLE-based)")
 
     # 3. HISTORIAN
     hist_output = HistorianOutput(
@@ -151,7 +145,7 @@ def test_full_workflow_logging():
         rounds=[
             DebateRound(
                 round_number=1,
-                critic_challenge=DebateArgument(agent="critic", position="challenge", argument="Moderate overconfidence detected. Consider Pulmonary Edema.", confidence_impact=-0.05, evidence_refs=["overconfidence_prob=0.35"]),
+                critic_challenge=DebateArgument(agent="critic", position="challenge", argument="Moderate overconfidence detected. Consider Pulmonary Edema.", confidence_impact=-0.05, evidence_refs=["KLE=0.42"]),
                 historian_response=DebateArgument(agent="historian", position="support", argument="Clinical history supports diagnosis: Recent fever and cough noted; WBC elevated at 15.2k", confidence_impact=0.10, evidence_refs=["Condition/123", "Observation/456"]),
                 literature_response=DebateArgument(agent="literature", position="support", argument="Strong literature support: Smith et al. (2024). Reviews typical imaging findings of CAP", confidence_impact=0.12, evidence_refs=["38901234", "38765432"]),
                 round_consensus="reached",
@@ -252,37 +246,32 @@ def test_detail_verification(session_id: str):
     print("=" * 60)
 
     with get_db() as conn:
-        # Radiologist findings
-        findings = conn.execute(
-            "SELECT * FROM radiologist_findings WHERE session_id=?", (session_id,)
+        # Radiologist logs (plain text + KLE)
+        rad_logs = conn.execute(
+            "SELECT * FROM radiologist_logs WHERE session_id=?", (session_id,)
         ).fetchall()
-        assert len(findings) == 2, f"Expected 2 findings, got {len(findings)}"
-        print(f"  ✓ Radiologist findings: {len(findings)}")
-        for f in findings:
-            print(f"    - {f['location']}: {f['observation']} (severity={f['severity']})")
+        assert len(rad_logs) == 1, f"Expected 1 radiologist log, got {len(rad_logs)}"
+        rad = rad_logs[0]
+        assert rad['findings_text'] is not None and len(rad['findings_text']) > 0
+        assert rad['impression_text'] is not None and len(rad['impression_text']) > 0
+        assert rad['kle_uncertainty'] is not None
+        print(f"  ✓ Radiologist log: KLE={rad['kle_uncertainty']:.3f}, samples={rad['num_samples']}")
+        print(f"    Findings preview: {rad['findings_text'][:80]}...")
+        print(f"    Impression preview: {rad['impression_text'][:80]}...")
 
-        # Radiologist hypotheses
-        hyps = conn.execute(
-            "SELECT * FROM radiologist_hypotheses WHERE session_id=? ORDER BY rank", (session_id,)
-        ).fetchall()
-        assert len(hyps) == 2
-        print(f"  ✓ Hypotheses: {len(hyps)}")
-        for h in hyps:
-            print(f"    - Rank {h['rank']}: {h['diagnosis']} ({h['confidence']:.0%})")
-
-        # Internal signals
-        signals = conn.execute(
-            "SELECT * FROM radiologist_signals WHERE session_id=?", (session_id,)
-        ).fetchall()
-        assert len(signals) == 1
-        print(f"  ✓ Internal signals: entropy={signals[0]['predictive_entropy']}, margin={signals[0]['logit_margin']}")
-
-        # Critic
+        # Critic (KLE-based)
         critic = conn.execute(
             "SELECT * FROM critic_logs WHERE session_id=?", (session_id,)
         ).fetchall()
         assert len(critic) == 1
-        print(f"  ✓ Critic: overconf={critic[0]['overconfidence_prob']}, uncertainty={critic[0]['calculated_uncertainty']}")
+        c = critic[0]
+        print(f"  ✓ Critic: overconfident={'YES' if c['is_overconfident'] else 'NO'}, safety={c['safety_score']:.2f}")
+        concern_flags = json.loads(c['concern_flags'])
+        print(f"    Concern flags: {len(concern_flags)}")
+        for flag in concern_flags:
+            print(f"      - {flag}")
+        if c['recommended_hedging']:
+            print(f"    Recommended hedging: {c['recommended_hedging'][:80]}")
 
         # Historian facts
         facts = conn.execute(

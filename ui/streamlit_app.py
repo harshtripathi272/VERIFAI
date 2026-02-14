@@ -210,9 +210,15 @@ with col2:
                         with tabs[4]:
                             if evidence.get("critic"):
                                 cr = evidence["critic"]
-                                st.metric("Overconfidence", f"{cr['overconfidence_probability']:.0%}")
-                                if cr.get("concern_signals"):
-                                    st.warning("Concerns: " + "; ".join(cr["concern_signals"]))
+                                col_a, col_b = st.columns(2)
+                                with col_a:
+                                    st.metric("Overconfident", "YES ⚠️" if cr.get("is_overconfident") else "NO ✅")
+                                with col_b:
+                                    st.metric("Safety Score", f"{cr.get('safety_score', 0):.0%}")
+                                if cr.get("concern_flags"):
+                                    st.warning("Concerns: " + "; ".join(cr["concern_flags"]))
+                                if cr.get("recommended_hedging"):
+                                    st.info(f"💡 Suggested hedging: {cr['recommended_hedging']}")
                             else:
                                 st.caption("No critic assessment")
                         

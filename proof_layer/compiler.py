@@ -32,12 +32,9 @@ def compile_evidence_packet(state: VerifaiState) -> dict[str, Any]:
     rad = state.get("radiologist_output")
     if rad:
         packet["visual_evidence"] = {
-            "findings": [f.model_dump() for f in rad.findings],
-            "hypotheses": [h.model_dump() for h in rad.hypotheses],
-            "reasoning": rad.reasoning,
-            "internal_signals": rad.internal_signals.model_dump(),
-            # Placeholder for actual saliency map
-            "saliency_map_path": None
+            "findings": rad.findings,          # Plain text FINDINGS section
+            "impression": rad.impression,      # Plain text IMPRESSION section
+            "kle_uncertainty": state.get("radiologist_kle_uncertainty"),
         }
     
     # Clinical context
@@ -62,10 +59,11 @@ def compile_evidence_packet(state: VerifaiState) -> dict[str, Any]:
     critic = state.get("critic_output")
     if critic:
         packet["uncertainty_assessment"] = {
-            "calculated_uncertainty": critic.calculated_uncertainty,
-            "overconfidence_probability": critic.overconfidence_probability,
-            "concern_signals": critic.concern_signals,
-            "counter_hypotheses": critic.counter_hypotheses
+            "is_overconfident": critic.is_overconfident,
+            "safety_score": critic.safety_score,
+            "concern_flags": critic.concern_flags,
+            "recommended_hedging": critic.recommended_hedging,
+            "kle_uncertainty": state.get("radiologist_kle_uncertainty"),
         }
     
     return packet

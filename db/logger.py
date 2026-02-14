@@ -115,10 +115,11 @@ class AgentLogger:
         """
         Log radiologist agent output.
         
-        Stores: findings, hypotheses, internal signals, reasoning.
+        Stores: plain-text findings, impression, and KLE uncertainty score.
         """
         t0 = time.time()
         rad_output = result.get("radiologist_output")
+        kle_uncertainty = result.get("radiologist_kle_uncertainty")
         trace = result.get("trace", [])
 
         with get_db() as conn:
@@ -129,45 +130,17 @@ class AgentLogger:
 
             try:
                 if rad_output:
-                    # Main radiologist log
-                    cursor = conn.execute(
-                        """INSERT INTO radiologist_logs 
-                           (session_id, invocation_id, image_path, num_findings, reasoning)
-                           VALUES (?, ?, ?, ?, ?)""",
-                        (self.session_id, inv_id, state.get("image_path", ""),
-                         len(rad_output.findings), rad_output.reasoning)
-                    )
-                    rad_log_id = cursor.lastrowid
+                    from app.config import settings
+                    num_samples = getattr(settings, 'KLE_NUM_SAMPLES', 5)
 
-                    # Findings
-                    for f in rad_output.findings:
-                        conn.execute(
-                            """INSERT INTO radiologist_findings 
-                               (radiologist_log_id, session_id, location, observation, severity, bounding_box)
-                               VALUES (?, ?, ?, ?, ?, ?)""",
-                            (rad_log_id, self.session_id, f.location, f.observation,
-                             f.severity, json.dumps(f.bounding_box) if f.bounding_box else None)
-                        )
-
-                    # Hypotheses
-                    for rank, h in enumerate(rad_output.hypotheses, 1):
-                        conn.execute(
-                            """INSERT INTO radiologist_hypotheses 
-                               (radiologist_log_id, session_id, rank, diagnosis, confidence, icd10_code)
-                               VALUES (?, ?, ?, ?, ?, ?)""",
-                            (rad_log_id, self.session_id, rank, h.diagnosis, h.confidence, h.icd10_code)
-                        )
-
-                    # Internal signals
-                    sig = rad_output.internal_signals
                     conn.execute(
-                        """INSERT INTO radiologist_signals 
-                           (radiologist_log_id, session_id, logits_top2, logit_margin,
-                            predictive_entropy, attention_dispersion, prediction_stability)
+                        """INSERT INTO radiologist_logs 
+                           (session_id, invocation_id, image_path, findings_text,
+                            impression_text, kle_uncertainty, num_samples)
                            VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                        (rad_log_id, self.session_id, json.dumps(sig.logits_top2),
-                         sig.logit_margin, sig.predictive_entropy,
-                         sig.attention_dispersion, sig.prediction_stability)
+                        (self.session_id, inv_id, state.get("image_path", ""),
+                         rad_output.findings, rad_output.impression,
+                         kle_uncertainty, num_samples)
                     )
 
                 self._complete_invocation(conn, inv_id, "success",
@@ -188,7 +161,7 @@ class AgentLogger:
         """
         Log critic agent output.
         
-        Stores: overconfidence probability, uncertainty, concerns, counter-hypotheses.
+        Stores: overconfidence flag, safety score, concern flags, recommended hedging.
         """
         t0 = time.time()
         critic_output = result.get("critic_output")
@@ -199,15 +172,19 @@ class AgentLogger:
 
             try:
                 if critic_output:
+                    kle_input = state.get("radiologist_kle_uncertainty")
                     conn.execute(
                         """INSERT INTO critic_logs 
-                           (session_id, invocation_id, overconfidence_prob, 
-                            calculated_uncertainty, counter_hypotheses, concern_signals)
-                           VALUES (?, ?, ?, ?, ?, ?)""",
-                        (self.session_id, inv_id, critic_output.overconfidence_probability,
-                         critic_output.calculated_uncertainty,
-                         json.dumps(critic_output.counter_hypotheses),
-                         json.dumps(critic_output.concern_signals))
+                           (session_id, invocation_id, is_overconfident,
+                            safety_score, concern_flags, recommended_hedging,
+                            kle_uncertainty_input)
+                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        (self.session_id, inv_id,
+                         1 if critic_output.is_overconfident else 0,
+                         critic_output.safety_score,
+                         json.dumps(critic_output.concern_flags),
+                         critic_output.recommended_hedging,
+                         kle_input)
                     )
 
                 self._complete_invocation(conn, inv_id, "success",
