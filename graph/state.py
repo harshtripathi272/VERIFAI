@@ -44,6 +44,15 @@ class RadiologistOutput(BaseModel):
     impression: str = Field(..., description="Textual IMPRESSION section with diagnostic interpretation")
 
 
+class CheXbertOutput(BaseModel):
+    """Output from CheXbert labeling of radiologist report.
+    
+    Contains ONLY labels marked as 'present' or 'uncertain'.
+    Absent/not_mentioned conditions are not stored.
+    """
+    labels: dict[str, str] = Field(..., description="CheXpert conditions with present or uncertain status only")
+
+
 class CriticOutput(BaseModel):
     """Output from Critic Agent.
     
@@ -157,6 +166,7 @@ class VerifaiState(TypedDict):
     
     # === Agent Outputs ===
     radiologist_output: RadiologistOutput | None
+    chexbert_output: CheXbertOutput | None  # NEW: Structured pathology labels
     critic_output: CriticOutput | None
     historian_output: HistorianOutput | None
     literature_output: LiteratureOutput | None

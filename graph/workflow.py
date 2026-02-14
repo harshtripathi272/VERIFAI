@@ -5,7 +5,7 @@ Defines the complete multi-agent DAG with debate-based consensus.
 All agent invocations are logged to the SQL database automatically.
 
 NEW FLOW:
-START → Radiologist → Critic → [Historian + Literature (parallel)] → Debate → Chief/Finalize → END
+START → Radiologist → CheXbert → Evidence Gathering (Hist + Lit parallel) → Critic → Debate → Chief/Finalize → END
 """
 
 import uuid
@@ -18,6 +18,7 @@ from db.logger import AgentLogger
 
 # Import agent nodes
 from agents.radiologist.agent import radiologist_node
+from agents.chexbert.agent import chexbert_node  # NEW: Structured pathology labeling
 from agents.critic.agent import critic_node
 from agents.historian.agent import historian_node
 from agents.literature.agent import literature_agent_node as literature_node
@@ -318,8 +319,11 @@ def build_workflow() -> StateGraph:
     # Entry: START → Radiologist
     graph.add_edge(START, "radiologist")
     
-    # NEW: Radiologist → Evidence Gathering (gather context FIRST)
-    graph.add_edge("radiologist", "evidence_gathering")
+    # NEW: Radiologist → CheXbert (label findings immediately)
+    graph.add_edge("radiologist", "chexbert")
+    
+    # NEW: CheXbert → Evidence Gathering (gather context with structured labels)
+    graph.add_edge("chexbert", "evidence_gathering")
     
     # NEW: Evidence Gathering → Critic (evaluate WITH full context)
     graph.add_edge("evidence_gathering", "critic")
