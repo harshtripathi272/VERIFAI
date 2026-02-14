@@ -17,6 +17,7 @@ from transformers import (
 )
 from peft import PeftModel
 from app.config import settings
+import os
 
 # Global model cache
 _models_loaded = False
@@ -136,11 +137,11 @@ def _load_models():
         bnb_4bit_use_double_quant=True
     )
     
-    _tokenizer = AutoTokenizer.from_pretrained(settings.MEDGEMMA_4B_MODEL)
+    _tokenizer = AutoTokenizer.from_pretrained(os.path.join(settings.MEDGEMMA_LORA_ROOT, "tokenizer"))
+
     _tokenizer.padding_side = "right"
     
     # Add special tokens
-    _tokenizer.add_tokens([IMAGE_TOKEN] + VIEW_TOKENS, special_tokens=True)
     image_token_id = _tokenizer.convert_tokens_to_ids(IMAGE_TOKEN)
     
     _llm = AutoModelForCausalLM.from_pretrained(
@@ -150,7 +151,8 @@ def _load_models():
     )
     
     # Resize embeddings for new tokens
-    _llm.resize_token_embeddings(len(_tokenizer))
+    if _llm.get_input_embeddings().weight.shape[0] != len(_tokenizer):
+        _llm.resize_token_embeddings(len(_tokenizer))
     _llm.config.image_token_id = image_token_id  # Set config
     
     # Load LoRA adapters
