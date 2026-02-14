@@ -4,19 +4,22 @@ VERIFAI API Endpoints
 /diagnose - Run diagnostic workflow
 /health - Health check
 /tools - List available MCP tools
+/logs/* - Query agent logs, sessions, debates, and stats
 """
 
 import os
 import shutil
+import uuid
 from typing import Optional, Any
 
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, UploadFile, File, HTTPException, Query
 from pydantic import BaseModel
 
 from app.config import settings
 from graph.workflow import app as graph_app
 from graph.state import VerifaiState
 from tools.registry import registry
+from db.logger import AgentLogger
 
 
 router = APIRouter()
@@ -92,9 +95,13 @@ async def diagnose(
     with open(file_path, "wb") as f:
         shutil.copyfileobj(image.file, f)
     
+    # Generate session ID for DB logging
+    session_id = str(uuid.uuid4())
+    
     try:
         # Initialize state
         initial_state: VerifaiState = {
+            "_session_id": session_id,
             "image_path": file_path,
             "patient_id": patient_id,
             "dicom_metadata": None,  # Would parse DICOM header if applicable
@@ -102,6 +109,7 @@ async def diagnose(
             "critic_output": None,
             "historian_output": None,
             "literature_output": None,
+            "debate_output": None,
             "current_uncertainty": 1.0,
             "routing_decision": "",
             "steps_taken": 0,
@@ -189,3 +197,74 @@ def _build_evidence_packet(state: VerifaiState) -> dict[str, Any]:
         }
     
     return packet
+
+
+# =============================================================================
+# LOG QUERY ENDPOINTS
+# =============================================================================
+
+@router.get("/logs/sessions")
+async def list_sessions(
+    limit: int = Query(50, ge=1, le=500),
+    status: Optional[str] = Query(None, description="Filter by status: running, completed, failed"),
+    patient_id: Optional[str] = Query(None, description="Filter by patient ID")
+):
+    """List all workflow sessions with optional filters."""
+    try:
+        sessions = AgentLogger.list_sessions(limit=limit, status=status, patient_id=patient_id)
+        return {"sessions": sessions, "total": len(sessions)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/logs/sessions/{session_id}")
+async def get_session_detail(session_id: str):
+    """Get full details of a workflow session including all agent logs and debate rounds."""
+    try:
+        summary = AgentLogger.get_session_summary(session_id)
+        if not summary:
+            raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+        return summary
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/logs/agents/{agent_name}")
+async def get_agent_logs(
+    agent_name: str,
+    limit: int = Query(100, ge=1, le=1000)
+):
+    """Get invocation history for a specific agent (radiologist, critic, historian, literature, debate, chief)."""
+    valid_agents = {"radiologist", "critic", "historian", "literature", "debate", "chief", "finalize", "evidence_gathering"}
+    if agent_name not in valid_agents:
+        raise HTTPException(status_code=400, detail=f"Invalid agent name. Choose from: {valid_agents}")
+    try:
+        history = AgentLogger.get_agent_history(agent_name, limit=limit)
+        return {"agent": agent_name, "invocations": history, "total": len(history)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/logs/debates")
+async def list_debates(
+    session_id: Optional[str] = Query(None, description="Filter by session ID"),
+    limit: int = Query(50, ge=1, le=500)
+):
+    """Get debate logs with full round-by-round details and arguments."""
+    try:
+        debates = AgentLogger.get_debate_history(session_id=session_id, limit=limit)
+        return {"debates": debates, "total": len(debates)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/logs/stats")
+async def get_stats():
+    """Get aggregate diagnosis statistics: totals, averages, top diagnoses, debate consensus rate."""
+    try:
+        stats = AgentLogger.get_diagnosis_stats()
+        return stats
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

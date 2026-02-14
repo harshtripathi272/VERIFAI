@@ -2,25 +2,146 @@
 VERIFAI LangGraph Workflow
 
 Defines the complete multi-agent DAG with debate-based consensus.
+All agent invocations are logged to the SQL database automatically.
 
 NEW FLOW:
 START → Radiologist → Critic → [Historian + Literature (parallel)] → Debate → Chief/Finalize → END
 """
 
+import uuid
 from langgraph.graph import StateGraph, START, END
 from concurrent.futures import ThreadPoolExecutor, wait
 
 from graph.state import VerifaiState, FinalDiagnosis
 from app.config import settings
+from db.logger import AgentLogger
 
 # Import agent nodes
 from agents.radiologist.agent import radiologist_node
 from agents.critic.agent import critic_node
 from agents.historian.agent import historian_node
-from agents.literature.agent import literature_agent_node as literature_node  # Fix: correct function name
+from agents.literature.agent import literature_agent_node as literature_node
 from agents.debate.agent import debate_node
 from agents.chief.agent import chief_node
 
+
+# =============================================================================
+# THREAD-LOCAL LOGGER REGISTRY (one logger per session)
+# =============================================================================
+import threading
+_logger_registry: dict[str, AgentLogger] = {}
+_registry_lock = threading.Lock()
+
+
+def _get_or_create_logger(state: VerifaiState) -> AgentLogger:
+    """Get or create a logger for the current workflow session."""
+    session_id = state.get("_session_id")
+    
+    if session_id and session_id in _logger_registry:
+        return _logger_registry[session_id]
+    
+    # Create new session
+    session_id = session_id or str(uuid.uuid4())
+    logger = AgentLogger(
+        session_id=session_id,
+        image_path=state.get("image_path", ""),
+        patient_id=state.get("patient_id"),
+        workflow_type="debate"
+    )
+    
+    with _registry_lock:
+        _logger_registry[session_id] = logger
+    
+    return logger
+
+
+def _cleanup_logger(session_id: str):
+    """Remove logger from registry after session completes."""
+    with _registry_lock:
+        _logger_registry.pop(session_id, None)
+
+
+# =============================================================================
+# LOGGED AGENT NODE WRAPPERS
+# =============================================================================
+
+def logged_radiologist_node(state: VerifaiState) -> dict:
+    """Radiologist node with automatic DB logging."""
+    logger = _get_or_create_logger(state)
+    result = radiologist_node(state)
+    try:
+        logger.log_radiologist(state, result)
+    except Exception as e:
+        print(f"[DB LOG] Failed to log radiologist: {e}")
+    return result
+
+
+def logged_critic_node(state: VerifaiState) -> dict:
+    """Critic node with automatic DB logging."""
+    logger = _get_or_create_logger(state)
+    result = critic_node(state)
+    try:
+        logger.log_critic(state, result)
+    except Exception as e:
+        print(f"[DB LOG] Failed to log critic: {e}")
+    return result
+
+
+def logged_evidence_gathering_node(state: VerifaiState) -> dict:
+    """Evidence gathering node with automatic DB logging."""
+    logger = _get_or_create_logger(state)
+    result = evidence_gathering_node(state)
+    try:
+        logger.log_evidence_gathering(state, result)
+    except Exception as e:
+        print(f"[DB LOG] Failed to log evidence_gathering: {e}")
+    return result
+
+
+def logged_debate_node(state: VerifaiState) -> dict:
+    """Debate node with automatic DB logging."""
+    logger = _get_or_create_logger(state)
+    result = debate_node(state)
+    try:
+        logger.log_debate(state, result)
+    except Exception as e:
+        print(f"[DB LOG] Failed to log debate: {e}")
+    return result
+
+
+def logged_chief_node(state: VerifaiState) -> dict:
+    """Chief node with automatic DB logging + session completion."""
+    logger = _get_or_create_logger(state)
+    result = chief_node(state)
+    try:
+        logger.log_chief(state, result)
+        final_dx = result.get("final_diagnosis")
+        if final_dx:
+            logger.complete_session(final_diagnosis=final_dx)
+        _cleanup_logger(logger.session_id)
+    except Exception as e:
+        print(f"[DB LOG] Failed to log chief: {e}")
+    return result
+
+
+def logged_finalize_node(state: VerifaiState) -> dict:
+    """Finalize node with automatic DB logging + session completion."""
+    logger = _get_or_create_logger(state)
+    result = finalize_node(state)
+    try:
+        logger.log_finalize(state, result)
+        final_dx = result.get("final_diagnosis")
+        if final_dx:
+            logger.complete_session(final_diagnosis=final_dx)
+        _cleanup_logger(logger.session_id)
+    except Exception as e:
+        print(f"[DB LOG] Failed to log finalize: {e}")
+    return result
+
+
+# =============================================================================
+# EVIDENCE GATHERING (unchanged logic)
+# =============================================================================
 
 def evidence_gathering_node(state: VerifaiState) -> dict:
     """
@@ -163,6 +284,7 @@ def route_after_debate(state: VerifaiState) -> str:
 def build_workflow() -> StateGraph:
     """
     Constructs the VERIFAI LangGraph DAG with debate mechanism.
+    All nodes are wrapped with automatic SQL logging.
     
     NEW Flow:
     START → Radiologist → Critic → Evidence Gathering (Hist + Lit parallel) → Debate →┬→ Finalize → END
@@ -170,13 +292,13 @@ def build_workflow() -> StateGraph:
     """
     graph = StateGraph(VerifaiState)
     
-    # === Add Nodes ===
-    graph.add_node("radiologist", radiologist_node)
-    graph.add_node("critic", critic_node)
-    graph.add_node("evidence_gathering", evidence_gathering_node)  # NEW: Parallel Hist + Lit
-    graph.add_node("debate", debate_node)  # NEW: Debate mechanism
-    graph.add_node("chief", chief_node)
-    graph.add_node("finalize", finalize_node)
+    # === Add Logged Nodes ===
+    graph.add_node("radiologist", logged_radiologist_node)
+    graph.add_node("critic", logged_critic_node)
+    graph.add_node("evidence_gathering", logged_evidence_gathering_node)
+    graph.add_node("debate", logged_debate_node)
+    graph.add_node("chief", logged_chief_node)
+    graph.add_node("finalize", logged_finalize_node)
     
     # === Define Edges ===
     
@@ -222,13 +344,13 @@ def build_legacy_workflow() -> StateGraph:
     
     graph = StateGraph(VerifaiState)
     
-    graph.add_node("radiologist", radiologist_node)
-    graph.add_node("critic", critic_node)
+    graph.add_node("radiologist", logged_radiologist_node)
+    graph.add_node("critic", logged_critic_node)
     graph.add_node("router", router_node)
     graph.add_node("historian", historian_node)
     graph.add_node("literature", literature_node)
-    graph.add_node("chief", chief_node)
-    graph.add_node("finalize", finalize_node)
+    graph.add_node("chief", logged_chief_node)
+    graph.add_node("finalize", logged_finalize_node)
     
     graph.add_edge(START, "radiologist")
     graph.add_edge("radiologist", "critic")
