@@ -146,6 +146,9 @@ class VerifaiState(TypedDict):
     The `trace` field uses a reducer to accumulate entries from each node,
     building a complete audit trail.
     """
+    # === Session Tracking ===
+    _session_id: str | None  # DB logging session ID (auto-generated if not provided)
+    
     # === Input ===
     image_path: str
     patient_id: str | None
