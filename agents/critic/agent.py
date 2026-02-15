@@ -47,8 +47,8 @@ def critic_node(state: VerifaiState) -> dict:
     findings = rad_output.findings
     impression = rad_output.impression
     
-    # NEW: Run critic evaluation with enriched context
-    is_overconfident, concern_flags, recommended_hedging, safety_score = critic_model.evaluate(
+    # NEW: Run critic evaluation with enriched context (now returns 6 values)
+    result = critic_model.evaluate(
         findings=findings,
         impression=impression,
         kle_uncertainty=kle_uncertainty,
@@ -56,11 +56,22 @@ def critic_node(state: VerifaiState) -> dict:
         literature_output=lit_output    # NEW
     )
     
+    # Unpack result (handle both old 4-tuple and new 6-tuple for backward compatibility)
+    if len(result) == 6:
+        is_overconfident, concern_flags, recommended_hedging, safety_score, similar_mistakes_count, historical_risk_level = result
+    else:
+        # Old format (fallback)
+        is_overconfident, concern_flags, recommended_hedging, safety_score = result
+        similar_mistakes_count = 0
+        historical_risk_level = "none"
+    
     output = CriticOutput(
         is_overconfident=is_overconfident,
         concern_flags=concern_flags,
         recommended_hedging=recommended_hedging,
-        safety_score=round(safety_score, 3)
+        safety_score=round(safety_score, 3),
+        similar_mistakes_count=similar_mistakes_count,
+        historical_risk_level=historical_risk_level
     )
     
     # Map safety score to uncertainty for routing
@@ -73,6 +84,10 @@ def critic_node(state: VerifaiState) -> dict:
         f"CRITIC: Safety={safety_score:.2%}, Overconfident={'YES' if is_overconfident else 'NO'}, "
         f"KLE={kle_uncertainty:.3f}, Concerns={len(concern_flags)}"
     )
+    
+    # Add historical risk indicator if present
+    if historical_risk_level != "none":
+        trace_entry += f", HistRisk={historical_risk_level.upper()}"
     
     # NEW: Add context trace if available
     if hist_output or lit_output:

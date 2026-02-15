@@ -15,6 +15,15 @@ import re
 from app.config import settings
 from .llm_critic import medgemma_critic  # >>> LLM-CRITIC
 
+# Historical mistake memory
+try:
+    from db.past_mistakes import retrieve_similar_mistakes
+    from uncertainty.case_embedding import generate_case_summary, generate_case_embedding
+    PAST_MISTAKES_AVAILABLE = True
+except ImportError as e:
+    logger.warning(f"Past mistakes module not available: {e}")
+    PAST_MISTAKES_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -202,6 +211,118 @@ class CriticModel:
         safety_score = max(0.0, min(1.0, safety_score - context_penalty))
 
 
+        # Stage 1.75: Historical Mistake Memory Retrieval  >>> PAST-MISTAKES
+        
+        similar_mistakes_count = 0
+        historical_risk_level = "none"
+        
+        if settings.ENABLE_PAST_MISTAKES_MEMORY and PAST_MISTAKES_AVAILABLE:
+            try:
+                # Extract disease type from chexbert labels or impression
+                chexbert_labels_dict = {}
+                if hasattr(self, '_current_chexbert_output') and self._current_chexbert_output:
+                    chexbert_labels_dict = self._current_chexbert_output.labels
+                
+                disease_type = self._extract_disease_type(impression, chexbert_labels_dict)
+                
+                # Generate current case summary and embedding
+                current_summary = generate_case_summary(
+                    disease_type=disease_type,
+                    original_diagnosis=impression[:200],  # Use impression as proxy
+                    corrected_diagnosis="[Current Case - Not Yet Validated]",
+                    error_type="unknown",
+                    kle_uncertainty=kle_uncertainty,
+                    chexbert_labels=chexbert_labels_dict,
+                    clinical_summary=historian_output.clinical_summary if historian_output else None,
+                    debate_summary=None
+                )
+                current_embedding = generate_case_embedding(current_summary)
+                
+                # Retrieve historically similar mistakes
+                kle_min = max(0.0, kle_uncertainty - settings.PAST_MISTAKES_KLE_TOLERANCE)
+                kle_max = min(1.0, kle_uncertainty + settings.PAST_MISTAKES_KLE_TOLERANCE)
+                
+                similar_mistakes = retrieve_similar_mistakes(
+                    disease_type=disease_type,
+                    embedding=current_embedding,
+                    kle_uncertainty_range=(kle_min, kle_max),
+                    severity_min=1,
+                    top_k=settings.PAST_MISTAKES_TOP_K,
+                    similarity_threshold=settings.PAST_MISTAKES_SIMILARITY_THRESHOLD
+                )
+                
+                # Apply neural re-ranking if enabled
+                if similar_mistakes and getattr(settings, 'ENABLE_PAST_MISTAKES_RERANKING', False):
+                    try:
+                        from db.rerank_mistakes import rerank_mistakes
+                        similar_mistakes = rerank_mistakes(
+                            current_impression=impression,
+                            current_kle=kle_uncertainty,
+                            current_chexbert=chexbert_labels_dict,
+                            retrieved_mistakes=similar_mistakes,
+                            use_medgemma=False,  # Fast mode (embeddings already used)
+                            recency_weight_factor=0.3,
+                            clinical_relevance_factor=0.5,
+                            feedback_factor=0.2
+                        )
+                        logger.debug(f"[CRITIC] Applied neural re-ranking to {len(similar_mistakes)} cases")
+                    except Exception as e:
+                        logger.warning(f"[CRITIC] Re-ranking failed, using original order: {e}")
+                
+                similar_mistakes_count = len(similar_mistakes)
+                
+                if similar_mistakes:
+                    # Analyze severity of similar mistakes
+                    high_severity_count = sum(1 for m in similar_mistakes if m['severity_level'] >= 4)
+                    medium_severity_count = sum(1 for m in similar_mistakes if m['severity_level'] == 3)
+                    
+                    # Determine historical risk level
+                    if high_severity_count >= 2:
+                        historical_risk_level = "high"
+                        is_overconfident = True
+                        concern_flags.append(
+                            f"[HISTORY] {high_severity_count} high-severity similar errors detected "
+                            f"in {disease_type} with KLE={kle_uncertainty:.2f}"
+                        )
+                        
+                        # Show specific past error types
+                        error_types = [m['error_type'] for m in similar_mistakes[:3]]
+                        concern_flags.append(
+                            f"[HISTORY] Past error patterns: {', '.join(set(error_types))}"
+                        )
+                        
+                        # Increase risk weighting significantly
+                        historical_penalty = 0.15 * high_severity_count
+                        safety_score = max(0.0, safety_score - historical_penalty)
+                        
+                    elif high_severity_count >= 1:
+                        historical_risk_level = "medium"
+                        concern_flags.append(
+                            f"[HISTORY] {high_severity_count} high-severity + {medium_severity_count} medium-severity "
+                            f"similar cases in {disease_type}"
+                        )
+                        # Moderate penalty
+                        safety_score = max(0.0, safety_score - 0.10)
+                        
+                    elif len(similar_mistakes) >= 3:
+                        historical_risk_level = "low"
+                        concern_flags.append(
+                            f"[HISTORY] {len(similar_mistakes)} similar past cases detected in {disease_type}"
+                        )
+                        # Small penalty
+                        safety_score = max(0.0, safety_score - 0.05)
+                    
+                    # Log for debugging
+                    logger.info(
+                        f"CRITIC-HISTORY: Found {similar_mistakes_count} similar mistakes "
+                        f"for {disease_type}, risk={historical_risk_level}"
+                    )
+                    
+            except Exception as exc:
+                logger.warning(f"[CRITIC] Past mistakes retrieval failed: {exc}")
+                # Don't fail the entire evaluation if history lookup fails
+
+
         # Stage 2: LLM-based semantic critic  >>> LLM-CRITIC
         
         # Only invoked when:
@@ -267,7 +388,10 @@ class CriticModel:
                     "CRITIC-LLM: Semantic critic unavailable — using rule-based output only"
                 )
 
-        return is_overconfident, concern_flags, recommended_hedging, safety_score
+        # Return with historical signals
+        # Note: We need to return as tuple for backward compatibility
+        # The graph state will extract these from critic_output object
+        return is_overconfident, concern_flags, recommended_hedging, safety_score, similar_mistakes_count, historical_risk_level
     
     def _mentions_differentials(self, impression: str) -> bool:
         """Check if impression mentions differential diagnoses."""
@@ -277,6 +401,70 @@ class CriticModel:
             r'\bversus\b', r'\balternatively\b', r'\balternative\b'
         ]
         return any(re.search(pattern, impression_lower) for pattern in differential_patterns)
+    
+    def _extract_disease_type(self, impression: str, chexbert_labels: dict) -> str:
+        """
+        Extract primary disease category from impression and CheXbert labels.
+        
+        Priority:
+        1. CheXbert labels marked as 'present'
+        2. Impression keyword matching
+        3. 'unknown' fallback
+        
+        Returns:
+            Disease type string (lowercase, e.g., 'pneumonia', 'effusion', 'cardiomegaly')
+        """
+        # Priority 1: CheXbert present labels
+        if chexbert_labels:
+            present_labels = [k.lower() for k, v in chexbert_labels.items() if v == 'present']
+            if present_labels:
+                # Map common CheXbert labels to disease categories
+                label_map = {
+                    'consolidation': 'pneumonia',
+                    'infiltration': 'pneumonia',
+                    'pneumonia': 'pneumonia',
+                    'edema': 'edema',
+                    'effusion': 'effusion',
+                    'pleural effusion': 'effusion',
+                    'atelectasis': 'atelectasis',
+                    'cardiomegaly': 'cardiomegaly',
+                    'enlarged cardiomediastinum': 'cardiomegaly',
+                    'pneumothorax': 'pneumothorax',
+                    'mass': 'mass',
+                    'nodule': 'nodule',
+                    'fracture': 'fracture'
+                }
+                for label in present_labels:
+                    if label in label_map:
+                        return label_map[label]
+                # If no mapping found, use first present label as-is
+                return present_labels[0]
+        
+        # Priority 2: Impression keyword matching
+        impression_lower = impression.lower()
+        disease_keywords = [
+            ('pneumonia', 'pneumonia'),
+            ('consolidation', 'pneumonia'),
+            ('infiltrate', 'pneumonia'),
+            ('effusion', 'effusion'),
+            ('edema', 'edema'),
+            ('pulmonary edema', 'edema'),
+            ('atelectasis', 'atelectasis'),
+            ('cardiomegaly', 'cardiomegaly'),
+            ('enlarged heart', 'cardiomegaly'),
+            ('pneumothorax', 'pneumothorax'),
+            ('mass', 'mass'),
+            ('nodule', 'nodule'),
+            ('fracture', 'fracture'),
+            ('rib fracture', 'fracture')
+        ]
+        
+        for keyword, disease_type in disease_keywords:
+            if keyword in impression_lower:
+                return disease_type
+        
+        # Fallback: unknown
+        return 'unknown'
 
 
 
