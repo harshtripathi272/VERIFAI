@@ -68,8 +68,12 @@ def _cleanup_logger(session_id: str):
 
 def logged_radiologist_node(state: VerifaiState) -> dict:
     """Radiologist node with automatic DB logging."""
+    print("\n" + "="*60)
+    print("[WORKFLOW] Starting Radiologist Node")
+    print("="*60)
     logger = _get_or_create_logger(state)
     result = radiologist_node(state)
+    print(f"[WORKFLOW] Radiologist completed - Generated {len(result.get('radiologist_output', {}).findings or '')} chars of findings")
     try:
         logger.log_radiologist(state, result)
     except Exception as e:
@@ -79,8 +83,14 @@ def logged_radiologist_node(state: VerifaiState) -> dict:
 
 def logged_critic_node(state: VerifaiState) -> dict:
     """Critic node with automatic DB logging."""
+    print("\n" + "="*60)
+    print("[WORKFLOW] Starting Critic Node")
+    print("="*60)
     logger = _get_or_create_logger(state)
     result = critic_node(state)
+    critic_output = result.get('critic_output')
+    if critic_output:
+        print(f"[WORKFLOW] Critic completed - Risk Score: {critic_output.final_risk_score:.2f}")
     try:
         logger.log_critic(state, result)
     except Exception as e:
@@ -90,8 +100,14 @@ def logged_critic_node(state: VerifaiState) -> dict:
 
 def logged_evidence_gathering_node(state: VerifaiState) -> dict:
     """Evidence gathering node with automatic DB logging."""
+    print("\n" + "="*60)
+    print("[WORKFLOW] Starting Evidence Gathering (Historian + Literature in parallel)")
+    print("="*60)
     logger = _get_or_create_logger(state)
     result = evidence_gathering_node(state)
+    print(f"[WORKFLOW] Evidence gathering completed")
+    print(f"  - Historian output: {'✓' if result.get('historian_output') else '✗'}")
+    print(f"  - Literature output: {'✓' if result.get('literature_output') else '✗'}")
     try:
         logger.log_evidence_gathering(state, result)
     except Exception as e:
@@ -101,8 +117,14 @@ def logged_evidence_gathering_node(state: VerifaiState) -> dict:
 
 def logged_debate_node(state: VerifaiState) -> dict:
     """Debate node with automatic DB logging."""
+    print("\n" + "="*60)
+    print("[WORKFLOW] Starting Debate Node")
+    print("="*60)
     logger = _get_or_create_logger(state)
     result = debate_node(state)
+    debate_output = result.get('debate_output')
+    if debate_output:
+        print(f"[WORKFLOW] Debate completed - Rounds: {len(debate_output.rounds)}, Consensus: {debate_output.final_consensus}")
     try:
         logger.log_debate(state, result)
     except Exception as e:
@@ -112,11 +134,16 @@ def logged_debate_node(state: VerifaiState) -> dict:
 
 def logged_chief_node(state: VerifaiState) -> dict:
     """Chief node with automatic DB logging + session completion."""
+    print("\n" + "="*60)
+    print("[WORKFLOW] Starting Chief Node")
+    print("="*60)
     logger = _get_or_create_logger(state)
     result = chief_node(state)
+    final_dx = result.get("final_diagnosis")
+    if final_dx:
+        print(f"[WORKFLOW] Chief completed - Diagnosis: {final_dx.diagnosis[:50]}... Confidence: {final_dx.calibrated_confidence:.2%}")
     try:
         logger.log_chief(state, result)
-        final_dx = result.get("final_diagnosis")
         if final_dx:
             logger.complete_session(final_diagnosis=final_dx)
         _cleanup_logger(logger.session_id)
@@ -127,11 +154,16 @@ def logged_chief_node(state: VerifaiState) -> dict:
 
 def logged_finalize_node(state: VerifaiState) -> dict:
     """Finalize node with automatic DB logging + session completion."""
+    print("\n" + "="*60)
+    print("[WORKFLOW] Starting Finalize Node")
+    print("="*60)
     logger = _get_or_create_logger(state)
     result = finalize_node(state)
+    final_dx = result.get("final_diagnosis")
+    if final_dx:
+        print(f"[WORKFLOW] Finalize completed - Diagnosis: {final_dx.diagnosis[:50] if final_dx.diagnosis else 'None'}... Confidence: {final_dx.calibrated_confidence:.2%}")
     try:
         logger.log_finalize(state, result)
-        final_dx = result.get("final_diagnosis")
         if final_dx:
             logger.complete_session(final_diagnosis=final_dx)
         _cleanup_logger(logger.session_id)
