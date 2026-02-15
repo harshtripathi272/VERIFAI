@@ -20,7 +20,20 @@ from graph.workflow import app as graph_app
 from graph.state import VerifaiState
 from tools.registry import registry
 from db.logger import AgentLogger
+from typing import List, Optional, Dict, Any
+from datetime import datetime
 
+from fastapi import APIRouter, HTTPException, Query, status
+from pydantic import BaseModel, Field
+
+from db.past_mistakes import (
+    insert_validated_mistake,
+    retrieve_similar_mistakes,
+    get_mistake_by_id,
+    delete_mistake,
+    get_statistics
+)
+from uncertainty.case_embedding import generate_case_embedding_from_fields
 
 router = APIRouter()
 

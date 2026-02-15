@@ -14,7 +14,7 @@ from app.api import router
 
 # Import past mistakes router
 try:
-    from app.api.past_mistakes_routes import router as past_mistakes_router
+    from app.past_mistakes_routes import router as past_mistakes_router
     PAST_MISTAKES_API_AVAILABLE = True
 except ImportError:
     PAST_MISTAKES_API_AVAILABLE = False
