@@ -9,6 +9,10 @@ Usage:
 import torch
 import sys
 from huggingface_hub import login
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Workaround for Windows terminal encoding issues
 if sys.stdout.encoding != 'utf-8':
@@ -17,7 +21,7 @@ if sys.stdout.encoding != 'utf-8':
 
 # Your Hugging Face token (already set)
 
-token = "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"
+token = os.getenv("HF_TOKEN")
 
 print("\n" + "=" * 60)
 print("SYSTEM CHECK & HF LOGIN")

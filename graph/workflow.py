@@ -140,10 +140,8 @@ def logged_finalize_node(state: VerifaiState) -> dict:
     return result
 
 
-# =============================================================================
-# EVIDENCE GATHERING (unchanged logic)
-# =============================================================================
 
+# EVIDENCE GATHERING (unchanged logic)
 def evidence_gathering_node(state: VerifaiState) -> dict:
     """
     Parallel execution of Historian and Literature agents.
@@ -309,6 +307,7 @@ def build_workflow() -> StateGraph:
     # === Add Logged Nodes ===
     graph.add_node("radiologist", logged_radiologist_node)
     graph.add_node("evidence_gathering", logged_evidence_gathering_node)  # Parallel Hist + Lit
+    graph.add_node("chexbert", chexbert_node)
     graph.add_node("critic", logged_critic_node)
     graph.add_node("debate", logged_debate_node)
     graph.add_node("chief", logged_chief_node)
