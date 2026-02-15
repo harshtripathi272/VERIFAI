@@ -16,14 +16,15 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from app.config import settings
 from agents.literature.tools import LITERATURE_TOOLS
 from agents.literature.prompt import SYSTEM_PROMPT
+from app.shared_model_loader import load_shared_medgemma, get_inference_lock
 
 # === OPTIMIZATION 1: Singleton Model Loader with Thread Safety ===
 _MODEL_CACHE: Optional[tuple] = None
-_MODEL_LOCK = threading.Lock()  # NEW: Lock for thread-safe model access
-_MODEL_LOAD_LOCK = threading.Lock()  # NEW: Lock for loading
+_MODEL_LOAD_LOCK = threading.Lock()  # Lock for loading
+# Inference lock is now managed by shared_model_loader
 
 def load_medgemma():
-    """Load MedGemma model once and cache it. Thread-safe."""
+    """Load shared MedGemma model (singleton across agents). Thread-safe."""
     global _MODEL_CACHE
     
     # Quick check without lock (performance optimization)
@@ -36,24 +37,11 @@ def load_medgemma():
         if _MODEL_CACHE is not None:
             return _MODEL_CACHE
         
-        print("[LiteratureAgent] Loading MedGemma model (one-time initialization)...")
-        tokenizer = AutoTokenizer.from_pretrained(
-            settings.MEDGEMMA_4B_MODEL,
-            token=settings.HUGGINGFACE_TOKEN
-        )
-        model = AutoModelForCausalLM.from_pretrained(
-            settings.MEDGEMMA_4B_MODEL,
-            device_map="auto",
-            torch_dtype="auto",
-            token=settings.HUGGINGFACE_TOKEN
-        )
+        print("[LiteratureAgent] Loading shared MedGemma model...")
+        model, tokenizer = load_shared_medgemma()
         _MODEL_CACHE = (model, tokenizer)
-        print("[LiteratureAgent] Model loaded and cached")
+        print("[LiteratureAgent] Using shared model instance")
         return _MODEL_CACHE
-
-def get_model_lock():
-    """Get the global model lock for thread-safe inference."""
-    return _MODEL_LOCK
 
 class ReActStepError(Exception):
     pass
@@ -68,8 +56,9 @@ class MedGemmaAgent:
 
     def _generate(self, prompt: str) -> str:
         """Generate text with thread-safe model access."""
-        # CRITICAL: Acquire lock before using model
-        with _MODEL_LOCK:
+        # CRITICAL: Acquire lock before using model (shared across agents)
+        _inference_lock = get_inference_lock()
+        with _inference_lock:
             print(f"[Thread-{threading.current_thread().name}] Acquired model lock for generation")
             inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
             outputs = self.model.generate(

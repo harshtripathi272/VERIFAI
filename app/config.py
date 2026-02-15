@@ -26,11 +26,12 @@ class Settings(BaseSettings):
     # === Model Paths (HAI-DEF Models) ===
     MEDSIGLIP_MODEL: str = "google/medsiglip-448"
     MEDGEMMA_4B_MODEL: str = "google/medgemma-1.5-4b-it"
-    MEDGEMMA_27B_MODEL: str = "google/medgemma-27b-it"
+    #MEDGEMMA_27B_MODEL: str = "google/medgemma-27b-it"
     
     # === MedGemma 4B Fine-Tuned Paths ===
-    MEDGEMMA_LORA_ADAPTERS: str = os.getenv("MEDGEMMA_LORA_ADAPTERS", "path/to/lora/adapters")
-    MEDGEMMA_PROJECTOR_WEIGHTS: str = os.getenv("MEDGEMMA_PROJECTOR_WEIGHTS", "path/to/projector.pt")
+    MEDGEMMA_LORA_ROOT: str = os.getenv("MEDGEMMA_LORA_ROOT", "../v2/")
+    MEDGEMMA_LORA_ADAPTERS: str = os.getenv("MEDGEMMA_LORA_ADAPTERS", "../v2/lora_adapters")
+    MEDGEMMA_PROJECTOR_WEIGHTS: str = os.getenv("MEDGEMMA_PROJECTOR_WEIGHTS", "../v2/projector.pt")
     
     # === Text Embedding Model (for KLE Uncertainty) ===
     # Switch to any sentence-transformers compatible model

@@ -3,16 +3,17 @@ import re
 import threading
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from app.config import settings
+from app.shared_model_loader import load_shared_medgemma, get_inference_lock
 
-# Thread-safe singleton pattern
+# Thread-safe singleton pattern - now using shared loader
 tokenizer = None
 model = None
 _LOAD_LOCK = threading.Lock()
-_INFERENCE_LOCK = threading.Lock()  # NEW: Lock for thread-safe inference
+# Inference lock is now managed by shared_model_loader
 
 
 def load_medgemma():
-    """Load MedGemma model with thread safety."""
+    """Load MedGemma model using shared loader (singleton across agents)."""
     global tokenizer, model
 
     # Quick check without lock
@@ -25,18 +26,9 @@ def load_medgemma():
         if tokenizer is not None and model is not None:
             return
         
-        print("[Historian] Loading MedGemma model...")
-        tokenizer = AutoTokenizer.from_pretrained(
-            settings.MEDGEMMA_4B_MODEL,
-            token=settings.HUGGINGFACE_TOKEN
-        )
-        model = AutoModelForCausalLM.from_pretrained(
-            settings.MEDGEMMA_4B_MODEL,
-            device_map="auto",
-            torch_dtype="auto",
-            token=settings.HUGGINGFACE_TOKEN
-        )
-        print("[Historian] Model loaded")
+        print("[Historian] Loading shared MedGemma model...")
+        model, tokenizer = load_shared_medgemma()
+        print("[Historian] Using shared model instance")
 
 
 def summarize_fhir_evidence(evidence: dict) -> str:
@@ -127,8 +119,9 @@ JSON schema:
 }}
 """
 
-    # CRITICAL: Acquire lock before using model
-    with _INFERENCE_LOCK:
+    # CRITICAL: Acquire lock before using model (shared across agents)
+    _inference_lock = get_inference_lock()
+    with _inference_lock:
         print(f"[Thread-{threading.current_thread().name}] Historian acquired model lock")
         inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
         outputs = model.generate(

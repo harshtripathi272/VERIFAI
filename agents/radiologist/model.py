@@ -29,7 +29,8 @@ _projector = None
 
 # Special tokens
 IMAGE_TOKEN = "<image>"
-VIEW_TOKENS = ["<AP>", "<PA>", "<Lateral>"]
+VIEW_TOKENS = ["<AP>", "<PA>", "<LATERAL>"]
+
 
 
 class VisionProjector(nn.Module):
@@ -117,8 +118,7 @@ def _load_models():
     # 1. Vision Encoder (MedSigLIP)
     print(f"Loading MedSigLIP: {settings.MEDSIGLIP_MODEL}")
     _image_processor = AutoImageProcessor.from_pretrained(
-        settings.MEDSIGLIP_MODEL,
-        size={"height": 384, "width": 384}  # User requested 384
+        settings.MEDSIGLIP_MODEL
     )
     # Load vision model (can use AutoModel or just the vision tower if available)
     from transformers import SiglipVisionModel
@@ -137,12 +137,14 @@ def _load_models():
         bnb_4bit_use_double_quant=True
     )
     
-    _tokenizer = AutoTokenizer.from_pretrained(os.path.join(settings.MEDGEMMA_LORA_ROOT, "tokenizer"))
+    _tokenizer = AutoTokenizer.from_pretrained(os.path.join(settings.MEDGEMMA_LORA_ROOT, "tokenizers"))
 
     _tokenizer.padding_side = "right"
     
     # Add special tokens
     image_token_id = _tokenizer.convert_tokens_to_ids(IMAGE_TOKEN)
+    assert image_token_id != _tokenizer.unk_token_id
+
     
     _llm = AutoModelForCausalLM.from_pretrained(
         settings.MEDGEMMA_4B_MODEL,
@@ -164,9 +166,27 @@ def _load_models():
 
     # 3. Projector
     print("Loading Projector...")
+    
+    # Handle different config structures:
+    # - Gemma2: config.hidden_size
+    # - Gemma3: config.hidden_dim
+    # - Vision-language models: config.text_config.hidden_size
+    llm_hidden_size = None
+    
+    # Try direct attributes first
+    llm_hidden_size = getattr(_llm.config, 'hidden_size', None) or getattr(_llm.config, 'hidden_dim', None)
+    
+    # If not found, check text_config (for vision-language models)
+    if llm_hidden_size is None and hasattr(_llm.config, 'text_config'):
+        text_config = _llm.config.text_config
+        llm_hidden_size = getattr(text_config, 'hidden_size', None) or getattr(text_config, 'hidden_dim', None)
+    
+    if llm_hidden_size is None:
+        raise ValueError(f"Cannot find hidden size in model config or text_config")
+    
     _projector = VisionProjector(
         _vision_encoder.config.hidden_size,
-        _llm.config.hidden_size
+        llm_hidden_size
     )
     
     if settings.MEDGEMMA_PROJECTOR_WEIGHTS and "path/to" not in settings.MEDGEMMA_PROJECTOR_WEIGHTS:
@@ -196,7 +216,7 @@ def generate_findings(image_path: str, view: str = "AP") -> dict:
 
     # 2️⃣ Construct prompt
     view_token = f"<{view}>" if f"<{view}>" in VIEW_TOKENS else "<AP>"
-    prompt = f"{IMAGE_TOKEN} {view_token}\n{INSTRUCTION}"
+    prompt = f"{IMAGE_TOKEN} {view_token}\n\n<report>\n\n{INSTRUCTION}"
 
     inputs = _tokenizer(prompt, return_tensors="pt").to(device)
     input_ids = inputs.input_ids

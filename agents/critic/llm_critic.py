@@ -24,6 +24,7 @@ import torch
 from pydantic import BaseModel, Field
 
 from app.config import settings
+from app.shared_model_loader import load_shared_medgemma, get_inference_lock
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +101,8 @@ Return valid JSON only. No markdown fences, no commentary.
 class MedGemmaCritic:
     """
     Lazy-loaded MedGemma wrapper that performs semantic critique.
-
+    
+    Uses shared model loader to prevent duplicate model loading.
     The model is loaded on the first call to ``critique()`` and reused for
     subsequent invocations.  If model loading fails or inference errors out
     the caller receives ``None`` so the pipeline falls back to rule-based
@@ -115,7 +117,7 @@ class MedGemmaCritic:
     # ---- lazy model loading ------------------------------------------------
 
     def _load_model(self):
-        """Load MedGemma model and tokenizer once."""
+        """Load shared MedGemma model once (singleton across agents)."""
         if self._loaded:
             return
 
@@ -125,22 +127,13 @@ class MedGemmaCritic:
             return
 
         try:
-            from transformers import AutoModelForCausalLM, AutoTokenizer
-
-            model_name = settings.MEDGEMMA_4B_MODEL
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-            dtype = torch.float16 if device == "cuda" else torch.float32
-
-            logger.info("[LLM-Critic] Loading %s on %s …", model_name, device)
-
-            self._tokenizer = AutoTokenizer.from_pretrained(model_name)
-            self._model = AutoModelForCausalLM.from_pretrained(
-                model_name,
-                torch_dtype=dtype,
-                device_map="auto",
-            )
+            logger.info("[LLM-Critic] Loading shared MedGemma model...")
+            
+            # Use shared model loader instead of loading separate instance
+            self._model, self._tokenizer = load_shared_medgemma()
+            
             self._loaded = True
-            logger.info("[LLM-Critic] Model loaded successfully")
+            logger.info("[LLM-Critic] Using shared model instance")
 
         except Exception as exc:  # noqa: BLE001
             logger.warning("[LLM-Critic] Failed to load model: %s — falling back to rule-based only", exc)
@@ -214,14 +207,17 @@ class MedGemmaCritic:
             flat = f"{_SYSTEM_PROMPT}\n\n{user_prompt}"
             input_ids = self._tokenizer(flat, return_tensors="pt").input_ids.to(self._model.device)
 
-        with torch.no_grad():
-            output_ids = self._model.generate(
-                input_ids,
-                max_new_tokens=512,
-                temperature=0.1,
-                do_sample=True,
-                top_p=0.9,
-            )
+        # CRITICAL: Acquire shared lock before inference
+        _inference_lock = get_inference_lock()
+        with _inference_lock:
+            with torch.no_grad():
+                output_ids = self._model.generate(
+                    input_ids,
+                    max_new_tokens=512,
+                    temperature=0.1,
+                    do_sample=True,
+                    top_p=0.9,
+                )
 
         # Decode only newly generated tokens
         generated = output_ids[0][input_ids.shape[-1]:]
