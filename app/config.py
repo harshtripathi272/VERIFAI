@@ -94,6 +94,7 @@ class Settings(BaseSettings):
     PAST_MISTAKES_TOP_K: int = 5  # Maximum similar cases to retrieve
     PAST_MISTAKES_SIMILARITY_THRESHOLD: float = 0.75  # Minimum cosine similarity
     PAST_MISTAKES_KLE_TOLERANCE: float = 0.2  # +/- range for KLE filtering
+    ENABLE_PAST_MISTAKES_RERANKING: bool = bool(os.getenv("ENABLE_PAST_MISTAKES_RERANKING", "True"))  # Neural re-ranking
     
     # === Mock Mode ===
     # Enable to run without downloading large models (~50GB+)

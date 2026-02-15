@@ -12,11 +12,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.api import router
 
+# Import past mistakes router
+try:
+    from app.api.past_mistakes_routes import router as past_mistakes_router
+    PAST_MISTAKES_API_AVAILABLE = True
+except ImportError:
+    PAST_MISTAKES_API_AVAILABLE = False
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler."""
     print(f"[VERIFAI] Starting up (ENV={settings.ENV}, MOCK={settings.MOCK_MODELS})")
+    if PAST_MISTAKES_API_AVAILABLE:
+        print("[VERIFAI] Past Mistakes API enabled")
     yield
     print("[VERIFAI] Shutting down...")
 
@@ -39,6 +48,10 @@ app.add_middleware(
 
 # Include API routes
 app.include_router(router)
+
+# Include past mistakes router if available
+if PAST_MISTAKES_API_AVAILABLE:
+    app.include_router(past_mistakes_router)
 
 
 if __name__ == "__main__":

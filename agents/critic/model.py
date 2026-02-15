@@ -251,6 +251,24 @@ class CriticModel:
                     similarity_threshold=settings.PAST_MISTAKES_SIMILARITY_THRESHOLD
                 )
                 
+                # Apply neural re-ranking if enabled
+                if similar_mistakes and getattr(settings, 'ENABLE_PAST_MISTAKES_RERANKING', False):
+                    try:
+                        from db.rerank_mistakes import rerank_mistakes
+                        similar_mistakes = rerank_mistakes(
+                            current_impression=impression,
+                            current_kle=kle_uncertainty,
+                            current_chexbert=chexbert_labels_dict,
+                            retrieved_mistakes=similar_mistakes,
+                            use_medgemma=False,  # Fast mode (embeddings already used)
+                            recency_weight_factor=0.3,
+                            clinical_relevance_factor=0.5,
+                            feedback_factor=0.2
+                        )
+                        logger.debug(f"[CRITIC] Applied neural re-ranking to {len(similar_mistakes)} cases")
+                    except Exception as e:
+                        logger.warning(f"[CRITIC] Re-ranking failed, using original order: {e}")
+                
                 similar_mistakes_count = len(similar_mistakes)
                 
                 if similar_mistakes:
