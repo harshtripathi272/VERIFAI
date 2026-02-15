@@ -80,6 +80,21 @@ class Settings(BaseSettings):
     # Enable second-stage MedGemma semantic critic in Critic agent
     ENABLE_LLM_CRITIC: bool = False
     
+    # === PAST MISTAKES MEMORY ===
+    # Enable historical mistake retrieval in critic
+    ENABLE_PAST_MISTAKES_MEMORY: bool = bool(os.getenv("ENABLE_PAST_MISTAKES_MEMORY", "True"))
+    
+    # Past mistakes database path (DuckDB with VSS extension)
+    PAST_MISTAKES_DB_PATH: str = os.path.join(
+        os.path.dirname(os.path.dirname(__file__)), 
+        "verifai_past_mistakes.duckdb"
+    )
+    
+    # Retrieval settings
+    PAST_MISTAKES_TOP_K: int = 5  # Maximum similar cases to retrieve
+    PAST_MISTAKES_SIMILARITY_THRESHOLD: float = 0.75  # Minimum cosine similarity
+    PAST_MISTAKES_KLE_TOLERANCE: float = 0.2  # +/- range for KLE filtering
+    
     # === Mock Mode ===
     # Enable to run without downloading large models (~50GB+)
     MOCK_MODELS: bool = False  # CHANGED: Use real models, not mocks

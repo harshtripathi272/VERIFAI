@@ -58,11 +58,17 @@ class CriticOutput(BaseModel):
     
     Evaluates consistency between linguistic certainty in the IMPRESSION
     and the externally computed epistemic uncertainty score (KLE).
+    
+    Also checks for similarity to past validated mistakes.
     """
     is_overconfident: bool = Field(..., description="True if text is overly assertive given uncertainty")
     concern_flags: list[str] = Field(default_factory=list, description="Specific consistency issues detected")
     recommended_hedging: str | None = Field(None, description="Suggested rephrasing to match uncertainty")
     safety_score: float = Field(..., ge=0.0, le=1.0, description="Overall safety/appropriateness score")
+    
+    # Historical mistake signals
+    similar_mistakes_count: int = Field(default=0, description="Number of similar past errors found")
+    historical_risk_level: str = Field(default="none", description="Risk level based on past mistakes: none/low/medium/high")
 
 
 class HistorianFact(BaseModel):
