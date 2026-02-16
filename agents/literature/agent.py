@@ -11,7 +11,7 @@ import concurrent.futures
 import threading
 from functools import lru_cache
 from typing import Dict, Any, Optional
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoProcessor, AutoModelFor ImageTextToText
 
 from app.config import settings
 from agents.literature.tools import LITERATURE_TOOLS
@@ -38,8 +38,8 @@ def load_medgemma():
             return _MODEL_CACHE
         
         print("[LiteratureAgent] Loading shared MedGemma model...")
-        model, tokenizer = load_shared_medgemma()
-        _MODEL_CACHE = (model, tokenizer)
+        model, processor = load_shared_medgemma()
+        _MODEL_CACHE = (model, processor)
         print("[LiteratureAgent] Using shared model instance")
         return _MODEL_CACHE
 
@@ -48,9 +48,9 @@ class ReActStepError(Exception):
 
 
 class MedGemmaAgent:
-    def __init__(self, model, tokenizer, max_steps: int = 3):  # Reduced from 5 to 3
+    def __init__(self, model, processor, max_steps: int = 3):  # Reduced from 5 to 3
         self.model = model
-        self.tokenizer = tokenizer
+        self.processor = processor
         self.max_steps = max_steps
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=3)
 
@@ -60,15 +60,29 @@ class MedGemmaAgent:
         _inference_lock = get_inference_lock()
         with _inference_lock:
             print(f"[Thread-{threading.current_thread().name}] Acquired model lock for generation")
-            inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
+            
+            # Use chat template format for MedGemma 1.5
+            messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
+            inputs = self.processor.apply_chat_template(
+                messages,
+                add_generation_prompt=True,
+                tokenize=True,
+                return_dict=True,
+                return_tensors="pt"
+            ).to(self.model.device, dtype=torch.float16)
+            
+            input_len = inputs["input_ids"].shape[-1]
             outputs = self.model.generate(
                 **inputs,
-                max_new_tokens=400,  # Reduced from 600
+                max_new_tokens=400,
                 temperature=0.1,
-                do_sample=False,  # Deterministic for speed
-                pad_token_id=self.tokenizer.eos_token_id
+                do_sample=False,
+                pad_token_id=self.processor.tokenizer.eos_token_id
             )
-            result = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+            
+            # Extract only newly generated tokens
+            generated_tokens = outputs[0][input_len:]
+            result = self.processor.decode(generated_tokens, skip_special_tokens=True)
             print(f"[Thread-{threading.current_thread().name}] Released model lock")
             return result
 
@@ -223,14 +237,14 @@ class MedGemmaAgent:
 @lru_cache(maxsize=100)
 def _cached_literature_search(query_hash: str, query: str) -> str:
     """Cache literature search results."""
-    model, tokenizer = load_medgemma()
-    agent = MedGemmaAgent(model=model, tokenizer=tokenizer, max_steps=3)
+    model, processor = load_medgemma()
+    agent = MedGemmaAgent(model=model, processor=processor, max_steps=3)
     return agent.run(query)
 
 
 def literature_agent_node(state):
     # Load model once (singleton pattern)
-    model, tokenizer = load_medgemma()
+    model, processor = load_medgemma()
     rad_output = state.get("radiologist_output")
     chexbert_output = state.get("chexbert_output")
     
@@ -287,7 +301,7 @@ Retrieve supporting or contradicting biomedical literature for the above finding
         if settings.USE_LITERATURE_CACHE:
             answer = _cached_literature_search(query_hash, query)
         else:
-            agent = MedGemmaAgent(model=model, tokenizer=tokenizer, max_steps=3)
+            agent = MedGemmaAgent(model=model, processor=processor, max_steps=3)
             answer = agent.run(query)
     except Exception as e:
         print(f"[LiteratureAgent] Error: {e}")

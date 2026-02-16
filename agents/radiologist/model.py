@@ -10,7 +10,7 @@ from typing import Any, Tuple
 from PIL import Image
 from transformers import (
     AutoTokenizer, 
-    AutoModelForCausalLM, 
+    AutoModelForImageTextToText,
     AutoProcessor, 
     BitsAndBytesConfig,
     AutoImageProcessor
@@ -137,12 +137,9 @@ def _embedding_hook(module, inputs, output):
         return output
     
     # Get input_ids from the forward call
-    # Format: inputs is typically (input_ids,) tuple
     if isinstance(inputs, tuple) and len(inputs) > 0:
         input_ids = inputs[0]
     else:
-        # Fallback: can't find input_ids, skip
-        print("[HOOK DEBUG] Could not extract input_ids from inputs")
         return output
     
     # Ensure input_ids is 2D [batch, seq]
@@ -153,29 +150,19 @@ def _embedding_hook(module, inputs, output):
     image_mask = input_ids == _pending_image_token_id
     b_idx, s_idx = image_mask.nonzero(as_tuple=True)
     
-    print(f"[HOOK DEBUG] input_ids shape: {input_ids.shape}, output shape: {output.shape}")
-    print(f"[HOOK DEBUG] Looking for image token ID: {_pending_image_token_id}")
-    print(f"[HOOK DEBUG] Found {len(b_idx)} image tokens at positions: {s_idx.tolist() if len(s_idx) > 0 else 'NONE'}")
-    
-    # Only swap if:
-    # 1. We found <image> tokens
-    # 2. Output sequence is long enough (not a decode step with len=1)
-    # 3. The positions are within bounds
+    # Only swap if we found <image> tokens and output is long enough
     if len(s_idx) > 0 and output.shape[1] > s_idx.max():
         # Verify we have the right number of embeddings
         if len(b_idx) != _pending_vision_embeds.shape[0]:
             print(f"[HOOK WARNING] Token count mismatch: {len(b_idx)} tokens != {_pending_vision_embeds.shape[0]} embeddings")
             return output
         
-        print(f"[HOOK DEBUG] ✓ SWAPPING {len(b_idx)} vision embeddings")
         new_output = output.clone()
         new_output[b_idx, s_idx] = _pending_vision_embeds.to(
             device=output.device,
             dtype=output.dtype
         )
         return new_output
-    else:
-        print(f"[HOOK DEBUG] ✗ SKIP swap (conditions not met)")
     
     return output
 
@@ -277,7 +264,7 @@ def _load_models():
     assert image_token_id != _tokenizer.unk_token_id
 
     
-    _llm = AutoModelForCausalLM.from_pretrained(
+    _llm = AutoModelForImageTextToText.from_pretrained(
         settings.MEDGEMMA_4B_MODEL,
         quantization_config=bnb_config,
         device_map="auto"
@@ -357,14 +344,6 @@ def generate_findings(image_path: str, view: str = "AP") -> dict:
     attention_mask = inputs.attention_mask
 
     image_token_id = _tokenizer.convert_tokens_to_ids(IMAGE_TOKEN)
-    
-    print(f"\n[DEBUG] === GENERATION SETUP ===")
-    print(f"Prompt: {repr(prompt)}")
-    print(f"Input IDs shape: {input_ids.shape}")
-    print(f"Image token ID: {image_token_id}")
-    print(f"Input IDs contain image token: {(input_ids == image_token_id).any().item()}")
-    print(f"Image token count in input: {(input_ids == image_token_id).sum().item()}")
-    print(f"[DEBUG] === END GENERATION SETUP ===\n")
 
     # 3️⃣ Set pending vision embeddings for hook to inject
     set_pending_vision_embeds(projected, image_token_id)
@@ -381,7 +360,7 @@ def generate_findings(image_path: str, view: str = "AP") -> dict:
             output_ids = _llm.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                max_new_tokens=300,
+                max_new_tokens=100,  # Reduced for testing untrained model (restore to 300 after retraining)
                 do_sample=False,  # Use greedy decoding for stability
                 use_cache=True,
                 pad_token_id=_tokenizer.eos_token_id,
@@ -396,11 +375,7 @@ def generate_findings(image_path: str, view: str = "AP") -> dict:
         clear_pending_vision_embeds()
 
     generated_text = _tokenizer.decode(output_ids[0], skip_special_tokens=True)
-    
-    print(f"\n[DEBUG] === GENERATED TEXT ===")
-    print(f"Length: {len(generated_text)} characters")
-    print(f"Raw output:\n{repr(generated_text)}")
-    print(f"[DEBUG] === END GENERATED TEXT ===\n")
+    print("parsing the report")
 
     return _parse_report(generated_text)
 

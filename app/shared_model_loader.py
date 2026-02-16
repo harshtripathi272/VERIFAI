@@ -10,7 +10,7 @@ This prevents duplicate model loading and reduces VRAM usage from ~27GB to ~9GB.
 import threading
 import torch
 from typing import Optional, Tuple
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoProcessor, AutoModelForImageTextToText
 from app.config import settings
 
 # Global singleton cache
@@ -19,7 +19,7 @@ _MODEL_LOAD_LOCK = threading.Lock()
 _INFERENCE_LOCK = threading.Lock()
 
 
-def load_shared_medgemma() -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
+def load_shared_medgemma() -> Tuple[AutoModelForImageTextToText, AutoProcessor]:
     """
     Load or retrieve the shared MedGemma-4B model instance.
     
@@ -27,7 +27,7 @@ def load_shared_medgemma() -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
     and shared across Historian, Literature, and LLM Critic agents.
     
     Returns:
-        Tuple of (model, tokenizer)
+        Tuple of (model, processor)
     """
     global _MODEL_CACHE
     
@@ -43,23 +43,47 @@ def load_shared_medgemma() -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
         
         print("[SharedModelLoader] Loading MedGemma-4B (16-bit FP16) - one-time initialization...")
         
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        dtype = torch.float16 if device == "cuda" else torch.float32
+        # Verify CUDA availability
+        if not torch.cuda.is_available():
+            print("[SharedModelLoader] WARNING: CUDA not available, falling back to CPU")
+            device = "cpu"
+            dtype = torch.float32
+        else:
+            device = torch.device("cuda:0")  # Explicitly use GPU 0
+            dtype = torch.float16  # Use float16 for RTX 8000 (no native bfloat16)
+            print(f"[SharedModelLoader] CUDA available: {torch.cuda.get_device_name(0)}")
+            print(f"[SharedModelLoader] CUDA memory before loading: {torch.cuda.memory_allocated(0) / 1024**3:.2f} GB")
         
-        tokenizer = AutoTokenizer.from_pretrained(
+        # Use AutoProcessor instead of AutoTokenizer for MedGemma 1.5
+        processor = AutoProcessor.from_pretrained(
             settings.MEDGEMMA_4B_MODEL,
             token=settings.HUGGINGFACE_TOKEN
         )
         
-        model = AutoModelForCausalLM.from_pretrained(
+        print(f"[SharedModelLoader] Loading model to {device}...")
+        # Use AutoModelForImageTextToText for MedGemma 1.5 (even for text-only)
+        model = AutoModelForImageTextToText.from_pretrained(
             settings.MEDGEMMA_4B_MODEL,
-            device_map="auto",
             torch_dtype=dtype,
-            token=settings.HUGGINGFACE_TOKEN
+            token=settings.HUGGINGFACE_TOKEN,
+            low_cpu_mem_usage=True
         )
         
-        _MODEL_CACHE = (model, tokenizer)
-        print(f"[SharedModelLoader] Model loaded successfully on {device} with dtype={dtype}")
+        # Explicitly move to GPU if available
+        if device != "cpu":
+            print(f"[SharedModelLoader] Moving model to {device}...")
+            model = model.to(device)
+        
+        _MODEL_CACHE = (model, processor)
+        
+        # Verify GPU placement
+        if device != "cpu":
+            print(f"[SharedModelLoader] Model loaded successfully on {device} with dtype={dtype}")
+            print(f"[SharedModelLoader] CUDA memory after loading: {torch.cuda.memory_allocated(0) / 1024**3:.2f} GB")
+            print(f"[SharedModelLoader] Model device: {next(model.parameters()).device}")
+        else:
+            print(f"[SharedModelLoader] Model loaded on CPU (CUDA not available)")
+        
         print("[SharedModelLoader] This model instance is shared by Historian, Literature, and Critic agents")
         
         return _MODEL_CACHE

@@ -41,6 +41,7 @@ def radiologist_node(state: VerifaiState) -> dict:
     view = state["view"]
     
     for i in range(n_samples):
+        print("Generating sample", i+1)
         # Call model with image path and view
         raw_output = generate_findings(image_path, view=view)
         

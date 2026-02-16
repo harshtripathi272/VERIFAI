@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     
     # === KLE Uncertainty Settings ===
     KLE_UNCERTAINTY_THRESHOLD: float = 0.30  # Consensus requires uncertainty < threshold
-    KLE_NUM_SAMPLES: int = 5  # Number of samples to generate for KLE
+    KLE_NUM_SAMPLES: int = 3  # Number of samples to generate for KLE
     
     # === FHIR Configuration ===
     FHIR_BASE_URL: str = "https://fhir.mimic-iv-demo.physionet.org/fhir"  # Public test server

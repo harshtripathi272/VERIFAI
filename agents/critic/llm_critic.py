@@ -111,7 +111,7 @@ class MedGemmaCritic:
 
     def __init__(self):
         self._model = None
-        self._tokenizer = None
+        self._processor = None
         self._loaded = False
 
     # ---- lazy model loading ------------------------------------------------
@@ -130,7 +130,7 @@ class MedGemmaCritic:
             logger.info("[LLM-Critic] Loading shared MedGemma model...")
             
             # Use shared model loader instead of loading separate instance
-            self._model, self._tokenizer = load_shared_medgemma()
+            self._model, self._processor = load_shared_medgemma()
             
             self._loaded = True
             logger.info("[LLM-Critic] Using shared model instance")
@@ -190,38 +190,37 @@ class MedGemmaCritic:
 
     def _run_inference(self, user_prompt: str) -> str:
         """Generate text from the model and return raw string."""
-        if self._model is None or self._tokenizer is None:
+        if self._model is None or self._processor is None:
             raise RuntimeError("Model not loaded")
 
-        messages = [
-            {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ]
-
-        # Use chat template if the tokenizer supports it
-        if hasattr(self._tokenizer, "apply_chat_template"):
-            input_ids = self._tokenizer.apply_chat_template(
-                messages, return_tensors="pt", add_generation_prompt=True
-            ).to(self._model.device)
-        else:
-            flat = f"{_SYSTEM_PROMPT}\n\n{user_prompt}"
-            input_ids = self._tokenizer(flat, return_tensors="pt").input_ids.to(self._model.device)
+        # Use chat template format for MedGemma 1.5
+        messages = [{"role": "user", "content": [{"type": "text", "text": f"{_SYSTEM_PROMPT}\n\n{user_prompt}"}]}]
+        
+        inputs = self._processor.apply_chat_template(
+            messages,
+            add_generation_prompt=True,
+            tokenize=True,
+            return_dict=True,
+            return_tensors="pt"
+        ).to(self._model.device, dtype=torch.float16)
+        
+        input_len = inputs["input_ids"].shape[-1]
 
         # CRITICAL: Acquire shared lock before inference
         _inference_lock = get_inference_lock()
         with _inference_lock:
             with torch.no_grad():
-                output_ids = self._model.generate(
-                    input_ids,
+                outputs = self._model.generate(
+                    **inputs,
                     max_new_tokens=512,
                     temperature=0.1,
                     do_sample=True,
                     top_p=0.9,
                 )
 
-        # Decode only newly generated tokens
-        generated = output_ids[0][input_ids.shape[-1]:]
-        return self._tokenizer.decode(generated, skip_special_tokens=True).strip()
+        # Extract only newly generated tokens
+        generated_tokens = outputs[0][input_len:]
+        return self._processor.decode(generated_tokens, skip_special_tokens=True).strip()
 
     # ---- mock inference ----------------------------------------------------
 

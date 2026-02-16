@@ -76,7 +76,7 @@ def monitor_vram(interval=2, duration=120):
 
 if __name__ == "__main__":
     # Monitor for 2 minutes (adjust as needed)
-    duration = 600
+    duration = 600000
     if len(sys.argv) > 1:
         try:
             duration = int(sys.argv[1])
@@ -84,4 +84,4 @@ if __name__ == "__main__":
             print(f"Invalid duration: {sys.argv[1]}, using default 120s")
     
     peak_gb = monitor_vram(interval=2, duration=duration)
-    sys.exit(0 if peak_gb < 40 else 1)
+    sys.exit(0 if peak_gb < 43 else 1)

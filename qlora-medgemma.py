@@ -20,8 +20,8 @@ Pipeline:
 import os
 import sys
 
-WORKSPACE_ROOT1 ="/kaggle/input/datasets/aayush5665/mimic-cxr-train-val"
-WORKSPACE_ROOT2="/kaggle/input/datasets/simhadrisadaram/mimic-cxr-dataset"
+WORKSPACE_ROOT1 ="../dataset/med/"
+WORKSPACE_ROOT2="../dataset/med/"
 
 import torch
 from transformers import (
@@ -335,7 +335,7 @@ class ModelConfig:
 
     # 4-bit NF4 quantisation
     load_in_4bit: bool = True
-    bnb_4bit_compute_dtype: str = "bfloat16"
+    bnb_4bit_compute_dtype: str = "float16"
     bnb_4bit_quant_type: str = "nf4"
     bnb_4bit_use_double_quant: bool = True
 
@@ -392,7 +392,7 @@ class TrainingConfig:
     data: DataConfig = field(default_factory=DataConfig)
 
     # Training hyperparameters
-    output_dir: str = "/kaggle/working/output"
+    output_dir: str = "../dataset/med/fine_tuned_model"
     num_train_epochs: int = 1.8
     per_device_train_batch_size: int = 1
     per_device_eval_batch_size: int = 1
@@ -567,7 +567,7 @@ from typing import Optional, Tuple, Dict, Any
 
 from transformers import (
     SiglipVisionModel,
-    AutoModelForCausalLM,
+    AutoModelForImageTextToText,
     BitsAndBytesConfig,
 )
 class VisionProjector(nn.Module):
@@ -613,7 +613,7 @@ class MedGemmaVLM(nn.Module):
         language_model_id: str,
         quantization_config: Optional[BitsAndBytesConfig] = None,
         device_map: str = "auto",
-        torch_dtype: torch.dtype = torch.bfloat16,
+        torch_dtype: torch.dtype = torch.float16,
     ):
         super().__init__()
 
@@ -637,11 +637,11 @@ class MedGemmaVLM(nn.Module):
         self.vision_tower.eval()
 
         # ── Language model (quantised) ───────────────────────────────
-        self.language_model = AutoModelForCausalLM.from_pretrained(
+        self.language_model = AutoModelForImageTextToText.from_pretrained(
             language_model_id,
             quantization_config=quantization_config,
             device_map=None,
-            dtype=torch_dtype,
+            torch_dtype=torch_dtype,
             trust_remote_code=True,
         )
         
@@ -1051,7 +1051,7 @@ def main():
         vision_model_id=config.model.vision_model_id,
         language_model_id=config.model.language_model_id,
         quantization_config=quant_config,
-        torch_dtype=torch.bfloat16 if config.bf16 else torch.float16,
+        torch_dtype=torch.float16,  # Use float16 for RTX 8000 compatibility
     )
     print("  ✓ Model loaded successfully")
     

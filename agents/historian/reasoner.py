@@ -1,12 +1,12 @@
 import json
 import re
 import threading
-from transformers import AutoTokenizer, AutoModelForCausalLM
+import torch
 from app.config import settings
 from app.shared_model_loader import load_shared_medgemma, get_inference_lock
 
 # Thread-safe singleton pattern - now using shared loader
-tokenizer = None
+processor = None
 model = None
 _LOAD_LOCK = threading.Lock()
 # Inference lock is now managed by shared_model_loader
@@ -14,20 +14,20 @@ _LOAD_LOCK = threading.Lock()
 
 def load_medgemma():
     """Load MedGemma model using shared loader (singleton across agents)."""
-    global tokenizer, model
+    global processor, model
 
     # Quick check without lock
-    if tokenizer is not None and model is not None:
+    if processor is not None and model is not None:
         return
 
     # Acquire lock for loading
     with _LOAD_LOCK:
         # Double-check after acquiring lock
-        if tokenizer is not None and model is not None:
+        if processor is not None and model is not None:
             return
         
         print("[Historian] Loading shared MedGemma model...")
-        model, tokenizer = load_shared_medgemma()
+        model, processor = load_shared_medgemma()
         print("[Historian] Using shared model instance")
 
 
@@ -123,17 +123,63 @@ JSON schema:
     _inference_lock = get_inference_lock()
     with _inference_lock:
         print(f"[Thread-{threading.current_thread().name}] Historian acquired model lock")
-        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens=500,
-            temperature=0.1
-        )
-        raw = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        print(f"[Historian] Preparing text-only message with prompt length: {len(prompt)} chars")
+        
+        # Use chat template format for MedGemma 1.5 (text-only, no image)
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt}
+                ]
+            }
+        ]
+        
+        # Apply chat template using processor
+        inputs = processor.apply_chat_template(
+            messages,
+            add_generation_prompt=True,
+            tokenize=True,
+            return_dict=True,
+            return_tensors="pt"
+        ).to(model.device, dtype=torch.float16)
+        
+        input_len = inputs["input_ids"].shape[-1]
+        print(f"[Historian] Input tokens: {inputs['input_ids'].shape}")
+        print(f"[Historian] Starting generation (max_new_tokens=500)...")
+        
+        with torch.inference_mode():
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=500,
+                do_sample=False  # Greedy decoding for deterministic output
+            )
+        
+        print(f"[Historian] Generation complete! Output tokens: {outputs.shape}")
+        
+        # Extract only the newly generated tokens (skip the input prompt)
+        generated_tokens = outputs[0][input_len:]
+        raw = processor.decode(generated_tokens, skip_special_tokens=True)
+        
+        print(f"[Historian] Generated output length: {len(raw)} chars")
+        print(f"[Historian] Output preview: {raw[:300]}...")
         print(f"[Thread-{threading.current_thread().name}] Historian released model lock")
 
-    match = re.search(r"\{.*\}", raw, re.DOTALL)
+
+
+    # Clean up output - remove any special tokens that weren't caught
+    raw = re.sub(r'<unused\d+>', '', raw)  # Remove <unusedNN> tokens
+    raw = re.sub(r'<[^>]+>', '', raw)  # Remove any other special tags
+    
+    # Try to extract JSON - look for complete JSON object with our expected schema
+    match = re.search(r'\{[^{}]*"supporting_facts"[^{}]*\}', raw, re.DOTALL)
     if not match:
+        # Fallback: look for any JSON-like structure
+        match = re.search(r"\{.*\}", raw, re.DOTALL)
+    
+    if not match:
+        print("[Historian] WARNING: No JSON found in output")
+        print(f"[Historian] Raw text: {raw[:500]}...")
         return {
             "supporting_facts": [],
             "contradicting_facts": [],
@@ -141,9 +187,13 @@ JSON schema:
         }
 
     try:
-        result = json.loads(match.group())
-    except Exception:
-         return {
+        json_str = match.group()
+        result = json.loads(json_str)
+        print(f"[Historian] Successfully parsed JSON")
+    except Exception as e:
+        print(f"[Historian] JSON parse error: {e}")
+        print(f"[Historian] Attempted to parse: {match.group()[:200]}...")
+        return {
             "supporting_facts": [],
             "contradicting_facts": [],
             "confidence_adjustment": 0.0
@@ -155,5 +205,6 @@ JSON schema:
         result["confidence_adjustment"] = max(-0.3, min(0.3, adj))
     except (ValueError, TypeError):
         result["confidence_adjustment"] = 0.0
+    print(result)
 
     return result
