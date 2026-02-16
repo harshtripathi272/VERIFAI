@@ -14,7 +14,8 @@ from concurrent.futures import ThreadPoolExecutor, wait
 
 from graph.state import VerifaiState, FinalDiagnosis
 from app.config import settings
-from db.logger import AgentLogger
+from db.adapter import get_logger  # NEW: Unified database adapter (SQLite or Supabase)
+
 
 # Import agent nodes
 from agents.radiologist.agent import radiologist_node
@@ -24,17 +25,18 @@ from agents.historian.agent import historian_node
 from agents.literature.agent import literature_agent_node as literature_node
 from agents.debate.agent import debate_node
 from agents.chief.agent import chief_node
+from agents.feedback.agent import feedback_node  # NEW: Doctor feedback processing
 
 
 # =============================================================================
 # THREAD-LOCAL LOGGER REGISTRY (one logger per session)
 # =============================================================================
 import threading
-_logger_registry: dict[str, AgentLogger] = {}
+_logger_registry: dict[str, Any] = {}
 _registry_lock = threading.Lock()
 
 
-def _get_or_create_logger(state: VerifaiState) -> AgentLogger:
+def _get_or_create_logger(state: VerifaiState):
     """Get or create a logger for the current workflow session."""
     session_id = state.get("_session_id")
     
@@ -43,7 +45,7 @@ def _get_or_create_logger(state: VerifaiState) -> AgentLogger:
     
     # Create new session
     session_id = session_id or str(uuid.uuid4())
-    logger = AgentLogger(
+    logger = get_logger(  # NEW: Uses adapter to select SQLite or Supabase
         session_id=session_id,
         image_path=state.get("image_path", ""),
         patient_id=state.get("patient_id"),
@@ -286,21 +288,39 @@ def route_after_debate(state: VerifaiState) -> str:
         return "finalize"
 
 
+def should_start_from_critic(state: VerifaiState) -> str:
+    """
+    Route decision for feedback-driven reprocessing.
+    
+    - If is_feedback_iteration=True → go directly to critic (skip radiologist/chexbert/evidence)
+    - Otherwise → normal flow starting from radiologist
+    
+    This allows doctor feedback to restart the workflow from critic
+    with all the original context preserved.
+    """
+    is_feedback = state.get("is_feedback_iteration", False)
+    
+    if is_feedback:
+        return "critic_feedback"  # Special path for feedback iteration
+    else:
+        return "radiologist"  # Normal path
+
+
 def build_workflow() -> StateGraph:
     """
-    Constructs the VERIFAI LangGraph DAG with debate mechanism.
+    Constructs the VERIFAI LangGraph DAG with debate mechanism and doctor feedback support.
     All nodes are wrapped with automatic SQL logging.
     
-    UPDATED Flow (Sequential Reasoning Depth):
-    START → Radiologist → Evidence Gathering (Hist + Lit parallel) → Critic → Debate →┬→ Finalize → END
-                                                                                        └→ Chief → END
+    NORMAL Flow:
+    START → Radiologist → CheXbert → Evidence Gathering (Hist + Lit parallel) → Critic → Debate →┬→ Finalize → END
+                                                                                                    └→ Chief → END
     
-    CRITICAL: Evidence gathering MUST complete before Critic evaluation.
-    This ensures Critic evaluates fully enriched diagnostic context:
-    - Imaging findings (Radiologist)
-    - Clinical history (Historian FHIR data)
-    - Literature evidence (Literature citations)
-    - Epistemic uncertainty (KLE score)
+    FEEDBACK Flow (when doctor rejects diagnosis):
+    START → [routing] → Critic (with feedback context) → Debate →┬→ Finalize → END
+                                                                   └→ Chief → END
+    
+    The feedback flow skips Radiologist/CheXbert/Evidence gathering because those outputs
+    are preserved from the original workflow that was rejected.
     """
     graph = StateGraph(VerifaiState)
     
@@ -309,24 +329,38 @@ def build_workflow() -> StateGraph:
     graph.add_node("evidence_gathering", logged_evidence_gathering_node)  # Parallel Hist + Lit
     graph.add_node("chexbert", chexbert_node)
     graph.add_node("critic", logged_critic_node)
+    graph.add_node("critic_feedback", logged_critic_node)  # Same node, different entry point
     graph.add_node("debate", logged_debate_node)
     graph.add_node("chief", logged_chief_node)
     graph.add_node("finalize", logged_finalize_node)
     
-    # === Define Edges ==
+    # === Define Edges ===
     
-    # Entry: START → Radiologist
-    graph.add_edge(START, "radiologist")
+    # Entry: START → Conditional routing (normal vs feedback)
+    graph.add_conditional_edges(
+        START,
+        should_start_from_critic,
+        {
+            "radiologist": "radiologist",
+            "critic_feedback": "critic_feedback"  # Skip to critic for feedback iteration
+        }
+    )
     
-    # NEW: Radiologist → CheXbert (label findings immediately)
+    # NORMAL FLOW
+    # Radiologist → CheXbert (label findings immediately)
     graph.add_edge("radiologist", "chexbert")
     
-    # NEW: CheXbert → Evidence Gathering (gather context with structured labels)
+    # CheXbert → Evidence Gathering (gather context with structured labels)
     graph.add_edge("chexbert", "evidence_gathering")
     
-    # NEW: Evidence Gathering → Critic (evaluate WITH full context)
+    # Evidence Gathering → Critic (evaluate WITH full context)
     graph.add_edge("evidence_gathering", "critic")
     
+    # FEEDBACK FLOW
+    # Critic (feedback) → Debate (skip evidence gathering, use preserved context)
+    graph.add_edge("critic_feedback", "debate")
+    
+    # COMMON PATH
     # Critic → Debate (adversarial reconciliation with enriched context)
     graph.add_edge("critic", "debate")
     

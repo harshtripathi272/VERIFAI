@@ -33,3 +33,6 @@ duckdb
 pydantic_settings
 pytest
 f1chexbert
+
+# Cloud Database (Supabase)
+supabase>=2.3.0       # Cloud PostgreSQL database client
