@@ -36,12 +36,16 @@ class VisualFinding(BaseModel):
 class RadiologistOutput(BaseModel):
     """Plain-text output from Radiologist Agent.
     
-    Contains only narrative FINDINGS and IMPRESSION sections.
-    No confidence scores, probabilities, or structured outputs.
+    Contains narrative FINDINGS and IMPRESSION sections.
+    Also includes disease probabilities and paths to interpretability heatmaps.
     Epistemic uncertainty is computed externally via KLE.
     """
     findings: str = Field(..., description="Textual FINDINGS section based on visual evidence")
     impression: str = Field(..., description="Textual IMPRESSION section with diagnostic interpretation")
+    
+    # New fields for Disease Classification & Interpretability
+    disease_probabilities: dict[str, float] = Field(default_factory=dict, description="Probabilities for 14 CheXbert diseases")
+    heatmap_paths: dict[str, str] = Field(default_factory=dict, description="Paths to saved heatmap images for positive detections")
 
 
 class CheXbertOutput(BaseModel):

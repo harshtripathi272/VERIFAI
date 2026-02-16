@@ -55,9 +55,15 @@ def radiologist_node(state: VerifaiState) -> dict:
             samples.append(impression_text)
     
     # Create RadiologistOutput from primary sample
+    # Run disease analysis (classification + heatmaps)
+    from .model import analyze_disease
+    disease_analysis = analyze_disease(image_path)
+    
     output = RadiologistOutput(
         findings=primary_report.get("findings", ""),
-        impression=primary_report.get("impression", "")
+        impression=primary_report.get("impression", ""),
+        disease_probabilities=disease_analysis.get("probabilities", {}),
+        heatmap_paths=disease_analysis.get("heatmap_paths", {})
     )
     
     # === KLE SEMANTIC UNCERTAINTY ESTIMATION ===

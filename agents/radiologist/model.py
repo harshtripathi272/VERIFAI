@@ -18,10 +18,18 @@ from transformers import (
 from peft import PeftModel
 from app.config import settings
 import os
+import numpy as np
+from agents.radiologist.classifier import MedSigLIPClassifier
+from agents.radiologist.lrp import RelevanceGenerator
+from agents.radiologist.data import CHEXBERT_CLASSES
+
+
 
 # Global model cache
 _models_loaded = False
-_vision_encoder = None
+_vision_encoder = None # Now shared from classifier
+_classifier_model = None # New
+_lrp_generator = None    # New
 _llm = None
 _tokenizer = None
 _image_processor = None
@@ -216,34 +224,43 @@ def _load_models():
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
-    # 1. Vision Encoder (MedSigLIP)
-    print(f"\n[DEBUG] Loading MedSigLIP: {settings.MEDSIGLIP_MODEL}")
+    # 1. Vision Encoder & Classifier
+    # We load the Classifier wrapper which contains the SigLIP backbone.
+    # This allows sharing the backbone for both VLM and Classification/LRP.
+    
+    print(f"\n[DEBUG] Loading MedSigLIP Classifier: {settings.MEDSIGLIP_MODEL}")
     print(f"[DEBUG] Target device: {device}")
     
     _image_processor = AutoImageProcessor.from_pretrained(
         settings.MEDSIGLIP_MODEL
     )
-    print(f"[DEBUG] Image processor loaded")
     
-    # Load vision model
-    from transformers import SiglipVisionModel
-    target_dtype = torch.float16 if device == "cuda" else torch.float32
-    print(f"[DEBUG] Loading vision model with dtype={target_dtype}")
+    # Initialize Classifier (wraps SigLIP)
+    global _classifier_model, _lrp_generator
+    _classifier_model = MedSigLIPClassifier(
+        settings.MEDSIGLIP_MODEL, 
+        num_classes=len(CHEXBERT_CLASSES)
+    )
     
-    # Note: device_map doesn't always work reliably with SiglipVisionModel
-    # Load first, then explicitly move to device
-    _vision_encoder = SiglipVisionModel.from_pretrained(
-        settings.MEDSIGLIP_MODEL,
-        torch_dtype=target_dtype,
-    ).eval()
+    # Load trained head weights if available
+    # Default location: classifier_head_best.pth in current dir or specific path
+    head_weights_path = getattr(settings, "CLASSIFIER_WEIGHTS_PATH", "classifier_head_best.pth")
+    if os.path.exists(head_weights_path):
+        print(f"[Radiologist] Loading classifier head weights from {head_weights_path}")
+        _classifier_model.load_head(head_weights_path)
+    else:
+        print(f"[Radiologist] WARNING: Classifier weights not found at {head_weights_path}. Using random init for head.")
     
-    # Explicitly move to target device (device_map is often ignored)
-    _vision_encoder = _vision_encoder.to(device)
+    _classifier_model.to(device)
+    _classifier_model.eval()
     
-    print(f"[DEBUG] Vision encoder loaded:")
-    print(f"[DEBUG]   - Actual device: {_vision_encoder.device}")
-    print(f"[DEBUG]   - Actual dtype: {_vision_encoder.dtype}")
-    print(f"[DEBUG]   - Eval mode: {not _vision_encoder.training}")
+    # Set the shared vision encoder to the classifier's backbone
+    _vision_encoder = _classifier_model.vision_model
+    
+    # Initialize LRP Generator
+    _lrp_generator = RelevanceGenerator(_classifier_model)
+    
+    print(f"[DEBUG] Vision encoder (shared) loaded.")
 
     # 2. LLM (MedGemma-4B with 4-bit LoRA)
     print(f"Loading MedGemma: {settings.MEDGEMMA_4B_MODEL}")
@@ -421,3 +438,93 @@ def _parse_report(text: str) -> dict:
         "findings": findings or "No findings generated.",
         "impression": impression or "No impression generated."
     }
+
+def analyze_disease(image_path: str) -> dict:
+    """
+    Run disease classification and generate heatmaps for detected findings.
+    
+    Returns:
+        {
+            "probabilities": { "Pneumonia": 0.85, ... },
+            "heatmap_paths": { "Pneumonia": "/path/to/heatmap.png", ... }
+        }
+    """
+    _load_models()
+    device = _classifier_model.vision_model.device
+    
+    # Load Image
+    try:
+        image = Image.open(image_path).convert("RGB")
+        inputs = _image_processor(images=image, return_tensors="pt")
+        pixel_values = inputs.pixel_values.to(device)
+    except Exception as e:
+        print(f"[ERROR] Classifier image load failed: {e}")
+        return {"probabilities": {}, "heatmap_paths": {}}
+        
+    # 1. Classification
+    with torch.no_grad():
+        logits = _classifier_model(pixel_values) # [1, 14]
+        probs = torch.sigmoid(logits).squeeze(0) # [14]
+        
+    # Zip with classes
+    prob_dict = {
+        cls: float(prob.item()) 
+        for cls, prob in zip(CHEXBERT_CLASSES, probs)
+    }
+    
+    # 2. Heatmap Generation (for positives > 0.5)
+    heatmap_paths = {}
+    
+    # Ensure output directory
+    output_dir = "output/heatmaps"
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Clean image path for filename
+    base_name = os.path.basename(image_path).replace(".jpg", "").replace(".png", "")
+    
+    for i, (cls_name, prob) in enumerate(zip(CHEXBERT_CLASSES, probs)):
+        if prob > 0.5:
+            # Generate LRP
+            # Note: LRP implies backward pass, so we need grads enabled temporarily for the backward
+            # But we are in inference. 
+            # RelevanceGenerator handles the zero_grad and backward internally.
+            
+            try:
+                # We need pixel_values again potentially if LRP modifies it? 
+                # LRP generator clones or uses it fresh.
+                
+                heatmap = _lrp_generator.generate(pixel_values, target_class_index=i, device=device)
+                
+                # Save heatmap
+                # Heatmap is [H, W] float
+                
+                # Normalize to 0-255 uint8 for saving
+                hm_norm = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min() + 1e-8)
+                hm_uint8 = (hm_norm * 255).astype(np.uint8)
+                
+                # Resize to original image size for overlay? 
+                # For now save the raw heatmap or resized.
+                # User asked: "Heatmaps should be resized from patch resolution to full image resolution using bilinear interpolation"
+                # We can do this with PIL
+                
+                hm_img = Image.fromarray(hm_uint8, mode='L')
+                hm_resized = hm_img.resize(image.size, resample=Image.BILINEAR)
+                
+                # Create a colormap overlay? 
+                # User just said "visual heatmaps... save as files".
+                # Standard practice is jet/viridis. 
+                # For simplicity, we save grayscale heatmap or apply a simple colormap if needed.
+                # Let's save grayscale for now to avoid mpl dependency if not present.
+                
+                save_path = os.path.join(output_dir, f"{base_name}_{cls_name.replace(' ', '_')}_heatmap.png")
+                hm_resized.save(save_path)
+                heatmap_paths[cls_name] = save_path
+                
+            except Exception as e:
+                print(f"[ERROR] Heatmap generation failed for {cls_name}: {e}")
+                
+    return {
+        "probabilities": prob_dict,
+        "heatmap_paths": heatmap_paths
+    }
+
