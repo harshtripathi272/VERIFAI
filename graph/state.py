@@ -150,6 +150,23 @@ class DebateOutput(BaseModel):
     total_confidence_adjustment: float = 0.0
 
 
+# DOCTOR FEEDBACK MODELS
+
+
+class DoctorFeedback(BaseModel):
+    """Doctor feedback for diagnosis review and reprocessing.
+    
+    Captured when a doctor rejects/corrects a diagnosis.
+    Used to restart workflow from critic with doctor's context.
+    """
+    feedback_id: int = Field(..., description="Database ID of feedback record")
+    original_session_id: str = Field(..., description="Session ID of original workflow that was rejected")
+    feedback_type: str = Field(..., description="Type: 'rejection', 'correction', or 'approval'")
+    doctor_notes: str = Field(..., description="Doctor's explanation of what's wrong")
+    correct_diagnosis: Optional[str] = Field(None, description="What doctor believes is correct")
+    rejection_reasons: list[str] = Field(default_factory=list, description="Categories of issues found")
+
+
 
 # LANGGRAPH STATE
 
@@ -188,6 +205,10 @@ class VerifaiState(TypedDict):
     
     # === Final Result ===
     final_diagnosis: FinalDiagnosis | None
+    
+    # === Doctor Feedback (NEW) ===
+    doctor_feedback: DoctorFeedback | None  # Present when reprocessing with doctor input
+    is_feedback_iteration: bool  # True if this is a reprocessing run after feedback
     
     # === Audit Trail ===
     trace: Annotated[list[str], append_trace]
