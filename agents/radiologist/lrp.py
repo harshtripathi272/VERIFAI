@@ -1,4 +1,3 @@
-
 """
 LRP for SigLIP (Chefer et al. 2021)
 
@@ -6,201 +5,164 @@ This module implements the Transformer explainability method from Chefer et al. 
 It is specifically adapted for the Hugging Face `SiglipVisionModel`.
 
 Key Logic:
-1. Register backward hooks to capture gradients of Attention and Activation.
+1. Register backward hooks to capture gradients of Attention.
 2. Compute relevance using the "Gradient * Activation" rule, enforcing positive contributions.
-3. Aggregate relevance across layers to form the final heatmap.
+3. Propagate relevance layer-by-layer: R = R + (R @ R_attn).
+4. For SigLIP (GAP), we sum the relevance of the output patches (weighted by classifier) to input patches.
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-
-# Helper for Safe Division
-def safe_divide(numerator, denominator, eps=1e-7):
-    return numerator / (denominator + eps)
-
-class LRPModel(nn.Module):
-    """
-    Wrapper around MedSigLIPClassifier to enable LRP hooks.
-    """
-    def __init__(self, model):
-        super().__init__()
-        self.model = model
-        self.model.eval()
-        self.attn_gradients = {}
-        self.attn_maps = {}
-        
-        # Identify layers to hook
-        # SigLIP structure: model.vision_model.encoder.layers[i].self_attn
-        self._register_hooks()
-        
-    def _register_hooks(self):
-        def save_attn_gradients(name):
-            def hook(module, grad_input, grad_output):
-                # grad_output[0] for the output of Softmax (Attention Weights)
-                self.attn_gradients[name] = grad_output[0].detach()
-            return hook
-
-        def save_attn_maps(name):
-            def hook(module, input, output):
-                # SigLIP self_attn returns (attn_output, attn_weights) if output_attentions=True
-                # But typically the dropout/softmax is internal. 
-                # We need the tensor *after* softmax but *before* multiplication with V.
-                # Since we can't easily intrude into the HF implementation without rewriting it,
-                # we rely on the fact that `output_attentions=True` returns the attention weights
-                # in the main model output. 
-                # HOWEVER, for Chefer's method we need the gradient w.r.t that specific tensor during backward.
-                pass 
-                # Wait, if we use the stored `outputs.attentions`, we can get the map.
-                # But we need the gradient w.r.t it. 
-                # The `outputs.attentions` tensor is a leaf in the graph if we detach it? No.
-                # We can retain_grad() on the attention tensors returned by the model forward pass!
-            return hook
-            
-        # We don't actually need complex internal hooks if we use the `output_attentions=True` feature
-        # and standard autograd.
-        # Chefer method:
-        # A_bar = A * Clamp(Grad_A)
-        pass
+from PIL import Image
 
 class RelevanceGenerator:
     """
-    Generates heatmaps for a specific class using Chefer et al. LRP.
-    Adapted for SigLIP.
+    Generates heatmaps for a specific class using Chefer et al. LRP for SigLIP.
     """
     def __init__(self, model):
         self.model = model
         self.model.eval()
+        self.attentions = []
+        self.attention_gradients = []
+        self.handles = []
+        
+        # We need to hook into the attention layers primarily to capture gradients w.r.t attention map
+        # However, since we can't easily hook internal Softmax output in HF implementation without code mod,
+        # we rely on `output_attentions=True` returning the attention maps, and we RETAIN GRAD on them.
+        pass
+
+    def _cleanup(self):
+        self.attentions = []
+        self.attention_gradients = []
+        for h in self.handles:
+            h.remove()
+        self.handles = []
 
     def generate(self, pixel_values, target_class_index, device="cuda"):
-        # 1. Forward Pass
-        # We need to capture the attention maps and their gradients.
+        # 1. Setup
+        self._cleanup()
         
         pixel_values = pixel_values.to(device)
-        pixel_values.requires_grad = True
+        pixel_values.requires_grad = True # Is this needed for input relevance? Chefer usually visualizes R[0, 1:]
         
-        # Setup model to output attentions
-        # We need to wrap this in a way that we can capture gradients of attentions
+        # 2. Forward Pass
+        # We need to capture the attention maps and their gradients.
+        # MedSigLIPClassifier.forward calls: self.vision_model(..., output_attentions=True)
+        # So we just run the classifier forward.
         
-        outputs = self.model.vision_model(pixel_values, output_attentions=True)
-        # pooled_output = outputs.last_hidden_state.mean(dim=1)
-        # SigLIP uses PyTorch's native scaled_dot_product_attention which might drop weights if not careful,
-        # but output_attentions=True forces it to return them.
+        # NOTE: To get gradients on the attention MAPS returned by output_attentions=True,
+        # we need to make sure they are part of the graph.
+        # HF implementation:
+        # outputs = self.self_attn(...) -> (context_layer, attn_weights)
+        # return (context_layer, attn_weights)
+        # So attn_weights SITS in the graph.
         
-        attentions = outputs.attentions # List of [B, Heads, N, N]
-        
-        # We must retain grads for these tensors to compute A * Grad_A
-        for attn in attentions:
-            attn.retain_grad()
+        with torch.enable_grad(): # Ensure gradient tracking is ON even if global is off
+            output_dict = self.model(pixel_values, return_dict=True)
+            logits = output_dict['logits']
             
-        # Continue forward through classifier
-        last_hidden_state = outputs.last_hidden_state
-        pooled = last_hidden_state.mean(dim=1)
-        logits = self.model.classifier(pooled)
-        
-        # 2. Backward
-        self.model.zero_grad()
-        
-        one_hot = torch.zeros_like(logits)
-        one_hot[0, target_class_index] = 1.0
-        
-        logits.backward(gradient=one_hot) # gradients flow back to attentions
-        
-        # 3. Compute Relevance
-        # Formula: R = R + avg_heads(Grad_A * A)
-        # Initialize relevance with Identity matrix (self-relevance)
-        # We care about the relevance of [CLS] (or pooled token) to [Patches]
-        
-        # Since we use Mean Pooling, every patch contributes 1/N to the pooled vector.
-        # But we want the relevance propagation through the Transformer layers.
-        
-        # Chefer aggregation:
-        # R = eye(num_tokens)
-        # For layer in layers:
-        #    Attn = layer_attn
-        #    Grad = layer_attn.grad
-        #    Relevance_Interaction = Attn * Clamp(Grad)  (Gradient-weighted)
-        #    R = R + (R @ Relevance_Interaction)
-        
-        num_tokens = attentions[0].shape[-1]
-        R = torch.eye(num_tokens, device=device)
-        
-        for i, attn in enumerate(attentions):
-            grad = attn.grad
-            cam = attn # Activation
+            # These are the [B, NumHeads, SeqLen, SeqLen] tensors
+            # We must retain grads on them to get dLoss / dAttn
+            attentions = output_dict['attentions'] # tuple of tensors
             
-            # Clamp positive gradients (Chefer's key logic for positive class evidence)
-            grad = torch.clamp(grad, min=0)
+            for attn in attentions:
+                attn.retain_grad()
             
-            # Weighted attention relevance
-            # [B, Heads, N, N] -> Average over heads/batch -> [N, N]
-            R_attn = (grad * cam).mean(dim=0).mean(dim=0)
+            # 3. Backward
+            self.model.zero_grad()
             
-            # Aggregate: R_new = R + (R @ R_attn)
-            # This accounts for Skip Connections (Identity) + Attention Path
-            R = R + torch.matmul(R, R_attn)
+            # Create one-hot for target class
+            one_hot = torch.zeros_like(logits)
+            one_hot[0, target_class_index] = 1.0
             
-        # Final step: Extract relevance of pooled representative to patches
-        # Since we Mean Pooled, effectively we have a virtual node connected to all patches.
-        # If we visualized strictly CLS relevance, we'd pick R[0, 1:].
-        # But here, we can look at the diagonal or the row corresponding to the "output" concept.
-        
-        # Actually, Chefer usually extracts row 0 for [CLS].
-        # For GAP (Global Average Pooling), the relevance is distributed.
-        # The correct interpretation for GAP:
-        # Logic: Output depends on Mean(Patches).
-        # We want to see which input patches contributed to that Mean via the layers.
-        # R is [N, N] mapping input patch i to output patch j.
-        # Total relevance of input i = Sum_j(R[i, j]) ? 
-        # Or if we view it as flow: R[i, j] is how much token i influences token j.
-        # We collected dependencies from Input -> Output.
-        # So we want to know how much Input i influences the conceptual "Output".
-        
-        # Chefer Ref for GAP (e.g. ResNet/ViT-GAP):
-        # We treat the final R as capturing the Transformer mixing.
-        # The final Classifier weights tell us which "output features" (last layer patches) matter.
-        # But since we average patches:
-        # Logit = W * Mean(h_last)
-        # Relevance of h_last[j] to Logit is roughly W.
-        # We can backpropagate through the mean pooling: R_last = W / N.
-        # Then propagate R_last through the Transformer structure using the computed R matrix.
-        
-        # Easier heuristic often used with Chefer:
-        # Just input `R[0, 1:]` if CLS token.
-        # For No-CLS (SigLIP), we assume the "information bottleneck" is distributed.
-        # A common proxy is the sum of relevance to all tokens, weighted by their contribution to the head.
-        
-        # Let's rely on the simpler "Gradient * Input" at the pixel level?
-        # No, user asked for "Transformer-based relevance propagation (Chefer et al.)".
-        # That specifically yields the relevance map R [N, N].
-        # For GAP models, we can sum the columns of R? (How much input i contributes to ALL output tokens).
-        # Yes, R[i, :] is the outgoing flow from i. Sum(R[i, :]) is total influence of patch i.
-        
-        # Patch Relevance
-        # [num_patches, num_patches]
-        # Sum over rows? No, R is often defined as R_{out, in} or R_{in, out} depending on formulation.
-        # Chefer code accumulates: R = R + R @ R_attn.
-        # Initialization R=eye is "token i influences token i".
-        # Transform: token i influences token j via attention.
-        # Final: token i (input) influences token j (last layer).
-        
-        # We care about influence on the "Mean Pooled" representation.
-        # Since Mean Pool takes all last-layer tokens equally (1/N),
-        # Total Relevance of Input Patch i = Sum_{j} (R[i, j] * 1/N)
-        # i.e., Average of the i-th row.
-        
-        patch_relevance = R.mean(dim=1) # [N]
-        
-        # Exclude finding itself? No, self-influence is fine.
-        
-        # Reshape to grid
-        # Siglip 384x384 / 16 = 24x24
-        side = int(num_tokens**0.5)
-        heatmap = patch_relevance.reshape(side, side)
-        
-        # Normalize
-        heatmap = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min() + 1e-7)
-        
-        return heatmap.detach().cpu().numpy()
-
+            # Backpropagate to populate .grad on attentions
+            logits.backward(gradient=one_hot)
+            
+            # 4. Chefer Integration (Equation 13 & 14)
+            # R^{l} = R^{l+1} + \bar{A} * R^{l+1} 
+            # where \bar{A} = E_h [ \nabla A * A ]^+  (Element-wise mul, clamp positive, mean over heads)
+            # Actually Chefer simplifies to:
+            # R = R + (R @ R_attn)  where R_attn is the relevance of attention mechanism
+            
+            # The relevance matrix R is [SeqLen, SeqLen].
+            # Initialization: Identity (Self-relevance)
+            num_tokens = attentions[0].shape[-1]
+            R = torch.eye(num_tokens, device=device)
+            
+            # Iterate from first layer to last? 
+            # Chefer paper: "The total relevance is initialized as the identity matrix..."
+            # "For each layer b... we compute the relevance map \bar{A}^{(b)}"
+            # "The accumulated relevance map is updated as C <- \bar{A}^{(b)} * C" (Matrix multiplication)
+            
+            # So we go forward from Layer 1 to Layer L.
+            
+            for i, attn in enumerate(attentions):
+                grad = attn.grad # [B, H, S, S]
+                cam = attn       # [B, H, S, S]
+                
+                # Equation: E_h [ (grad * cam)^+ ]
+                # 1. Element-wise product
+                # 2. Clamp positive (Keep only positive contributions)
+                # 3. Average over heads
+                
+                grad = torch.clamp(grad, min=0)
+                R_attn = (grad * cam).mean(dim=1) # [B, S, S] (average over heads)
+                R_attn = R_attn[0] # [S, S] for batch 0
+                
+                # Add Identity (Residual connection logic)
+                # \bar{A} = I + R_attn
+                # (Actually Chefer defines R_total = R_total + R_total @ R_attn_weighted)
+                # The paper says: C = \bar{A} . C  (if composing from input to output)
+                
+                # Simpler implementation from official repo (Hila-Chefer/Transformer-MM-Explainability):
+                # R = R + torch.matmul(R, R_attn)
+                
+                R = R + torch.matmul(R, R_attn)
+                
+            # 5. Extract Relevance for Output
+            # SigLIP uses Mean Pooling (GAP) over all patches to get the representation.
+            # So we don't have a single [CLS] token at index 0 that aggregates everything.
+            # Instead, the logits depend on Mean(LastLayer).
+            # Effectively, this is like having a virtual [CLS] that attends to all LastLayer tokens with weight 1/N.
+            
+            # If we want "Relevance of Input Patches to the Class Prediction":
+            # We effectively want to know: How much did Input Patch j contribute to the "Mean Pooled Vector"?
+            
+            # Since R[i, j] accumulates flow from token i to token j (or vice-versa depending on definition),
+            # let's assume standard flow: R[row, col] -> Row affects Col.
+            
+            # Total relevance of Input i = Sum_{j \in LastLayer} ( R[i, j] )
+            # Because every output token j contributes equally to the Mean Pool.
+            # So we sum the rows.
+            
+            # NOTE: SigLIP typically has no CLS token.
+            # Output: [S, S].
+            # We want [S] (relevance per input patch).
+            patch_relevance = R.mean(dim=1) # Average over columns (or sum)
+            
+            # Reshape to 2D
+            # SigLIP 384 / 16 = 24
+            side = int(num_tokens**0.5)
+            # If side*side != num_tokens, check if there's a CLS token?
+            # SigLIP usually doesn't have CLS.
+            
+            if side * side != num_tokens:
+                print(f"Warning: Num tokens {num_tokens} is not a perfect square. Assuming CLS at index 0?")
+                # If there's a CLS, strip it?
+                # But SigLIP config usually doesn't add CLS.
+                # Let's assume square for now.
+                pass
+            
+            try:
+                heatmap = patch_relevance.reshape(side, side)
+            except:
+                # Fallback if dimensions mismatch
+                return np.zeros((384, 384))
+            
+            # Normalize
+            heatmap = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min() + 1e-7)
+            
+            return heatmap.detach().cpu().numpy()
+            

@@ -26,13 +26,14 @@ CHANGES FROM ORIGINAL:
 """
 
 import os
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import sys
 import json
+import argparse
 import warnings
 from dataclasses import dataclass, field
 from typing import Optional, List, Any, Dict, Union
 from pathlib import Path
-
 import torch
 from torch.utils.data import Dataset
 from PIL import Image
@@ -45,7 +46,8 @@ from transformers import (
     set_seed,
 )
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-from trl import SFTTrainer, SFTConfig, DataCollatorForCompletionOnlyLM
+from trl import SFTTrainer, SFTConfig
+
 
 # Filter warnings
 warnings.filterwarnings("ignore", message=".*warmup_ratio is deprecated.*")
@@ -72,13 +74,12 @@ class ModelConfig:
 
 @dataclass
 class LoraConfigData:
-    r: int = 16
-    lora_alpha: int = 16
+    r: int = 8                   # REDUCED from 16: fewer params → less memory
+    lora_alpha: int = 8          # keep equal to r
     lora_dropout: float = 0.05
     bias: str = "none"
     target_modules: str = "all-linear"
     task_type: str = "CAUSAL_LM"
-    # Keep these since we're adding special tokens
     modules_to_save: List[str] = field(default_factory=lambda: ["embed_tokens", "lm_head"])
 
 @dataclass
@@ -86,8 +87,8 @@ class DataConfig:
     train_jsonl: str = "train_capped_clean.jsonl"
     val_jsonl: str = "val_capped_clean.jsonl"
     image_root_dir: str = "official_data_iccv_final"
-    max_length: int = 768
-    max_images: int = 3  # REDUCED from 7 to prevent OOM
+    max_length: int = 512        # REDUCED from 768: caps sequence length
+    max_images: int = 1          # REDUCED to 1: biggest single memory saving
 
 @dataclass
 class TrainingConfig:
@@ -99,7 +100,7 @@ class TrainingConfig:
     num_train_epochs: float = 1.0
     per_device_train_batch_size: int = 1
     per_device_eval_batch_size: int = 1
-    gradient_accumulation_steps: int = 8
+    gradient_accumulation_steps: int = 16  # INCREASED to compensate for smaller batch
     
     learning_rate: float = 2e-4
     weight_decay: float = 0.01
@@ -108,7 +109,7 @@ class TrainingConfig:
     lr_scheduler_type: str = "linear"
     
     gradient_checkpointing: bool = True
-    optim: str = "paged_adamw_32bit"  # FIXED: Better for QLoRA
+    optim: str = "paged_adamw_8bit"  # CHANGED from 32bit: saves ~2 GB
     
     logging_steps: int = 10
     save_steps: int = 100
@@ -118,7 +119,7 @@ class TrainingConfig:
     bf16: bool = None  # Will auto-detect
     fp16: bool = None  # Will auto-detect
     
-    report_to: str = "tensorboard"  # Changed to tensorboard for monitoring
+    report_to: str = "none"
     run_version: str = "v1"
     max_train_samples: Optional[int] = None
 
@@ -218,43 +219,6 @@ class ChestXrayReportDataset(Dataset):
             "messages": messages
         }
 
-def get_response_template(processor):
-    """
-    Identify the response template for DataCollatorForCompletionOnlyLM.
-    
-    For Gemma models, the assistant response starts after specific markers.
-    We need to find what the chat template uses to mark the assistant turn.
-    """
-    # Test with a dummy message to see the format
-    test_messages = [
-        {"role": "user", "content": [{"type": "text", "text": "test"}]},
-        {"role": "assistant", "content": [{"type": "text", "text": "response"}]}
-    ]
-    
-    formatted = processor.apply_chat_template(
-        test_messages,
-        add_generation_prompt=False,
-        tokenize=False
-    )
-    
-    print(f"Chat template format:\n{formatted}\n")
-    
-    # For Gemma models, typically: <start_of_turn>model\n
-    # But let's check the actual format
-    if "<start_of_turn>model" in formatted:
-        return "<start_of_turn>model\n"
-    elif "assistant" in formatted.lower():
-        # Try to extract the pattern
-        lines = formatted.split("\n")
-        for i, line in enumerate(lines):
-            if "assistant" in line.lower() and i < len(lines) - 1:
-                # Return the line that marks assistant start
-                return line + "\n"
-    
-    # Fallback - you may need to adjust this based on actual template
-    print("WARNING: Could not auto-detect response template")
-    print("Using default: '<start_of_turn>model\\n'")
-    return "<start_of_turn>model\n"
 
 class CustomLoggingCallback(TrainerCallback):
     """Custom callback for better logging."""
@@ -317,11 +281,93 @@ def validate_paths(config):
     
     return train_path, val_path, image_root
 
+def parse_args():
+    """Parse command-line arguments to switch between overfit and full training modes."""
+    parser = argparse.ArgumentParser(
+        description="MedGemma QLoRA Fine-tuning - Chest X-ray Report Generation",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Overfit sanity check (50 samples, 5 epochs - verifies training works)
+  python qlora_medgemma_corrected.py --mode overfit
+
+  # Full training (all 43927 samples, 1 epoch)
+  python qlora_medgemma_corrected.py --mode full
+
+  # Custom run
+  python qlora_medgemma_corrected.py --mode full --epochs 3 --version v2
+        """
+    )
+    parser.add_argument(
+        "--mode",
+        type=str,
+        choices=["overfit", "full"],
+        required=True,
+        help="'overfit' = 50 samples x 5 epochs to verify training works. 'full' = all data x 1 epoch."
+    )
+    parser.add_argument(
+        "--epochs",
+        type=float,
+        default=None,
+        help="Override number of epochs (default: 5 for overfit, 1 for full)"
+    )
+    parser.add_argument(
+        "--version",
+        type=str,
+        default=None,
+        help="Run version tag for output directory (default: 'overfit_v1' or 'v1')"
+    )
+    parser.add_argument(
+        "--max_images",
+        type=int,
+        default=None,
+        help="Max images per study (default: 1)"
+    )
+    return parser.parse_args()
+
+
+def apply_mode(config: TrainingConfig, args) -> TrainingConfig:
+    """Apply mode-specific settings to config."""
+    if args.mode == "overfit":
+        config.max_train_samples  = 50       # tiny subset
+        config.num_train_epochs   = 5.0      # more epochs so loss can converge
+        config.eval_steps         = 10       # evaluate frequently
+        config.save_steps         = 50
+        config.logging_steps      = 5
+        config.run_version        = args.version or "overfit_v1"
+        print("MODE: OVERFIT SANITY CHECK")
+        print("  → 50 samples, 5 epochs")
+        print("  → Loss should drop from ~4-5 down to <1.0")
+        print("  → If it does NOT converge, something is wrong before running full training")
+    else:  # full
+        config.max_train_samples  = None     # all 43927 studies
+        config.num_train_epochs   = 1.0
+        config.eval_steps         = 100
+        config.save_steps         = 100
+        config.logging_steps      = 10
+        config.run_version        = args.version or "v1"
+        print("MODE: FULL TRAINING")
+        print("  → All 43927 studies, 1 epoch")
+        print("  → Estimated time: 4-8 hours")
+
+    # Apply any manual overrides
+    if args.epochs is not None:
+        config.num_train_epochs = args.epochs
+        print(f"  → Epochs overridden to: {args.epochs}")
+    if args.max_images is not None:
+        config.data.max_images = args.max_images
+        print(f"  → Max images overridden to: {args.max_images}")
+
+    return config
+
+
 def main():
+    args = parse_args()
     config = TrainingConfig()
+    config = apply_mode(config, args)
     set_seed(config.seed)
     
-    print("="*60)
+    print("\n" + "="*60)
     print("MedGemma QLoRA Fine-tuning - Chest X-ray Reports")
     print("="*60)
     
@@ -357,6 +403,16 @@ def main():
         torch_dtype=compute_dtype,  # Use detected dtype
     )
     
+    # Disable use_cache - incompatible with gradient checkpointing, wastes memory
+    model.config.use_cache = False
+
+    # Freeze the vision tower entirely - we only want to train the language model
+    # The vision encoder (SigLIP) is already good at extracting medical image features
+    # Freezing it saves ~4-6 GB of activation memory during backward pass
+    for param in model.model.vision_tower.parameters():
+        param.requires_grad = False
+    print("✓ Vision tower frozen (saves ~4-6 GB during backward pass)")
+
     processor = AutoProcessor.from_pretrained(model_id)
     processor.tokenizer.padding_side = "right"
     
@@ -403,19 +459,21 @@ def main():
 
     # 4. Training Arguments
     print(f"\n=== Training Configuration ===")
+
     output_dir = Path(config.output_dir) / config.run_version
     output_dir.mkdir(parents=True, exist_ok=True)
-    
-    args = SFTConfig(
+
+    sft_args = SFTConfig(
         output_dir=str(output_dir),
         num_train_epochs=config.num_train_epochs,
         per_device_train_batch_size=config.per_device_train_batch_size,
         per_device_eval_batch_size=config.per_device_eval_batch_size,
         gradient_accumulation_steps=config.gradient_accumulation_steps,
-        gradient_checkpointing=config.gradient_checkpointing,
-        gradient_checkpointing_kwargs={"use_reentrant": False},  # FIXED: Critical for memory
+        gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
         optim=config.optim,
         logging_steps=config.logging_steps,
+        logging_strategy="steps",
         save_strategy="steps",
         save_steps=config.save_steps,
         eval_strategy="steps" if val_ds else "no",
@@ -430,10 +488,8 @@ def main():
         push_to_hub=False,
         report_to=config.report_to,
         remove_unused_columns=False,
-        dataset_kwargs={"skip_prepare_dataset": True},
-        label_names=["labels"],  # ADDED: Explicitly specify label column
     )
-    
+
     print(f"Epochs: {config.num_train_epochs}")
     print(f"Batch size: {config.per_device_train_batch_size}")
     print(f"Gradient accumulation: {config.gradient_accumulation_steps}")
@@ -442,29 +498,17 @@ def main():
     print(f"Optimizer: {config.optim}")
     print(f"Precision: {'BF16' if config.bf16 else 'FP16'}")
 
-    # 5. Create Trainer
+    # 5. Create Trainer (TRL 0.28 style)
     print(f"\n=== Creating Trainer ===")
-    
-    # CRITICAL FIX: Use TRL's DataCollatorForCompletionOnlyLM for proper label masking
-    # This ensures only the assistant's response is used for loss calculation
-    response_template = get_response_template(processor)
-    print(f"Using response template: {repr(response_template)}")
-    
-    collator = DataCollatorForCompletionOnlyLM(
-        response_template=response_template,
-        tokenizer=processor.tokenizer,
-        mlm=False,
-    )
-    
+
     trainer = SFTTrainer(
         model=model,
-        args=args,
+        args=sft_args,
         train_dataset=train_ds,
         eval_dataset=val_ds,
         peft_config=peft_config,
         processing_class=processor,
-        data_collator=collator,  # Use TRL's proper collator
-        callbacks=[CustomLoggingCallback()],  # ADDED: Better logging
+        callbacks=[CustomLoggingCallback()],
     )
 
     # 6. Train
@@ -486,7 +530,8 @@ def main():
     # 7. Save
     print("Saving model...")
     trainer.save_model()
-    processor.tokenizer.save_pretrained(args.output_dir)
+    processor.tokenizer.save_pretrained(str(output_dir))
+
     print(f"✓ Model saved to: {args.output_dir}")
     
     print(f"\n{'='*60}")

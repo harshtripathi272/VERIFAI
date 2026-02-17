@@ -41,27 +41,8 @@ def _load_models():
     print("[Radiologist] Loading models...")
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
-    # 1. MedSigLIP Classifier (for analysis and LRP)
-    print(f"[Radiologist] Loading MedSigLIP Classifier: {settings.MEDSIGLIP_MODEL}")
-    _classifier_model = MedSigLIPClassifier(
-        settings.MEDSIGLIP_MODEL, 
-        num_classes=len(CHEXBERT_CLASSES)
-    )
-    
-    head_weights_path = getattr(settings, "CLASSIFIER_WEIGHTS_PATH", "classifier_head_best.pth")
-    if os.path.exists(head_weights_path):
-        print(f"[Radiologist] Loading classifier head weights from {head_weights_path}")
-        _classifier_model.load_head(head_weights_path)
-    else:
-        print(f"[Radiologist] WARNING: Classifier weights not found at {head_weights_path}. Using random init for head.")
-    
-    _classifier_model.to(device)
-    _classifier_model.eval()
-    _vision_encoder = _classifier_model.vision_model
-    _lrp_generator = RelevanceGenerator(_classifier_model)
-    
-    # 2. MedGemma VLM
-    print(f"[Radiologist] Loading MedGemma: {settings.MEDGEMMA_4B_MODEL}")
+    # 1. MedGemma VLM (Base)
+    print(f"[Radiologist] Loading MedGemma Base: {settings.MEDGEMMA_4B_MODEL}")
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_quant_type="nf4",
@@ -82,22 +63,53 @@ def _load_models():
         token=settings.HUGGINGFACE_TOKEN
     )
 
-    # Resize for special tokens if they exist in the checkpoint
-    special_tokens = ["<PA>", "<AP>", "<LATERAL>"]
-    
+    # 2. Apply LoRA Adapters
     if settings.MEDGEMMA_LORA_ADAPTERS and "path/to" not in settings.MEDGEMMA_LORA_ADAPTERS:
         print(f"[Radiologist] Loading LoRA adapters from {settings.MEDGEMMA_LORA_ADAPTERS}")
         
-        # Add special tokens blindly if they aren't there, assuming adapter was trained with them
-        num_added = _processor.tokenizer.add_special_tokens({"additional_special_tokens": special_tokens})
-        if num_added > 0:
-            _llm.resize_token_embeddings(len(_processor.tokenizer))
+        # Add special tokens if needed (usually saved in adapter's tokenizer)
+        special_tokens = ["<PA>", "<AP>", "<LATERAL>"]
+        if "<PA>" not in _processor.tokenizer.get_vocab():
+             num_added = _processor.tokenizer.add_special_tokens({"additional_special_tokens": special_tokens})
+             if num_added > 0:
+                _llm.resize_token_embeddings(len(_processor.tokenizer))
 
         _llm = PeftModel.from_pretrained(_llm, settings.MEDGEMMA_LORA_ADAPTERS)
     else:
         print("[Radiologist] WARNING: LoRA adapter path not set or invalid. Using base model.")
 
     _llm.eval()
+    
+    # 3. Share Vision Tower with Classifier
+    print(f"[Radiologist] Initializing Classifier with shared vision tower from VLM")
+    
+    # Extract vision tower from MedGemma (PaliGemma structure uses model.vision_tower)
+    # Note: AutoModelForImageTextToText (PaliGemma) structure: model.vision_tower
+    shared_vision_tower = _llm.model.vision_tower
+    
+    # Ensure it's in eval mode
+    shared_vision_tower.eval()
+    for param in shared_vision_tower.parameters():
+        param.requires_grad = False
+        
+    _classifier_model = MedSigLIPClassifier(
+        settings.MEDSIGLIP_MODEL, 
+        num_classes=len(CHEXBERT_CLASSES),
+        vision_model=shared_vision_tower
+    )
+    
+    head_weights_path = getattr(settings, "CLASSIFIER_WEIGHTS_PATH", "classifier_head_best.pth")
+    if os.path.exists(head_weights_path):
+        print(f"[Radiologist] Loading classifier head weights from {head_weights_path}")
+        _classifier_model.load_head(head_weights_path)
+    else:
+        print(f"[Radiologist] WARNING: Classifier weights not found at {head_weights_path}. Using random init for head.")
+    
+    _classifier_model.to(device)
+    _classifier_model.eval()
+    _vision_encoder = _classifier_model.vision_model
+    _lrp_generator = RelevanceGenerator(_classifier_model)
+    
     _models_loaded = True
     print("[Radiologist] Models loaded.")
 
@@ -125,7 +137,7 @@ def generate_findings(image_path: str, view: str = "AP") -> dict:
             "role": "user",
             "content": [
                 {"type": "image"},
-                {"type": "text", "text": f" {view_token}\n\n{INSTRUCTION}"}
+                {"type": "text", "text": f"\nViews: {view_token}\n\n{INSTRUCTION}"}
             ]
         }
     ]

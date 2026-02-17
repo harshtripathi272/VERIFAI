@@ -19,6 +19,8 @@ import sys
 import json
 from pathlib import Path
 
+import os
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import torch
 from PIL import Image
 from transformers import (
@@ -224,6 +226,14 @@ def test_model_loading(config):
             torch_dtype=compute_dtype,  # Use BF16 if supported
         )
         print("✓ Model loaded")
+        
+        # Disable use_cache (incompatible with gradient checkpointing)
+        model.config.use_cache = False
+        
+        # Freeze vision tower - saves ~4-6 GB during backward pass
+        for param in model.model.vision_tower.parameters():
+            param.requires_grad = False
+        print("✓ Vision tower frozen")
         
         # Load processor
         processor = AutoProcessor.from_pretrained(model_id)

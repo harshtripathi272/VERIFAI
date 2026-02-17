@@ -14,16 +14,21 @@ import torch.nn as nn
 from transformers import SiglipVisionModel, SiglipConfig
 
 class MedSigLIPClassifier(nn.Module):
-    def __init__(self, vision_model_name: str, num_classes: int = 14):
+    def __init__(self, vision_model_name: str, num_classes: int = 14, vision_model=None):
         super().__init__()
         
         # 1. Backone: Frozen MedSigLIP
-        # We need output_attentions=True for LRP later
-        self.vision_model = SiglipVisionModel.from_pretrained(
-            vision_model_name,
-            output_attentions=True, 
-            output_hidden_states=True
-        )
+        if vision_model is not None:
+            print("[Classifier] Using shared vision model from VLM")
+            self.vision_model = vision_model
+        else:
+            print(f"[Classifier] Loading independent vision model: {vision_model_name}")
+            # We need output_attentions=True for LRP later
+            self.vision_model = SiglipVisionModel.from_pretrained(
+                vision_model_name,
+                output_attentions=True, 
+                output_hidden_states=True
+            )
         
         # Freeze backbone
         for param in self.vision_model.parameters():
@@ -58,7 +63,21 @@ class MedSigLIPClassifier(nn.Module):
         # For LRP, we WILL need gradients, so during inference/LRP we might enable grad.
         # But for training the *head*, backbone is frozen.
         
-        outputs = self.vision_model(pixel_values=pixel_values)
+        # When sharing vision tower with VLM, it might be in mixed precision or quantized
+        # Ensure we can run it. If LRP is active, we need gradients.
+        
+        # We need output_attentions=True for LRP. 
+        # Config might not be set if it's coming from VLM.
+        # So we pass it in forward call if supported, or ensure config is set.
+        
+        # Check if validation run or LRP
+        is_lrp = torch.is_grad_enabled() 
+        
+        outputs = self.vision_model(
+            pixel_values=pixel_values, 
+            output_attentions=True,  # Force attentions for LRP/Chefer
+            output_hidden_states=True
+        )
         
         # last_hidden_state: [batch, num_patches, hidden_size]
         # e.g., [B, 576, 1152] for 384x384 image (24x24 patches)

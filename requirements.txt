@@ -1,36 +1,86 @@
-# Core
+# ============================================================
+# MedGemma QLoRA - FINAL STABLE REQUIREMENTS
+# Python 3.10
+#
+# IMPORTANT:
+# Install torch separately from PyTorch index FIRST.
+#
+# Step 1:
+#   pip install torch==2.5.1+cu121 torchvision==0.20.1+cu121 \
+#       torchaudio==2.5.1+cu121 \
+#       --index-url https://download.pytorch.org/whl/cu121
+#
+# Step 2:
+#   pip install -r requirements_final.txt
+# ============================================================
+
+# ----------------------------
+# Core ML training stack
+# ----------------------------
+transformers==4.57.1
+accelerate==1.11.0
+trl==0.28.0
+peft==0.17.1
+bitsandbytes==0.49.2
+huggingface-hub>=0.30.0
+tokenizers>=0.22.0
+
+
+# ----------------------------
+# HuggingFace ecosystem
+# ----------------------------
+huggingface-hub>=0.34.0
+datasets==3.4.1
+safetensors>=0.4.0
+
+
+# ----------------------------
+# Numeric
+# ----------------------------
+numpy==1.26.4
+
+# ----------------------------
+# API / Web
+# ----------------------------
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
 streamlit==1.41.1
 pydantic==2.10.4
 python-multipart==0.0.18
 pillow==11.0.0
-numpy==1.26.4
 python-dotenv==1.0.1
 
-# LangGraph
+# ----------------------------
+# LangChain ecosystem (0.3.x generation)
+# ----------------------------
 langchain==0.3.14
 langgraph==0.2.60
+langsmith==0.1.147
 
-# ML
-
-transformers==4.52.0
-accelerate==0.27.2
-peft==0.10.0
-bitsandbytes==0.43.3
-scikit-learn==1.4.2
-sentence-transformers==2.7.0
-
+# ----------------------------
 # Bio / APIs
+# ----------------------------
 biopython==1.83
-requests==2.31.0
 fhir.resources==7.1.0
 lxml==5.1.0
 beautifulsoup4==4.12.3
 duckdb==0.10.0
 pydantic_settings==2.2.1
-trl==0.9.6
 
+# ----------------------------
+# ML utilities
+# ----------------------------
+scikit-learn==1.4.2
+sentence-transformers==2.7.0
+
+# ----------------------------
+# Safe transitive pins
+# ----------------------------
+packaging>=23,<25
+async-timeout>=4,<5
+requests>=2.32.2,<3
+
+# ----------------------------
 # Dev
+# ----------------------------
 pytest==8.2.0
-f1chexbert
