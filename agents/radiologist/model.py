@@ -1,16 +1,16 @@
 """
 Radiologist Model
 
-Real MedGemma-4B VLM Inference with LoRA and Hook-based Vision Injection.
+Real MedGemma-4B VLM Inference with LoRA using standard Hugging Face pipeline.
 """
 
 import torch
 import torch.nn as nn
-from typing import Any, Tuple
+from typing import Any, Tuple, Optional
 from PIL import Image
 from transformers import (
     AutoTokenizer, 
-    AutoModelForCausalLM, 
+    AutoModelForImageTextToText,
     AutoProcessor, 
     BitsAndBytesConfig,
     AutoImageProcessor
@@ -18,118 +18,31 @@ from transformers import (
 from peft import PeftModel
 from app.config import settings
 import os
+import numpy as np
+from agents.radiologist.classifier import MedGemmaVisionHead
+from agents.radiologist.lrp import RelevanceGenerator
+from agents.radiologist.data import CHEXBERT_CLASSES
 
 # Global model cache
 _models_loaded = False
-_vision_encoder = None
+_vision_encoder = None 
+_classifier_model = None 
+_lrp_generator = None 
 _llm = None
-_tokenizer = None
-_image_processor = None
-_projector = None
-
-# Special tokens
-IMAGE_TOKEN = "<image>"
-VIEW_TOKENS = ["<AP>", "<PA>", "<Lateral>"]
-
-
-class VisionProjector(nn.Module):
-    """
-    Projects mean-pooled SigLIP features to MedGemma hidden dim.
-
-    Architecture:  Linear → GELU → LayerNorm
-    Initialisation: Xavier-uniform with gain 0.1 (small scale to avoid
-    disturbing the quantised LLM embeddings at the start of training).
-    """
-
-    def __init__(self, vision_hidden_size: int, lm_hidden_size: int):
-        super().__init__()
-        self.linear = nn.Linear(vision_hidden_size, lm_hidden_size)
-        self.act = nn.GELU()
-        self.ln = nn.LayerNorm(lm_hidden_size)
-
-        nn.init.xavier_uniform_(self.linear.weight, gain=0.1)
-        nn.init.zeros_(self.linear.bias)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.ln(self.act(self.linear(x)))
-
-
-def get_image_embedding(image_path: str) -> torch.Tensor:
-    """
-    Return projected visual embedding (1 vector per image)
-    Shape: [1, hidden_size]
-    """
-    _load_models()
-
-    image = Image.open(image_path).convert("RGB")
-    inputs = _image_processor(images=image, return_tensors="pt")
-
-    pixel_values = inputs.pixel_values.to(
-        _vision_encoder.device,
-        dtype=_vision_encoder.dtype
-    )
-
-    with torch.no_grad():
-        vision_outputs = _vision_encoder(pixel_values=pixel_values)
-        patch_embeddings = vision_outputs.last_hidden_state  # [1, 576, 1152]
-
-        pooled = patch_embeddings.mean(dim=1)  # [1, 1152]
-        projected = _projector(pooled)         # [1, hidden_size]
-
-    return projected
-
-def inject_vision_hook(projected_embeds, image_token_id, input_ids):
-    """
-    Registers forward hook to replace <image> token embedding.
-    """
-
-    embed_layer = _llm.get_input_embeddings()
-
-    image_mask = input_ids == image_token_id
-    b_idx, s_idx = image_mask.nonzero(as_tuple=True)
-
-    assert len(b_idx) == projected_embeds.shape[0], \
-        f"<image> count ({len(b_idx)}) != image count ({projected_embeds.shape[0]})"
-
-    def hook(module, inputs, output):
-        new_output = output.clone()
-        new_output[b_idx, s_idx] = projected_embeds.to(
-            device=output.device,
-            dtype=output.dtype
-        )
-        return new_output
-
-    handle = embed_layer.register_forward_hook(hook)
-    return handle
-
+_processor = None
 
 def _load_models():
-    """Load MedSigLIP, MedGemma (4-bit + LoRA), and Projector."""
-    global _models_loaded, _vision_encoder, _llm, _tokenizer, _image_processor, _projector
+    """Load MedSigLIP Classifier and MedGemma VLM."""
+    global _models_loaded, _classifier_model, _lrp_generator, _llm, _processor, _vision_encoder
     
     if _models_loaded:
         return
 
-    print("[Radiologist] Loading real VLM models...")
-    
+    print("[Radiologist] Loading models...")
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
-    # 1. Vision Encoder (MedSigLIP)
-    print(f"Loading MedSigLIP: {settings.MEDSIGLIP_MODEL}")
-    _image_processor = AutoImageProcessor.from_pretrained(
-        settings.MEDSIGLIP_MODEL,
-        size={"height": 384, "width": 384}  # User requested 384
-    )
-    # Load vision model (can use AutoModel or just the vision tower if available)
-    from transformers import SiglipVisionModel
-    _vision_encoder = SiglipVisionModel.from_pretrained(
-        settings.MEDSIGLIP_MODEL,
-        torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-        device_map=device
-    ).eval()
-
-    # 2. LLM (MedGemma-4B with 4-bit LoRA)
-    print(f"Loading MedGemma: {settings.MEDGEMMA_4B_MODEL}")
+    # 1. MedGemma VLM (Base)
+    print(f"[Radiologist] Loading MedGemma Base: {settings.MEDGEMMA_4B_MODEL}")
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_quant_type="nf4",
@@ -137,103 +50,125 @@ def _load_models():
         bnb_4bit_use_double_quant=True
     )
     
-    _tokenizer = AutoTokenizer.from_pretrained(os.path.join(settings.MEDGEMMA_LORA_ROOT, "tokenizer"))
-
-    _tokenizer.padding_side = "right"
+    _processor = AutoProcessor.from_pretrained(
+        settings.MEDGEMMA_4B_MODEL,
+        token=settings.HUGGINGFACE_TOKEN
+    )
     
-    # Add special tokens
-    image_token_id = _tokenizer.convert_tokens_to_ids(IMAGE_TOKEN)
-    
-    _llm = AutoModelForCausalLM.from_pretrained(
+    _llm = AutoModelForImageTextToText.from_pretrained(
         settings.MEDGEMMA_4B_MODEL,
         quantization_config=bnb_config,
-        device_map="auto"
+        device_map="auto",
+        torch_dtype=torch.float16,
+        token=settings.HUGGINGFACE_TOKEN
     )
-    
-    # Resize embeddings for new tokens
-    if _llm.get_input_embeddings().weight.shape[0] != len(_tokenizer):
-        _llm.resize_token_embeddings(len(_tokenizer))
-    _llm.config.image_token_id = image_token_id  # Set config
-    
-    # Load LoRA adapters
+
+    # 2. Apply LoRA Adapters
     if settings.MEDGEMMA_LORA_ADAPTERS and "path/to" not in settings.MEDGEMMA_LORA_ADAPTERS:
-        print(f"Loading LoRA adapters from {settings.MEDGEMMA_LORA_ADAPTERS}")
+        print(f"[Radiologist] Loading LoRA adapters from {settings.MEDGEMMA_LORA_ADAPTERS}")
+        
+        # Add special tokens if needed (usually saved in adapter's tokenizer)
+        special_tokens = ["<PA>", "<AP>", "<LATERAL>"]
+        if "<PA>" not in _processor.tokenizer.get_vocab():
+             num_added = _processor.tokenizer.add_special_tokens({"additional_special_tokens": special_tokens})
+             if num_added > 0:
+                _llm.resize_token_embeddings(len(_processor.tokenizer))
+
         _llm = PeftModel.from_pretrained(_llm, settings.MEDGEMMA_LORA_ADAPTERS)
     else:
-        print("WARNING: LoRA adapter path not set. Using base model.")
+        print("[Radiologist] WARNING: LoRA adapter path not set or invalid. Using base model.")
 
-    # 3. Projector
-    print("Loading Projector...")
-    _projector = VisionProjector(
-        _vision_encoder.config.hidden_size,
-        _llm.config.hidden_size
+    _llm.eval()
+    
+    # 3. Share Vision Tower with Classifier
+    print(f"[Radiologist] Initializing Classifier with shared vision tower from VLM")
+    
+    # Extract vision tower from MedGemma (PaliGemma structure uses model.vision_tower)
+    # Note: AutoModelForImageTextToText (PaliGemma) structure: model.vision_tower
+    shared_vision_tower = _llm.model.vision_tower
+    
+    # Ensure it's in eval mode
+    shared_vision_tower.eval()
+    for param in shared_vision_tower.parameters():
+        param.requires_grad = False
+        
+    _classifier_model = MedGemmaVisionHead(
+        num_classes=len(CHEXBERT_CLASSES),
+        vision_model=shared_vision_tower
     )
     
-    if settings.MEDGEMMA_PROJECTOR_WEIGHTS and "path/to" not in settings.MEDGEMMA_PROJECTOR_WEIGHTS:
-        weights = torch.load(settings.MEDGEMMA_PROJECTOR_WEIGHTS, map_location=device)
-        _projector.load_state_dict(weights)
+    head_weights_path = getattr(settings, "CLASSIFIER_WEIGHTS_PATH", "classifier_head_best.pth")
+    if os.path.exists(head_weights_path):
+        print(f"[Radiologist] Loading classifier head weights from {head_weights_path}")
+        _classifier_model.load_head(head_weights_path)
     else:
-        print("WARNING: Projector weights not found. Using random init (will output garbage).")
-        
-    embed_device = _llm.get_input_embeddings().weight.device
-    _projector.to(device=embed_device, dtype=torch.float16)
-    _projector.eval()
-
+        print(f"[Radiologist] WARNING: Classifier weights not found at {head_weights_path}. Using random init for head.")
+    
+    _classifier_model.to(device)
+    _classifier_model.eval()
+    _vision_encoder = _classifier_model.vision_model
+    _lrp_generator = RelevanceGenerator(_classifier_model)
+    
     _models_loaded = True
     print("[Radiologist] Models loaded.")
 
-
-
 def generate_findings(image_path: str, view: str = "AP") -> dict:
-    from .prompts import INSTRUCTION
+    # Ensure this import works or define it locally if needed
+    try:
+        from .prompts import INSTRUCTION
+    except ImportError:
+        INSTRUCTION = "Analyze the provided chest X-rays and write a careful radiology report."
 
     _load_models()
+    
+    # Load Image
+    try:
+        image = Image.open(image_path).convert("RGB")
+    except Exception as e:
+        print(f"[ERROR] Failed to load image {image_path}: {e}")
+        return {"findings": "Error loading image.", "impression": "Error."}
 
-    device = _llm.device
+    # Prepare Prompt with Chat Template
+    view_token = f"<{view}>" 
+    
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image"},
+                {"type": "text", "text": f"\nViews: {view_token}\n\n{INSTRUCTION}"}
+            ]
+        }
+    ]
 
-    # 1️⃣ Get projected image embedding (1 vector)
-    projected = get_image_embedding(image_path)  # [1, hidden]
+    # Process Inputs
+    text = _processor.apply_chat_template(messages, add_generation_prompt=True)
+    inputs = _processor(text=text, images=[image], return_tensors="pt").to(_llm.device)
 
-    # 2️⃣ Construct prompt
-    view_token = f"<{view}>" if f"<{view}>" in VIEW_TOKENS else "<AP>"
-    prompt = f"{IMAGE_TOKEN} {view_token}\n{INSTRUCTION}"
+    # Generate
+    try:
+        with torch.no_grad():
+            output_ids = _llm.generate(
+                **inputs,
+                max_new_tokens=500,
+                do_sample=False,
+                use_cache=True,
+            )
+    except Exception as e:
+        print(f"[ERROR] Generation failed: {e}")
+        return {"findings": "Generation failed.", "impression": "Error."}
 
-    inputs = _tokenizer(prompt, return_tensors="pt").to(device)
-    input_ids = inputs.input_ids
-    attention_mask = inputs.attention_mask
-
-    image_token_id = _tokenizer.convert_tokens_to_ids(IMAGE_TOKEN)
-
-    # 3️⃣ Register hook (exact training behavior)
-    hook_handle = inject_vision_hook(projected, image_token_id, input_ids)
-
-    # 4️⃣ Generate normally (IMPORTANT: pass input_ids)
-    with torch.no_grad():
-        output_ids = _llm.generate(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            max_new_tokens=300,
-            do_sample=True,
-            temperature=0.2,
-            top_p=0.9,
-            use_cache=True,
-            pad_token_id=_tokenizer.eos_token_id
-        )
-
-    # Remove hook after generation
-    hook_handle.remove()
-
-    generated_text = _tokenizer.decode(output_ids[0], skip_special_tokens=True)
-
+    # Decode
+    input_len = inputs.input_ids.shape[1]
+    generated_ids = output_ids[:, input_len:]
+    generated_text = _processor.tokenizer.decode(generated_ids[0], skip_special_tokens=True)
+    
+    print("generated_text:-", generated_text)
     return _parse_report(generated_text)
-
-
 
 def _parse_report(text: str) -> dict:
     """Parse raw text into separate findings and impression sections."""
     text = text.strip()
-    
-    # Normalize headers
     lower_text = text.lower()
     
     findings_start = lower_text.find("findings:")
@@ -247,7 +182,6 @@ def _parse_report(text: str) -> dict:
             findings = text[findings_start + 9 : impression_start].strip()
             impression = text[impression_start + 11:].strip()
         else:
-            # Impression first? Unusual but possible
             impression = text[impression_start + 11 : findings_start].strip()
             findings = text[findings_start + 9:].strip()
     elif findings_start != -1:
@@ -255,8 +189,6 @@ def _parse_report(text: str) -> dict:
     elif impression_start != -1:
         impression = text[impression_start + 11:].strip()
     else:
-        # No headers, treat whole text as findings? or verify user instruction execution failed
-        # Fallback: split by double newline
         parts = text.split("\n\n")
         if len(parts) >= 2:
             findings = parts[0]
@@ -268,4 +200,59 @@ def _parse_report(text: str) -> dict:
     return {
         "findings": findings or "No findings generated.",
         "impression": impression or "No impression generated."
+    }
+
+def analyze_disease(image_path: str) -> dict:
+    """Classify diseases and generate heatmaps."""
+    _load_models()
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    # processor = AutoImageProcessor.from_pretrained(settings.MEDSIGLIP_MODEL)  <-- REMOVED
+    
+    try:
+        image = Image.open(image_path).convert("RGB")
+        # Use the MedGemma processor (which wraps SigLIP image processor)
+        # return_tensors="pt" gives pixel_values
+        inputs = _processor(images=image, return_tensors="pt")
+        pixel_values = inputs.pixel_values.to(device)
+    except Exception as e:
+        print(f"[ERROR] Classifier image load failed: {e}")
+        return {"probabilities": {}, "heatmap_paths": {}}
+        
+    # 1. Classification
+    with torch.no_grad():
+        logits = _classifier_model(pixel_values) 
+        probs = torch.sigmoid(logits).squeeze(0) 
+        
+    prob_dict = {
+        cls: float(prob.item()) 
+        for cls, prob in zip(CHEXBERT_CLASSES, probs)
+    }
+    
+    # 2. Heatmap Generation
+    heatmap_paths = {}
+    output_dir = "output/heatmaps"
+    os.makedirs(output_dir, exist_ok=True)
+    base_name = os.path.basename(image_path).rsplit(".", 1)[0]
+    
+    for i, (cls_name, prob) in enumerate(zip(CHEXBERT_CLASSES, probs)):
+        if prob > 0.5:
+            try:
+                heatmap = _lrp_generator.generate(pixel_values, target_class_index=i, device=device)
+                hm_norm = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min() + 1e-8)
+                hm_uint8 = (hm_norm * 255).astype(np.uint8)
+                hm_img = Image.fromarray(hm_uint8, mode='L')
+                hm_resized = hm_img.resize(image.size, resample=Image.BILINEAR)
+                
+                # Simple save (no colormap dependency)
+                save_path = os.path.join(output_dir, f"{base_name}_{cls_name.replace(' ', '_')}_heatmap.png")
+                hm_resized.save(save_path)
+                heatmap_paths[cls_name] = save_path
+                
+            except Exception as e:
+                print(f"[ERROR] Heatmap generation failed for {cls_name}: {e}")
+                
+    return {
+        "probabilities": prob_dict,
+        "heatmap_paths": heatmap_paths
     }

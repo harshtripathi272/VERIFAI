@@ -11,19 +11,20 @@ import concurrent.futures
 import threading
 from functools import lru_cache
 from typing import Dict, Any, Optional
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoProcessor, AutoModelFor ImageTextToText
 
 from app.config import settings
 from agents.literature.tools import LITERATURE_TOOLS
 from agents.literature.prompt import SYSTEM_PROMPT
+from app.shared_model_loader import load_shared_medgemma, get_inference_lock
 
 # === OPTIMIZATION 1: Singleton Model Loader with Thread Safety ===
 _MODEL_CACHE: Optional[tuple] = None
-_MODEL_LOCK = threading.Lock()  # NEW: Lock for thread-safe model access
-_MODEL_LOAD_LOCK = threading.Lock()  # NEW: Lock for loading
+_MODEL_LOAD_LOCK = threading.Lock()  # Lock for loading
+# Inference lock is now managed by shared_model_loader
 
 def load_medgemma():
-    """Load MedGemma model once and cache it. Thread-safe."""
+    """Load shared MedGemma model (singleton across agents). Thread-safe."""
     global _MODEL_CACHE
     
     # Quick check without lock (performance optimization)
@@ -36,50 +37,52 @@ def load_medgemma():
         if _MODEL_CACHE is not None:
             return _MODEL_CACHE
         
-        print("[LiteratureAgent] Loading MedGemma model (one-time initialization)...")
-        tokenizer = AutoTokenizer.from_pretrained(
-            settings.MEDGEMMA_4B_MODEL,
-            token=settings.HUGGINGFACE_TOKEN
-        )
-        model = AutoModelForCausalLM.from_pretrained(
-            settings.MEDGEMMA_4B_MODEL,
-            device_map="auto",
-            torch_dtype="auto",
-            token=settings.HUGGINGFACE_TOKEN
-        )
-        _MODEL_CACHE = (model, tokenizer)
-        print("[LiteratureAgent] Model loaded and cached")
+        print("[LiteratureAgent] Loading shared MedGemma model...")
+        model, processor = load_shared_medgemma()
+        _MODEL_CACHE = (model, processor)
+        print("[LiteratureAgent] Using shared model instance")
         return _MODEL_CACHE
-
-def get_model_lock():
-    """Get the global model lock for thread-safe inference."""
-    return _MODEL_LOCK
 
 class ReActStepError(Exception):
     pass
 
 
 class MedGemmaAgent:
-    def __init__(self, model, tokenizer, max_steps: int = 3):  # Reduced from 5 to 3
+    def __init__(self, model, processor, max_steps: int = 3):  # Reduced from 5 to 3
         self.model = model
-        self.tokenizer = tokenizer
+        self.processor = processor
         self.max_steps = max_steps
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=3)
 
     def _generate(self, prompt: str) -> str:
         """Generate text with thread-safe model access."""
-        # CRITICAL: Acquire lock before using model
-        with _MODEL_LOCK:
+        # CRITICAL: Acquire lock before using model (shared across agents)
+        _inference_lock = get_inference_lock()
+        with _inference_lock:
             print(f"[Thread-{threading.current_thread().name}] Acquired model lock for generation")
-            inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
+            
+            # Use chat template format for MedGemma 1.5
+            messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
+            inputs = self.processor.apply_chat_template(
+                messages,
+                add_generation_prompt=True,
+                tokenize=True,
+                return_dict=True,
+                return_tensors="pt"
+            ).to(self.model.device, dtype=torch.float16)
+            
+            input_len = inputs["input_ids"].shape[-1]
             outputs = self.model.generate(
                 **inputs,
-                max_new_tokens=400,  # Reduced from 600
+                max_new_tokens=400,
                 temperature=0.1,
-                do_sample=False,  # Deterministic for speed
-                pad_token_id=self.tokenizer.eos_token_id
+                do_sample=False,
+                pad_token_id=self.processor.tokenizer.eos_token_id
             )
-            result = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+            
+            # Extract only newly generated tokens
+            generated_tokens = outputs[0][input_len:]
+            result = self.processor.decode(generated_tokens, skip_special_tokens=True)
             print(f"[Thread-{threading.current_thread().name}] Released model lock")
             return result
 
@@ -234,14 +237,14 @@ class MedGemmaAgent:
 @lru_cache(maxsize=100)
 def _cached_literature_search(query_hash: str, query: str) -> str:
     """Cache literature search results."""
-    model, tokenizer = load_medgemma()
-    agent = MedGemmaAgent(model=model, tokenizer=tokenizer, max_steps=3)
+    model, processor = load_medgemma()
+    agent = MedGemmaAgent(model=model, processor=processor, max_steps=3)
     return agent.run(query)
 
 
 def literature_agent_node(state):
     # Load model once (singleton pattern)
-    model, tokenizer = load_medgemma()
+    model, processor = load_medgemma()
     rad_output = state.get("radiologist_output")
     chexbert_output = state.get("chexbert_output")
     
@@ -298,7 +301,7 @@ Retrieve supporting or contradicting biomedical literature for the above finding
         if settings.USE_LITERATURE_CACHE:
             answer = _cached_literature_search(query_hash, query)
         else:
-            agent = MedGemmaAgent(model=model, tokenizer=tokenizer, max_steps=3)
+            agent = MedGemmaAgent(model=model, processor=processor, max_steps=3)
             answer = agent.run(query)
     except Exception as e:
         print(f"[LiteratureAgent] Error: {e}")

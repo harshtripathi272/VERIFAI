@@ -33,9 +33,7 @@ _init_lock = threading.Lock()
 _initialized = False
 
 
-# =============================================================================
 # SCHEMA DEFINITION
-# =============================================================================
 
 SCHEMA_SQL = """
 -- Past Mistakes table with all required fields
@@ -91,9 +89,8 @@ CREATE INDEX IF NOT EXISTS idx_pm_case_embedding
 """
 
 
-# =============================================================================
+
 # CONNECTION MANAGEMENT
-# =============================================================================
 
 def get_connection(db_path: str = None) -> duckdb.DuckDBPyConnection:
     """
@@ -451,8 +448,8 @@ def delete_mistake(mistake_id: str, db_path: str = None) -> bool:
     init_past_mistakes_db(db_path)
     
     with get_db(db_path) as conn:
-        result = conn.execute("DELETE FROM past_mistakes WHERE mistake_id = ?", [mistake_id])
-        return result.fetchone()[0] > 0  # Returns number of rows deleted
+        cursor = conn.execute("DELETE FROM past_mistakes WHERE mistake_id = ?", [mistake_id])
+        return cursor.rowcount > 0
 
 
 def get_statistics(db_path: str = None) -> Dict[str, Any]:

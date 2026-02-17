@@ -24,13 +24,14 @@ class Settings(BaseSettings):
     SEMANTIC_SCHOLAR_API_KEYS: list | None = None
     
     # === Model Paths (HAI-DEF Models) ===
-    MEDSIGLIP_MODEL: str = "google/medsiglip-448"
+    # MEDSIGLIP_MODEL: str = "google/medsiglip-448"  <-- REMOVED (Shared vision tower used)
     MEDGEMMA_4B_MODEL: str = "google/medgemma-1.5-4b-it"
-    MEDGEMMA_27B_MODEL: str = "google/medgemma-27b-it"
+    #MEDGEMMA_27B_MODEL: str = "google/medgemma-27b-it"
     
     # === MedGemma 4B Fine-Tuned Paths ===
-    MEDGEMMA_LORA_ADAPTERS: str = os.getenv("MEDGEMMA_LORA_ADAPTERS", "path/to/lora/adapters")
-    MEDGEMMA_PROJECTOR_WEIGHTS: str = os.getenv("MEDGEMMA_PROJECTOR_WEIGHTS", "path/to/projector.pt")
+    MEDGEMMA_LORA_ROOT: str = os.getenv("MEDGEMMA_LORA_ROOT", "../dataset/med/fine_tuned_model/v1/")
+    MEDGEMMA_LORA_ADAPTERS: str = os.getenv("MEDGEMMA_LORA_ADAPTERS", "../dataset/med/fine_tuned_model/v1/lora_adapters")
+    MEDGEMMA_PROJECTOR_WEIGHTS: str = os.getenv("MEDGEMMA_PROJECTOR_WEIGHTS", "../dataset/med/fine_tuned_model/v1/projector.pt")
     
     # === Text Embedding Model (for KLE Uncertainty) ===
     # Switch to any sentence-transformers compatible model
@@ -38,7 +39,7 @@ class Settings(BaseSettings):
     
     # === KLE Uncertainty Settings ===
     KLE_UNCERTAINTY_THRESHOLD: float = 0.30  # Consensus requires uncertainty < threshold
-    KLE_NUM_SAMPLES: int = 5  # Number of samples to generate for KLE
+    KLE_NUM_SAMPLES: int = 3  # Number of samples to generate for KLE
     
     # === FHIR Configuration ===
     FHIR_BASE_URL: str = "https://fhir.mimic-iv-demo.physionet.org/fhir"  # Public test server
