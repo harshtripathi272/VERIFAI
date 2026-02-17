@@ -97,6 +97,22 @@ class Settings(BaseSettings):
     PAST_MISTAKES_KLE_TOLERANCE: float = 0.2  # +/- range for KLE filtering
     ENABLE_PAST_MISTAKES_RERANKING: bool = bool(os.getenv("ENABLE_PAST_MISTAKES_RERANKING", "True"))  # Neural re-ranking
     
+    # === SUPABASE (Cloud Database) ===
+    # Supabase connection for cloud-based structured logging
+    SUPABASE_URL: str | None = os.getenv("SUPABASE_URL")
+    SUPABASE_KEY: str | None = os.getenv("SUPABASE_KEY")
+    SUPABASE_SERVICE_KEY: str | None = os.getenv("SUPABASE_SERVICE_KEY")  # Optional: for admin operations
+    
+    # Database mode selection
+    DATABASE_MODE: str = os.getenv("DATABASE_MODE", "supabase")  # 'supabase' or 'sqlite'
+    
+    # === DOCTOR FEEDBACK LOOP ===
+    # Enable doctor feedback-driven reprocessing
+    ENABLE_DOCTOR_FEEDBACK: bool = bool(os.getenv("ENABLE_DOCTOR_FEEDBACK", "True"))
+    
+    # Automatically restart from critic when feedback is provided
+    FEEDBACK_RESTART_FROM_CRITIC: bool = bool(os.getenv("FEEDBACK_RESTART_FROM_CRITIC", "True"))
+    
     # === Mock Mode ===
     # Enable to run without downloading large models (~50GB+)
     MOCK_MODELS: bool = False  # CHANGED: Use real models, not mocks
