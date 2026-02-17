@@ -19,7 +19,7 @@ from peft import PeftModel
 from app.config import settings
 import os
 import numpy as np
-from agents.radiologist.classifier import MedSigLIPClassifier
+from agents.radiologist.classifier import MedGemmaVisionHead
 from agents.radiologist.lrp import RelevanceGenerator
 from agents.radiologist.data import CHEXBERT_CLASSES
 
@@ -92,8 +92,7 @@ def _load_models():
     for param in shared_vision_tower.parameters():
         param.requires_grad = False
         
-    _classifier_model = MedSigLIPClassifier(
-        settings.MEDSIGLIP_MODEL, 
+    _classifier_model = MedGemmaVisionHead(
         num_classes=len(CHEXBERT_CLASSES),
         vision_model=shared_vision_tower
     )
@@ -208,11 +207,13 @@ def analyze_disease(image_path: str) -> dict:
     _load_models()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
-    processor = AutoImageProcessor.from_pretrained(settings.MEDSIGLIP_MODEL)
+    # processor = AutoImageProcessor.from_pretrained(settings.MEDSIGLIP_MODEL)  <-- REMOVED
     
     try:
         image = Image.open(image_path).convert("RGB")
-        inputs = processor(images=image, return_tensors="pt")
+        # Use the MedGemma processor (which wraps SigLIP image processor)
+        # return_tensors="pt" gives pixel_values
+        inputs = _processor(images=image, return_tensors="pt")
         pixel_values = inputs.pixel_values.to(device)
     except Exception as e:
         print(f"[ERROR] Classifier image load failed: {e}")

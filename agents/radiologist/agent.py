@@ -14,7 +14,7 @@ def radiologist_node(state: VerifaiState) -> dict:
     """
     Radiologist Agent: Visual analysis of chest X-ray.
     
-    Uses MedSigLIP for visual encoding and MedGemma-4B for reasoning.
+    Uses MedGemma-4B for reasoning.
     Produces plain-text FINDINGS and IMPRESSION sections.
     
     Computes KLE-based semantic uncertainty by generating multiple independent

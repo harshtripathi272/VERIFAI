@@ -13,24 +13,18 @@ import torch
 import torch.nn as nn
 from transformers import SiglipVisionModel, SiglipConfig
 
-class MedSigLIPClassifier(nn.Module):
-    def __init__(self, vision_model_name: str, num_classes: int = 14, vision_model=None):
+class MedGemmaVisionHead(nn.Module):
+    def __init__(self, num_classes: int = 14, vision_model=None):
         super().__init__()
         
-        # 1. Backone: Frozen MedSigLIP
-        if vision_model is not None:
-            print("[Classifier] Using shared vision model from VLM")
-            self.vision_model = vision_model
-        else:
-            print(f"[Classifier] Loading independent vision model: {vision_model_name}")
-            # We need output_attentions=True for LRP later
-            self.vision_model = SiglipVisionModel.from_pretrained(
-                vision_model_name,
-                output_attentions=True, 
-                output_hidden_states=True
-            )
+        # 1. Backone: Frozen MedSigLIP (Shared from VLM)
+        if vision_model is None:
+            raise ValueError("MedGemmaVisionHead requires a pre-loaded 'vision_model' instance (shared from MedGemma).")
+            
+        print("[Classifier] Using shared vision model from VLM")
+        self.vision_model = vision_model
         
-        # Freeze backbone
+        # Freeze backbone (should already be frozen, but ensure it)
         for param in self.vision_model.parameters():
             param.requires_grad = False
         self.vision_model.eval()

@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     SEMANTIC_SCHOLAR_API_KEYS: list | None = None
     
     # === Model Paths (HAI-DEF Models) ===
-    MEDSIGLIP_MODEL: str = "google/medsiglip-448"
+    # MEDSIGLIP_MODEL: str = "google/medsiglip-448"  <-- REMOVED (Shared vision tower used)
     MEDGEMMA_4B_MODEL: str = "google/medgemma-1.5-4b-it"
     #MEDGEMMA_27B_MODEL: str = "google/medgemma-27b-it"
     
