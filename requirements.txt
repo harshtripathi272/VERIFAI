@@ -29,6 +29,7 @@ lxml==5.1.0
 beautifulsoup4==4.12.3
 duckdb==0.10.0
 pydantic_settings==2.2.1
+trl==0.9.6
 
 # Dev
 pytest==8.2.0
