@@ -45,27 +45,14 @@ class RelevanceGenerator:
         self._cleanup()
         
         pixel_values = pixel_values.to(device)
-        pixel_values.requires_grad = True # Is this needed for input relevance? Chefer usually visualizes R[0, 1:]
+        pixel_values.requires_grad = True
         
         # 2. Forward Pass
         # We need to capture the attention maps and their gradients.
-        # MedSigLIPClassifier.forward calls: self.vision_model(..., output_attentions=True)
-        # So we just run the classifier forward.
-        
-        # NOTE: To get gradients on the attention MAPS returned by output_attentions=True,
-        # we need to make sure they are part of the graph.
-        # HF implementation:
-        # outputs = self.self_attn(...) -> (context_layer, attn_weights)
-        # return (context_layer, attn_weights)
-        # So attn_weights SITS in the graph.
-        
-        with torch.enable_grad(): # Ensure gradient tracking is ON even if global is off
+        with torch.enable_grad():
             output_dict = self.model(pixel_values, return_dict=True)
             logits = output_dict['logits']
-            
-            # These are the [B, NumHeads, SeqLen, SeqLen] tensors
-            # We must retain grads on them to get dLoss / dAttn
-            attentions = output_dict['attentions'] # tuple of tensors
+            attentions = output_dict['attentions'] # tuple of tensors (Layer 1 -> N)
             
             for attn in attentions:
                 attn.retain_grad()
@@ -73,92 +60,80 @@ class RelevanceGenerator:
             # 3. Backward
             self.model.zero_grad()
             
-            # Create one-hot for target class
+            # One-hot for target class
             one_hot = torch.zeros_like(logits)
             one_hot[0, target_class_index] = 1.0
             
-            # Backpropagate to populate .grad on attentions
             logits.backward(gradient=one_hot)
             
             # 4. Chefer Integration (Equation 13 & 14)
-            # R^{l} = R^{l+1} + \bar{A} * R^{l+1} 
-            # where \bar{A} = E_h [ \nabla A * A ]^+  (Element-wise mul, clamp positive, mean over heads)
-            # Actually Chefer simplifies to:
-            # R = R + (R @ R_attn)  where R_attn is the relevance of attention mechanism
+            # Ref: Chefer et al. (CVPR 2021) Section 3.1 & 3.2
+            # Equation 13: \bar{A} = I + E_h [ (\nabla A \odot A)^+ ]
+            # Equation 14: C = \bar{A}^{(1)} @ \bar{A}^{(2)} ... @ \bar{A}^{(B)}
             
-            # The relevance matrix R is [SeqLen, SeqLen].
-            # Initialization: Identity (Self-relevance)
             num_tokens = attentions[0].shape[-1]
-            R = torch.eye(num_tokens, device=device)
             
-            # Iterate from first layer to last? 
-            # Chefer paper: "The total relevance is initialized as the identity matrix..."
-            # "For each layer b... we compute the relevance map \bar{A}^{(b)}"
-            # "The accumulated relevance map is updated as C <- \bar{A}^{(b)} * C" (Matrix multiplication)
+            # Initialize C as Identity
+            C = torch.eye(num_tokens, device=device)
             
-            # So we go forward from Layer 1 to Layer L.
-            
+            # Iterate forward (Layer 1 to B)
             for i, attn in enumerate(attentions):
                 grad = attn.grad # [B, H, S, S]
                 cam = attn       # [B, H, S, S]
                 
-                # Equation: E_h [ (grad * cam)^+ ]
-                # 1. Element-wise product
-                # 2. Clamp positive (Keep only positive contributions)
+                # Check for None gradients (can happen if layer unused or disconnected)
+                if grad is None:
+                    continue
+                
+                # Equation 13: Weighted Attention Relevance
+                # 1. Element-wise product of Gradient and Attention
+                # 2. Clamp positive
                 # 3. Average over heads
+                gradients = torch.clamp(grad * cam, min=0)
+                A_bar_layer = gradients.mean(dim=1) # [B, S, S]
+                A_bar_layer = A_bar_layer[0] # [S, S] for batch 0
                 
-                grad = torch.clamp(grad, min=0)
-                R_attn = (grad * cam).mean(dim=1) # [B, S, S] (average over heads)
-                R_attn = R_attn[0] # [S, S] for batch 0
+                # Add Identity
+                # \bar{A} = I + ...
+                A_bar = torch.eye(num_tokens, device=device) + A_bar_layer
                 
-                # Add Identity (Residual connection logic)
-                # \bar{A} = I + R_attn
-                # (Actually Chefer defines R_total = R_total + R_total @ R_attn_weighted)
-                # The paper says: C = \bar{A} . C  (if composing from input to output)
+                # Equation 14: Accumulate
+                # C = C @ \bar{A}
+                # Note: Matrix multiplication order depends on definition of A_{ij}.
+                # PyTorch Attn: A_{ij} is weight of Key j for Query i.
+                # So Output_i = Sum_j A_{ij} * Input_j.
+                # If C maps Input -> Layer_i, and A_bar maps Layer_i -> Layer_{i+1}.
+                # Then C_{new} = A_bar @ C_{old} ?
+                # Or C_{new} = C_{old} @ A_bar ?
+                # User request: C = A(1) @ A(2) ...
+                # This implies C = A_1 @ A_2.
                 
-                # Simpler implementation from official repo (Hila-Chefer/Transformer-MM-Explainability):
-                # R = R + torch.matmul(R, R_attn)
-                
-                R = R + torch.matmul(R, R_attn)
+                C = torch.matmul(C, A_bar) 
                 
             # 5. Extract Relevance for Output
-            # SigLIP uses Mean Pooling (GAP) over all patches to get the representation.
-            # So we don't have a single [CLS] token at index 0 that aggregates everything.
-            # Instead, the logits depend on Mean(LastLayer).
-            # Effectively, this is like having a virtual [CLS] that attends to all LastLayer tokens with weight 1/N.
+            # User request: "derived from the row corresponding to the classification token (or mean-pooled token)"
             
-            # If we want "Relevance of Input Patches to the Class Prediction":
-            # We effectively want to know: How much did Input Patch j contribute to the "Mean Pooled Vector"?
+            # If C maps Input (cols) to Output (rows) accumulation:
+            # C_{ij} roughly: How much Input j contributed to Output i.
             
-            # Since R[i, j] accumulates flow from token i to token j (or vice-versa depending on definition),
-            # let's assume standard flow: R[row, col] -> Row affects Col.
+            # For GAP (SigLIP), the final representation is Mean(Output Toks).
+            # So Relevance(Input j) = Mean_over_i( C_{ij} )
+            # i.e., column mean.
             
-            # Total relevance of Input i = Sum_{j \in LastLayer} ( R[i, j] )
-            # Because every output token j contributes equally to the Mean Pool.
-            # So we sum the rows.
+            heatmap = C.mean(dim=0) # [S]
             
-            # NOTE: SigLIP typically has no CLS token.
-            # Output: [S, S].
-            # We want [S] (relevance per input patch).
-            patch_relevance = R.mean(dim=1) # Average over columns (or sum)
-            
-            # Reshape to 2D
-            # SigLIP 384 / 16 = 24
+            # Reshape
             side = int(num_tokens**0.5)
-            # If side*side != num_tokens, check if there's a CLS token?
-            # SigLIP usually doesn't have CLS.
-            
+            # Square verification
             if side * side != num_tokens:
-                print(f"Warning: Num tokens {num_tokens} is not a perfect square. Assuming CLS at index 0?")
-                # If there's a CLS, strip it?
-                # But SigLIP config usually doesn't add CLS.
-                # Let's assume square for now.
-                pass
-            
+                 # If exact square match fails, it might be due to windowing or other factors.
+                 # SigLIP usually 24x24 = 576. 
+                 # Just try to reshape best effort.
+                 pass
+                 
             try:
-                heatmap = patch_relevance.reshape(side, side)
+                heatmap = heatmap.reshape(side, side)
             except:
-                # Fallback if dimensions mismatch
                 return np.zeros((384, 384))
             
             # Normalize

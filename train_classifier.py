@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from transformers import AutoModelForImageTextToText, AutoImageProcessor
+from transformers import AutoModelForImageTextToText, AutoImageProcessor,AutoProcessor
 from peft import PeftModel
 from PIL import Image
 import numpy as np
@@ -18,8 +18,8 @@ from app.config import settings
 
 # CONFIG
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-BATCH_SIZE = 8
-EPOCHS = 5
+BATCH_SIZE = 4
+EPOCHS = 3
 LR = 1e-4
 
 TRAIN_JSONL = "../dataset/med/train_capped_clean.jsonl"
@@ -45,6 +45,7 @@ def load_shared_vision():
     )
 
     vision_tower = llm.model.vision_tower
+
     vision_tower.eval()
 
     for p in vision_tower.parameters():
@@ -67,7 +68,12 @@ def masked_bce_loss(logits, targets, mask):
 
 def train():
 
-    processor = AutoImageProcessor.from_pretrained(settings.MEDSIGLIP_MODEL)
+    print("[Init] Loading SigLIP image processor (vision normalization only)...")
+
+    processor = AutoImageProcessor.from_pretrained(
+        settings.MEDGEMMA_4B_MODEL
+    )
+
     vision_tower = load_shared_vision()
 
     model = MedGemmaVisionHead(
@@ -78,22 +84,44 @@ def train():
     model.train_head_only()
     model.to(DEVICE)
 
+    model.classifier = model.classifier.to(torch.float16)
+    # ===== Parameter Statistics =====
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+    print("\n========== Model Parameter Summary ==========")
+    print(f"Total parameters:     {total_params:,}")
+    print(f"Trainable parameters: {trainable_params:,}")
+    print(f"Frozen parameters:    {total_params - trainable_params:,}")
+    print("=============================================\n")
+
     optimizer = torch.optim.AdamW(model.classifier.parameters(), lr=LR)
 
     # Real Dataset Integration
     train_dataset = DiseaseClassificationDataset(
         jsonl_path=TRAIN_JSONL,
         image_root_dir=IMAGE_ROOT,
-        image_processor=processor,
+        image_processor=processor,   # ← now MedGemma processor
         uncertain_policy="mask"
     )
 
     val_dataset = DiseaseClassificationDataset(
         jsonl_path=VAL_JSONL,
         image_root_dir=IMAGE_ROOT,
-        image_processor=processor,
+        image_processor=processor,   # ← same processor
         uncertain_policy="mask"
     )
+    import random
+
+    MAX_TRAIN_SAMPLES = 45000
+    MAX_VAL_SAMPLES = 500
+
+    train_indices = random.sample(range(len(train_dataset)), MAX_TRAIN_SAMPLES)
+    val_indices = random.sample(range(len(val_dataset)), MAX_VAL_SAMPLES)
+
+    from torch.utils.data import Subset
+    train_dataset = Subset(train_dataset, train_indices)
+    val_dataset = Subset(val_dataset, val_indices)
 
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4)
@@ -193,9 +221,9 @@ def generate_heatmaps(model, processor, dataset):
                 hm_resized.save(save_path)
 
 
-# ============================================
+
 # MAIN
-# ============================================
+
 
 if __name__ == "__main__":
 
