@@ -9,23 +9,24 @@ START → Radiologist → CheXbert → Evidence Gathering (Hist + Lit parallel) 
 """
 
 import uuid
+from typing import Any
 from langgraph.graph import StateGraph, START, END
 from concurrent.futures import ThreadPoolExecutor, wait
 
 from graph.state import VerifaiState, FinalDiagnosis
 from app.config import settings
-from db.adapter import get_logger  # NEW: Unified database adapter (SQLite or Supabase)
+from db.adapter import get_logger  # Unified database adapter (SQLite or Supabase)
 
 
 # Import agent nodes
 from agents.radiologist.agent import radiologist_node
-from agents.chexbert.agent import chexbert_node  # NEW: Structured pathology labeling
+from agents.chexbert.agent import chexbert_node
 from agents.critic.agent import critic_node
 from agents.historian.agent import historian_node
 from agents.literature.agent import literature_agent_node as literature_node
 from agents.debate.agent import debate_node
-from agents.chief.agent import chief_node
-from agents.feedback.agent import feedback_node  # NEW: Doctor feedback processing
+from agents.validator import validator_node, initialize_validator_tools  # Validator: runs after debate always
+from agents.feedback.agent import feedback_node  # Doctor feedback processing
 
 
 # =============================================================================
@@ -134,23 +135,19 @@ def logged_debate_node(state: VerifaiState) -> dict:
     return result
 
 
-def logged_chief_node(state: VerifaiState) -> dict:
-    """Chief node with automatic DB logging + session completion."""
+def logged_validator_node(state: VerifaiState) -> dict:
+    """Validator node — runs after debate in BOTH scenarios (consensus + max-rounds exceeded)."""
     print("\n" + "="*60)
-    print("[WORKFLOW] Starting Chief Node")
+    print("[WORKFLOW] Starting Validator Node")
+    debate = state.get("debate_output")
+    if debate and debate.final_consensus:
+        print("[WORKFLOW] Validator mode: CONSENSUS VALIDATION")
+    else:
+        print("[WORKFLOW] Validator mode: ESCALATION (max rounds exceeded)")
     print("="*60)
-    logger = _get_or_create_logger(state)
-    result = chief_node(state)
-    final_dx = result.get("final_diagnosis")
-    if final_dx:
-        print(f"[WORKFLOW] Chief completed - Diagnosis: {final_dx.diagnosis[:50]}... Confidence: {final_dx.calibrated_confidence:.2%}")
-    try:
-        logger.log_chief(state, result)
-        if final_dx:
-            logger.complete_session(final_diagnosis=final_dx)
-        _cleanup_logger(logger.session_id)
-    except Exception as e:
-        print(f"[DB LOG] Failed to log chief: {e}")
+    result = validator_node(state)
+    recommendation = (result.get("validator_output") or {}).get("recommendation", "FINALIZE")
+    print(f"[WORKFLOW] Validator completed - Recommendation: {recommendation}")
     return result
 
 
@@ -234,18 +231,22 @@ def evidence_gathering_node(state: VerifaiState) -> dict:
 
 def finalize_node(state: VerifaiState) -> dict:
     """
-    Finalize node: creates final diagnosis from debate consensus.
-    
-    Uses debate output for calibrated confidence.
-    RadiologistOutput is now plain text (findings + impression),
-    so we rely on debate consensus or impression text for diagnosis.
+    Finalize node: builds the FinalDiagnosis from debate + validator signals.
+
+    Validator recommendation effects:
+    - FINALIZE              → full confidence, no changes
+    - FINALIZE_LOW_CONFIDENCE → confidence capped at 0.65, note added
+    - FLAG_FOR_HUMAN        → deferred=True, deferral_reason set
     """
     rad = state.get("radiologist_output")
     debate = state.get("debate_output")
     hist = state.get("historian_output")
     lit = state.get("literature_output")
     kle_uncertainty = state.get("radiologist_kle_uncertainty", 0.5)
-    
+    validator_out = state.get("validator_output") or {}
+    recommendation = validator_out.get("recommendation", "FINALIZE")
+    validator_explanation = validator_out.get("explanation", "")
+
     if not rad or not rad.impression:
         return {
             "final_diagnosis": FinalDiagnosis(
@@ -256,46 +257,58 @@ def finalize_node(state: VerifaiState) -> dict:
             ),
             "trace": ["FINALIZE: No findings to finalize"]
         }
-    
-    # Use debate consensus if available
+
+    # ── FLAG_FOR_HUMAN: validator says evidence is weak / critical rule violated ──
+    if recommendation == "FLAG_FOR_HUMAN":
+        return {
+            "final_diagnosis": FinalDiagnosis(
+                diagnosis=debate.consensus_diagnosis if (debate and debate.final_consensus) else rad.impression[:200],
+                calibrated_confidence=0.0,
+                deferred=True,
+                deferral_reason=f"Validator flagged for human review: {validator_explanation}",
+                recommended_next_steps=[
+                    "Manual radiologist review required",
+                    "Check validator flags: " + str(validator_out.get("rules", {}).get("triggered_rule_names", [])),
+                    "Review retrieved historical cases in validator_output"
+                ]
+            ),
+            "trace": [f"FINALIZE: DEFERRED — Validator flagged for human review ({validator_explanation})"]
+        }
+
+    # ── Build base confidence ─────────────────────────────────────────────────
     if debate and debate.final_consensus:
-        final = FinalDiagnosis(
-            diagnosis=debate.consensus_diagnosis,
-            calibrated_confidence=debate.consensus_confidence,
-            deferred=False,
-            explanation=f"Consensus reached through {len(debate.rounds)}-round debate. {debate.debate_summary}",
-            recommended_next_steps=["Confirm with clinical correlation", "Consider follow-up imaging if symptoms persist"]
-        )
-        trace_entry = f"FINALIZE: {final.diagnosis} (confidence={final.calibrated_confidence:.2%}) via debate consensus"
+        diagnosis_text = debate.consensus_diagnosis
+        confidence = debate.consensus_confidence
+        base_explanation = f"Consensus reached through {len(debate.rounds)}-round debate. {debate.debate_summary}"
     else:
-        # Fallback: use impression text as diagnosis, KLE-based confidence
-        # Base confidence = 1.0 - KLE uncertainty (higher uncertainty = lower confidence)
+        diagnosis_text = rad.impression[:200]
         confidence = max(0.1, 1.0 - kle_uncertainty)
-        
         if hist:
             confidence += hist.confidence_adjustment
-        
-        if lit and hasattr(lit, 'overall_evidence_strength') and lit.overall_evidence_strength in ["medium", "high"]:
+        if lit and hasattr(lit, "overall_evidence_strength") and lit.overall_evidence_strength in ["medium", "high"]:
             confidence += 0.05 if lit.overall_evidence_strength == "medium" else 0.10
-        
-        # Apply debate adjustment if available
         if debate:
             confidence += debate.total_confidence_adjustment
-        
         confidence = max(0.0, min(0.99, confidence))
-        
-        # Use impression as the diagnosis text
-        impression_preview = rad.impression[:200] if len(rad.impression) > 200 else rad.impression
-        
-        final = FinalDiagnosis(
-            diagnosis=impression_preview,
-            calibrated_confidence=confidence,
-            deferred=False,
-            explanation=f"Based on radiologist findings with KLE uncertainty={kle_uncertainty:.3f}. {rad.findings[:100]}...",
-            recommended_next_steps=["Confirm with clinical correlation", "Consider follow-up imaging if symptoms persist"]
-        )
-        trace_entry = f"FINALIZE: {impression_preview[:80]}... (confidence={confidence:.2%})"
-    
+        base_explanation = f"No debate consensus after {len(debate.rounds) if debate else 0} rounds. Based on radiologist impression with KLE={kle_uncertainty:.3f}."
+
+    # ── FINALIZE_LOW_CONFIDENCE: cap at 0.65 ─────────────────────────────────
+    if recommendation == "FINALIZE_LOW_CONFIDENCE":
+        confidence = min(confidence, 0.65)
+        base_explanation += f" Validator confidence reduced: {validator_explanation}"
+
+    final = FinalDiagnosis(
+        diagnosis=diagnosis_text,
+        calibrated_confidence=confidence,
+        deferred=False,
+        explanation=base_explanation,
+        recommended_next_steps=[
+            "Confirm with clinical correlation",
+            "Consider follow-up imaging if symptoms persist"
+        ]
+    )
+
+    trace_entry = f"FINALIZE: {diagnosis_text[:80] if diagnosis_text else 'None'}... (confidence={confidence:.2%}, validator={recommendation})"
     return {
         "final_diagnosis": final,
         "trace": [trace_entry]
@@ -304,20 +317,22 @@ def finalize_node(state: VerifaiState) -> dict:
 
 def route_after_debate(state: VerifaiState) -> str:
     """
-    Route based on debate outcome.
-    
-    - Consensus reached → finalize
-    - No consensus → chief
+    After debate, ALWAYS go to validator — regardless of whether
+    consensus was reached or max rounds exceeded.
+
+    Scenario 1: Debate reached consensus → Validator validates it.
+    Scenario 2: Debate hit max rounds without consensus → Validator escalates with evidence.
     """
-    debate = state.get("debate_output")
-    
-    if debate and debate.final_consensus:
-        return "finalize"
-    elif debate and debate.escalate_to_chief:
-        return "chief"
-    else:
-        # Default to finalize if no debate output
-        return "finalize"
+    return "validator"
+
+
+def route_after_validator(state: VerifaiState) -> str:
+    """
+    After validator, always proceed to finalize.
+    The validator_output.recommendation field (FINALIZE / FINALIZE_LOW_CONFIDENCE /
+    FLAG_FOR_HUMAN) is stored in state and consumed by finalize_node.
+    """
+    return "finalize"
 
 
 def should_start_from_critic(state: VerifaiState) -> str:
@@ -340,78 +355,74 @@ def should_start_from_critic(state: VerifaiState) -> str:
 
 def build_workflow() -> StateGraph:
     """
-    Constructs the VERIFAI LangGraph DAG with debate mechanism and doctor feedback support.
+    Constructs the VERIFAI LangGraph DAG with debate + validator mechanism.
     All nodes are wrapped with automatic SQL logging.
-    
+
     NORMAL Flow:
-    START → Radiologist → CheXbert → Evidence Gathering (Hist + Lit parallel) → Critic → Debate →┬→ Finalize → END
-                                                                                                    └→ Chief → END
-    
-    FEEDBACK Flow (when doctor rejects diagnosis):
-    START → [routing] → Critic (with feedback context) → Debate →┬→ Finalize → END
-                                                                   └→ Chief → END
-    
-    The feedback flow skips Radiologist/CheXbert/Evidence gathering because those outputs
-    are preserved from the original workflow that was rejected.
+    START → Radiologist → CheXbert → Evidence Gathering (Hist+Lit parallel)
+          → Critic → Debate → Validator → Finalize → END
+
+    Validator runs in BOTH debate outcomes:
+      ✅ Consensus reached   → Validator validates the consensus
+      ⚠️ Max rounds exceeded → Validator escalates with evidence
+
+    FEEDBACK Flow (doctor rejects diagnosis):
+    START → [routing] → Critic (with feedback context) → Debate → Validator → Finalize → END
+
+    No Chief node — Validator is the final arbitration layer.
     """
     graph = StateGraph(VerifaiState)
-    
-    # === Add Logged Nodes ===
+
+    # === Nodes ===
     graph.add_node("radiologist", logged_radiologist_node)
-    graph.add_node("evidence_gathering", logged_evidence_gathering_node)  # Parallel Hist + Lit
     graph.add_node("chexbert", chexbert_node)
+    graph.add_node("evidence_gathering", logged_evidence_gathering_node)
     graph.add_node("critic", logged_critic_node)
-    graph.add_node("critic_feedback", logged_critic_node)  # Same node, different entry point
+    graph.add_node("critic_feedback", logged_critic_node)  # Same logic, different entry point
     graph.add_node("debate", logged_debate_node)
-    graph.add_node("chief", logged_chief_node)
+    graph.add_node("validator", logged_validator_node)     # NEW: always runs after debate
     graph.add_node("finalize", logged_finalize_node)
-    
-    # === Define Edges ===
-    
-    # Entry: START → Conditional routing (normal vs feedback)
+
+    # === Edges ===
+
+    # START → Conditional: normal flow vs feedback iteration
     graph.add_conditional_edges(
         START,
         should_start_from_critic,
         {
             "radiologist": "radiologist",
-            "critic_feedback": "critic_feedback"  # Skip to critic for feedback iteration
+            "critic_feedback": "critic_feedback"
         }
     )
-    
+
     # NORMAL FLOW
-    # Radiologist → CheXbert (label findings immediately)
     graph.add_edge("radiologist", "chexbert")
-    
-    # CheXbert → Evidence Gathering (gather context with structured labels)
     graph.add_edge("chexbert", "evidence_gathering")
-    
-    # Evidence Gathering → Critic (evaluate WITH full context)
     graph.add_edge("evidence_gathering", "critic")
-    
-    # FEEDBACK FLOW
-    # Critic (feedback) → Debate (skip evidence gathering, use preserved context)
+
+    # FEEDBACK FLOW (skips evidence gathering, uses preserved context)
     graph.add_edge("critic_feedback", "debate")
-    
-    # COMMON PATH
-    # Critic → Debate (adversarial reconciliation with enriched context)
+
+    # Critic → Debate
     graph.add_edge("critic", "debate")
-    
-    # Debate → Conditional: Finalize or Chief
+
+    # Debate → Validator (ALWAYS — both consensus and no-consensus paths)
     graph.add_conditional_edges(
         "debate",
         route_after_debate,
-        {
-            "finalize": "finalize",
-            "chief": "chief"
-        }
+        {"validator": "validator"}
     )
-    
-    # Chief → END (final arbitration complete)
-    graph.add_edge("chief", END)
-    
+
+    # Validator → Finalize (recommendation stored in state, consumed by finalize_node)
+    graph.add_conditional_edges(
+        "validator",
+        route_after_validator,
+        {"finalize": "finalize"}
+    )
+
     # Finalize → END
     graph.add_edge("finalize", END)
-    
+
     return graph
 
 
