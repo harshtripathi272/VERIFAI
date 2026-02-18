@@ -17,6 +17,7 @@ from app.config import settings
 from agents.literature.tools import LITERATURE_TOOLS
 from agents.literature.prompt import SYSTEM_PROMPT
 from app.shared_model_loader import load_shared_medgemma, get_inference_lock
+from utils.inference import extract_json
 
 # === OPTIMIZATION 1: Singleton Model Loader with Thread Safety ===
 _MODEL_CACHE: Optional[tuple] = None
@@ -87,14 +88,10 @@ class MedGemmaAgent:
             return result
 
     def _extract_json(self, text: str) -> Dict[str, Any]:
-        start = text.find("{")
-        end = text.rfind("}")
-        if (start == -1 or end == -1):
-            raise ReActStepError("No JSON object found in model output")
         try:
-            return json.loads(text[start:end + 1])
-        except json.JSONDecodeError as e:
-            raise ReActStepError(f"Invalid JSON: {e}")
+            return extract_json(text)
+        except ValueError as e:
+            raise ReActStepError(f"JSON extraction failed: {e}")
 
     def _run_tool_parallel(self, tool_name: str, tool_input: str) -> Dict[str, Any]:
         """Run tool and return results."""

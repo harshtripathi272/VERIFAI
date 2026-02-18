@@ -4,6 +4,7 @@ import threading
 import torch
 from app.config import settings
 from app.shared_model_loader import load_shared_medgemma, get_inference_lock
+from utils.inference import extract_json
 from langchain_core.output_parsers import PydanticOutputParser
 from graph.state import HistorianOutput, HistorianFact
 
@@ -169,25 +170,12 @@ Rules:
         print(f"[Thread-{threading.current_thread().name}] Historian released model lock")
 
 
-    # Clean up output - remove any special tokens
-    raw = re.sub(r'<unused\d+>', '', raw)
-    raw = re.sub(r'<[^>]+>', '', raw)
-    
-    # Attempt to parse using PydanticOutputParser
+    # Parse JSON
     try:
-        # Sometimes models wrap JSON in markdown code blocks
-        match = re.search(r"```json\s*(\{.*?\})\s*```", raw, re.DOTALL)
-        if match:
-            json_str = match.group(1)
-        else:
-            # Fallback to finding the first { and last }
-            match = re.search(r"\{.*\}", raw, re.DOTALL)
-            if match:
-                 json_str = match.group(0)
-            else:
-                json_str = raw
-
-        parsed_output = parser.parse(json_str)
+        parsed_dict = extract_json(raw)
+        
+        # Pydantic validation
+        parsed_output = HistorianOutput(**parsed_dict)
         print(f"[Historian] Successfully parsed JSON into HistorianOutput")
         
         # Clamp confidence safely

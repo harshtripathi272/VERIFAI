@@ -24,7 +24,9 @@ import torch
 from pydantic import BaseModel, Field
 
 from app.config import settings
+from app.config import settings
 from app.shared_model_loader import load_shared_medgemma, get_inference_lock
+from utils.inference import extract_json
 
 logger = logging.getLogger(__name__)
 
@@ -313,15 +315,12 @@ class MedGemmaCritic:
             )
             raw_output = self._run_inference(user_prompt)
 
-            # Strip potential markdown fences
-            cleaned = raw_output.strip()
-            if cleaned.startswith("```"):
-                cleaned = cleaned.split("\n", 1)[-1]
-            if cleaned.endswith("```"):
-                cleaned = cleaned.rsplit("```", 1)[0]
-            cleaned = cleaned.strip()
+            try:
+                parsed = extract_json(raw_output)
+            except ValueError as e:
+                 logger.warning("[LLM-Critic] JSON extraction failed: %s", e)
+                 return None
 
-            parsed = json.loads(cleaned)
             result = LLMCriticOutput(**parsed)
 
             # Clamp semantic_risk_score to [0, 1]

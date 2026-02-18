@@ -141,6 +141,9 @@ def generate_findings(image_path: str, view: str = "AP") -> dict:
         }
     ]
 
+    import utils.inference  # Lazy import to avoid circular dep if any
+    from utils.inference import extract_json
+
     # Process Inputs
     text = _processor.apply_chat_template(messages, add_generation_prompt=True)
     inputs = _processor(text=text, images=[image], return_tensors="pt").to(_llm.device)
@@ -164,43 +167,24 @@ def generate_findings(image_path: str, view: str = "AP") -> dict:
     generated_text = _processor.tokenizer.decode(generated_ids[0], skip_special_tokens=True)
     
     print("generated_text:-", generated_text)
-    return _parse_report(generated_text)
+    
+    try:
+        data = extract_json(generated_text)
+        return {
+            "findings": data.get("findings", "No findings generated."),
+            "impression": data.get("impression", "No impression generated.")
+        }
+    except Exception as e:
+        print(f"[Radiologist] JSON extraction failed: {e}")
+        # Fallback for now if needed, or return error state
+        return {
+            "findings": "Error parsing output.", 
+            "impression": "Error parsing output."
+        }
 
 def _parse_report(text: str) -> dict:
-    """Parse raw text into separate findings and impression sections."""
-    text = text.strip()
-    lower_text = text.lower()
-    
-    findings_start = lower_text.find("findings:")
-    impression_start = lower_text.find("impression:")
-    
-    findings = ""
-    impression = ""
-    
-    if findings_start != -1 and impression_start != -1:
-        if findings_start < impression_start:
-            findings = text[findings_start + 9 : impression_start].strip()
-            impression = text[impression_start + 11:].strip()
-        else:
-            impression = text[impression_start + 11 : findings_start].strip()
-            findings = text[findings_start + 9:].strip()
-    elif findings_start != -1:
-        findings = text[findings_start + 9:].strip()
-    elif impression_start != -1:
-        impression = text[impression_start + 11:].strip()
-    else:
-        parts = text.split("\n\n")
-        if len(parts) >= 2:
-            findings = parts[0]
-            impression = "\n".join(parts[1:])
-        else:
-            findings = text
-            impression = "No distinct impression section generated."
-            
-    return {
-        "findings": findings or "No findings generated.",
-        "impression": impression or "No impression generated."
-    }
+    """Deprecated: Use extract_json instead."""
+    return {}
 
 def analyze_disease(image_path: str) -> dict:
     """Classify diseases and generate heatmaps."""
