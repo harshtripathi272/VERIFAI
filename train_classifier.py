@@ -84,7 +84,7 @@ def train():
     model.train_head_only()
     model.to(DEVICE)
 
-    model.classifier = model.classifier.to(torch.float16)
+    
     # ===== Parameter Statistics =====
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -128,11 +128,20 @@ def train():
 
     best_val_loss = float("inf")
 
+    import time
+    from tqdm import tqdm
+
     for epoch in range(EPOCHS):
         model.train()
-        total_loss = 0
+        epoch_start_time = time.time()
 
-        for batch in tqdm(train_loader, desc=f"Epoch {epoch+1} Training"):
+        total_train_loss = 0.0
+
+        print(f"\n========== Epoch {epoch+1}/{EPOCHS} ==========\n")
+
+        train_bar = tqdm(train_loader, desc=f"Epoch {epoch+1} Training", leave=True)
+
+        for batch in train_bar:
             pixel_values = batch["pixel_values"].to(DEVICE)
             targets = batch["labels"].to(DEVICE)
             mask = batch["label_mask"].to(DEVICE)
@@ -140,23 +149,37 @@ def train():
             outputs = model(pixel_values)
             logits = outputs["logits"]
 
+            # Safety check
+            if torch.isnan(logits).any() or torch.isinf(logits).any():
+                print("NaN/Inf detected in logits. Stopping.")
+                return model, processor
+
             loss = masked_bce_loss(logits, targets, mask)
+
+            if torch.isnan(loss) or torch.isinf(loss):
+                print("NaN/Inf detected in loss. Stopping.")
+                return model, processor
 
             optimizer.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.classifier.parameters(), 1.0)
             optimizer.step()
 
-            total_loss += loss.item()
+            total_train_loss += loss.item()
 
-        avg_train_loss = total_loss / len(train_loader)
-        print(f"Epoch {epoch+1} Train Loss: {avg_train_loss:.4f}")
+            # 🔥 This updates the bar live
+            train_bar.set_postfix(loss=f"{loss.item():.4f}")
 
-        # Validation
+        avg_train_loss = total_train_loss / len(train_loader)
+
+        # ================= Validation =================
         model.eval()
-        val_loss = 0
+        total_val_loss = 0.0
+
+        val_bar = tqdm(val_loader, desc=f"Epoch {epoch+1} Validation", leave=False)
 
         with torch.no_grad():
-            for batch in tqdm(val_loader, desc="Validation"):
+            for batch in val_bar:
                 pixel_values = batch["pixel_values"].to(DEVICE)
                 targets = batch["labels"].to(DEVICE)
                 mask = batch["label_mask"].to(DEVICE)
@@ -165,23 +188,29 @@ def train():
                 logits = outputs["logits"]
 
                 loss = masked_bce_loss(logits, targets, mask)
-                val_loss += loss.item()
+                total_val_loss += loss.item()
 
-        avg_val_loss = val_loss / len(val_loader)
-        print(f"Epoch {epoch+1} Val Loss: {avg_val_loss:.4f}")
+                val_bar.set_postfix(val_loss=f"{loss.item():.4f}")
+
+        avg_val_loss = total_val_loss / len(val_loader)
+
+        epoch_time = time.time() - epoch_start_time
+
+        # ===== Epoch Summary =====
+        print("\n------------------------------------------")
+        print(f"Epoch {epoch+1} Summary:")
+        print(f"Train Loss: {avg_train_loss:.4f}")
+        print(f"Val   Loss: {avg_val_loss:.4f}")
+        print(f"Epoch Time: {epoch_time/60:.2f} minutes")
+        print("------------------------------------------\n")
 
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             model.save_head(SAVE_PATH)
-            print("Saved best classifier head.")
-
+            print("Saved best classifier head.\n")
     return model, processor
 
-
-# ============================================
 # HEATMAP GENERATION
-# ============================================
-
 def generate_heatmaps(model, processor, dataset):
 
     print("[Heatmap] Generating heatmaps on validation set...")

@@ -80,7 +80,7 @@ class MedGemmaVisionHead(nn.Module):
         # 2. Pooling (Mean over patches)
         # dim=1 is patches 
         pooled_output = last_hidden_state.mean(dim=1) # [B, 1152]
-        
+        pooled_output = pooled_output.float()
         # 3. Classifier
         logits = self.classifier(pooled_output) # [B, 14]
         
