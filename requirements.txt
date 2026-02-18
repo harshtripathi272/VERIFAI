@@ -1,9 +1,8 @@
 # ============================================================
-# MedGemma QLoRA - FINAL STABLE REQUIREMENTS
+# VERIFAI - Requirements
 # Python 3.10
 #
-# IMPORTANT:
-# Install torch separately from PyTorch index FIRST.
+# IMPORTANT: Install torch separately from PyTorch index FIRST.
 #
 # Step 1:
 #   pip install torch==2.5.1+cu121 torchvision==0.20.1+cu121 \
@@ -11,20 +10,21 @@
 #       --index-url https://download.pytorch.org/whl/cu121
 #
 # Step 2:
-#   pip install -r requirements_final.txt
+#   pip install -r requirements.txt
 # ============================================================
 
 # ----------------------------
-# Core ML training stack
+# Core ML / Fine-tuning stack
 # ----------------------------
-transformers==4.57.1
+torch>=2.2.0
+torchvision>=0.18.0          # Fixes DLL entry point errors on Windows (0xc0000139)
+torchaudio>=2.2.0
+transformers==4.57.1         # Pinned: >=4.48 for ModernBERT; <5.0 to keep encode_plus for radgraph
 accelerate==1.11.0
 trl==0.28.0
 peft==0.17.1
-bitsandbytes==0.49.2
-huggingface-hub>=0.30.0
+bitsandbytes==0.49.2         # For 4-bit loading
 tokenizers>=0.22.0
-
 
 # ----------------------------
 # HuggingFace ecosystem
@@ -33,11 +33,12 @@ huggingface-hub>=0.34.0
 datasets==3.4.1
 safetensors>=0.4.0
 
-
 # ----------------------------
-# Numeric
+# Numeric / ML utilities
 # ----------------------------
 numpy==1.26.4
+scikit-learn==1.4.2
+sentence-transformers==2.7.0  # For KLE uncertainty embeddings
 
 # ----------------------------
 # API / Web
@@ -46,6 +47,7 @@ fastapi==0.115.6
 uvicorn[standard]==0.34.0
 streamlit==1.41.1
 pydantic==2.10.4
+pydantic_settings==2.2.1
 python-multipart==0.0.18
 pillow==11.0.0
 python-dotenv==1.0.1
@@ -58,20 +60,25 @@ langgraph==0.2.60
 langsmith==0.1.147
 
 # ----------------------------
-# Bio / APIs
+# Bio / Medical APIs
 # ----------------------------
 biopython==1.83
 fhir.resources==7.1.0
 lxml==5.1.0
 beautifulsoup4==4.12.3
 duckdb==0.10.0
-pydantic_settings==2.2.1
 
 # ----------------------------
-# ML utilities
+# Cloud Database
 # ----------------------------
-scikit-learn==1.4.2
-sentence-transformers==2.7.0
+supabase>=2.3.0              # Cloud PostgreSQL database client
+
+# ----------------------------
+# Validator Tools
+# ----------------------------
+faiss-cpu==1.7.4             # FAISS index for retrieval (use faiss-gpu for GPU)
+radgraph                     # RadGraph entity extraction (manual model install required)
+nltk==3.8.1                  # For sentence tokenization
 
 # ----------------------------
 # Safe transitive pins

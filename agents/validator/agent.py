@@ -1,0 +1,336 @@
+"""
+Validator Agent Node
+
+Runs in TWO scenarios:
+1. When Debate Orchestrator REACHES consensus (validation mode)
+2. When Debate runs for max rounds WITHOUT consensus (escalation mode)
+
+The validator aggregates ALL agent outputs + runs its own 3 tools:
+1. CXR-RePaiR Retrieval: Find similar historical cases
+2. RadGraph Entity Matching: Verify clinical facts match  
+3. Clinical Rules Engine: Check for contradictions
+
+The validator prepares a comprehensive final output aggregating all evidence
+for human review, including:
+- All agent outputs (Radiologist, CheXbert, Historian, Literature, Critic, Debate)
+- Retrieval evidence from similar historical cases
+- Entity matching results
+- Clinical rule violations
+- Final recommendation with supporting reasoning
+"""
+
+from typing import Dict, Any
+from graph.state import VerifaiState
+from agents.validator.retrieval_tool import CXRRetrieverTool
+from agents.validator.radgraph_tool import RadGraphEntityTool
+from agents.validator.rules_engine import ClinicalRulesEngine
+
+# Global tool instances (initialized once at startup)
+_retriever = None
+_radgraph = None
+_rules_engine = None
+_tools_initialized = False
+
+
+def initialize_validator_tools(vision_encoder, image_processor):
+    """
+    Initialize all validator tools. Call this once when building the graph.
+    
+    Args:
+        vision_encoder: MedSigLIP vision encoder model
+        image_processor: MedSigLIP image processor
+    """
+    global _retriever, _radgraph, _rules_engine, _tools_initialized
+    
+    if _tools_initialized:
+        print("[Validator] Tools already initialized")
+        return
+    
+    print("[Validator] Initializing validator tools...")
+    
+    # Initialize retrieval tool
+    try:
+        _retriever = CXRRetrieverTool(
+            index_path="data/mimic_corpus.faiss",
+            metadata_path="data/mimic_corpus_metadata.json",
+            vision_encoder=vision_encoder,
+            image_processor=image_processor
+        )
+        print("[Validator] ✓ Retrieval tool initialized")
+    except Exception as e:
+        print(f"[Validator] ✗ Failed to initialize retrieval tool: {e}")
+        _retriever = None
+    
+    # Initialize RadGraph tool
+    try:
+        _radgraph = RadGraphEntityTool(
+            model_type="modern-radgraph-xl"  # Auto-downloads from HuggingFace
+        )
+        print("[Validator] ✓ RadGraph tool initialized")
+    except Exception as e:
+        print(f"[Validator] ✗ Failed to initialize RadGraph tool: {e}")
+        _radgraph = None
+    
+    # Initialize rules engine (always succeeds)
+    _rules_engine = ClinicalRulesEngine()
+    print("[Validator] ✓ Rules engine initialized")
+    
+    _tools_initialized = True
+    print("[Validator] All tools initialized successfully")
+
+
+def validator_node(state: VerifaiState) -> Dict[str, Any]:
+    """
+    Validator node runs in TWO scenarios:
+    1. When debate REACHES consensus → validate the consensus
+    2. When debate runs max rounds WITHOUT consensus → escalate with evidence
+    
+    The validator aggregates ALL agent outputs and runs 3 tools to prepare
+    a comprehensive final output for human review.
+    
+    Decision Logic:
+    - If retrieval agrees with CheXbert AND entity F1 > 0.8 AND no critical flags
+      → FINALIZE with high confidence
+    - If retrieval disagrees AND entity F1 < 0.5
+      → FLAG_FOR_HUMAN (multiple tools show weak evidence)
+    - If critical rule violations present
+      → FLAG_FOR_HUMAN (safety concern)
+    - Otherwise
+      → FINALIZE_LOW_CONFIDENCE (mixed signals)
+    
+    Args:
+        state: Current VERIFAI state with all agent outputs
+    
+    Returns:
+        Dict with validator_output (comprehensive aggregation), routing_decision, trace
+    """
+    if not _tools_initialized:
+        return {
+            "validator_output": {
+                "error": "Validator tools not initialized",
+                "recommendation": "FLAG_FOR_HUMAN"
+            },
+            "routing_decision": "FLAG_FOR_HUMAN",
+            "trace": ["VALIDATOR: Tools not initialized - flagging for human review"]
+        }
+    
+    trace_entries = ["VALIDATOR: Running validation tools..."]
+    
+    # ── TOOL 1: Retrieval ──────────────────────────────
+    retrieval_result = {}
+    if _retriever:
+        try:
+            retrieval_result = _retriever.execute(state)
+            trace_entries.append(
+                f"VALIDATOR RETRIEVAL: Found {len(retrieval_result.get('retrieved_sentences', []))} similar cases, "
+                f"consensus={retrieval_result.get('consensus_diagnosis', 'Unknown')}"
+            )
+        except Exception as e:
+            trace_entries.append(f"VALIDATOR RETRIEVAL: Failed - {str(e)[:100]}")
+            retrieval_result = {
+                "error": str(e),
+                "retrieved_sentences": [],
+                "consensus_diagnosis": "Unknown",
+                "agrees_with_chexbert": False
+            }
+    else:
+        trace_entries.append("VALIDATOR RETRIEVAL: Tool not available")
+        retrieval_result = {
+            "error": "Retrieval tool not initialized",
+            "retrieved_sentences": [],
+            "consensus_diagnosis": "Unknown",
+            "agrees_with_chexbert": False
+        }
+    
+    # ── TOOL 2: Entity Matching ────────────────────────
+    entity_result = {}
+    if _radgraph:
+        try:
+            entity_result = _radgraph.execute(
+                state=state,
+                retrieved_sentences=retrieval_result.get("retrieved_sentences", [])
+            )
+            trace_entries.append(
+                f"VALIDATOR RADGRAPH: Entity F1={entity_result.get('entity_f1', 0):.3f}, "
+                f"verdict={entity_result.get('verdict', 'unknown')}"
+            )
+        except Exception as e:
+            trace_entries.append(f"VALIDATOR RADGRAPH: Failed - {str(e)[:100]}")
+            entity_result = {
+                "error": str(e),
+                "entity_f1": 0.0,
+                "verdict": "error"
+            }
+    else:
+        trace_entries.append("VALIDATOR RADGRAPH: Tool not available")
+        entity_result = {
+            "error": "RadGraph tool not initialized",
+            "entity_f1": 0.0,
+            "verdict": "unavailable"
+        }
+    
+    # ── TOOL 3: Rules Engine ───────────────────────────
+    rules_result = {}
+    if _rules_engine:
+        try:
+            rules_result = _rules_engine.execute(state)
+            trace_entries.append(
+                f"VALIDATOR RULES: {rules_result.get('summary', 'No violations')}"
+            )
+        except Exception as e:
+            trace_entries.append(f"VALIDATOR RULES: Failed - {str(e)[:100]}")
+            rules_result = {
+                "error": str(e),
+                "has_critical_flag": False,
+                "flag_count": 0,
+                "warn_count": 0
+            }
+    else:
+        # Should never happen, but handle gracefully
+        trace_entries.append("VALIDATOR RULES: Engine not available")
+        rules_result = {
+            "error": "Rules engine not initialized",
+            "has_critical_flag": False,
+            "flag_count": 0,
+            "warn_count": 0
+        }
+    
+    # ── DECISION LOGIC ─────────────────────────────────
+    
+    # Extract key signals
+    retrieval_agrees = retrieval_result.get("agrees_with_chexbert", False)
+    entity_f1 = entity_result.get("entity_f1", 0.0)
+    entity_strong = entity_f1 > 0.8
+    entity_weak = entity_f1 < 0.5
+    no_critical_flag = not rules_result.get("has_critical_flag", False)
+    
+    # Decision tree
+    if retrieval_agrees and entity_strong and no_critical_flag:
+        # Strong evidence from all tools
+        recommendation = "FINALIZE"
+        confidence_level = "high"
+        explanation = "All validation tools show strong agreement"
+        
+    elif not retrieval_agrees and entity_weak:
+        # Multiple tools disagree or show weak evidence
+        recommendation = "FLAG_FOR_HUMAN"
+        confidence_level = "low"
+        explanation = "Weak evidence: retrieval disagrees and low entity match"
+        
+    elif rules_result.get("has_critical_flag", False):
+        # Critical rule violation
+        recommendation = "FLAG_FOR_HUMAN"
+        confidence_level = "low"
+        explanation = f"Critical rule violations: {', '.join(rules_result.get('triggered_rule_names', []))}"
+        
+    else:
+        # Mixed signals - finalize but mark as low confidence
+        recommendation = "FINALIZE_LOW_CONFIDENCE"
+        confidence_level = "medium"
+        explanation = "Mixed evidence signals from validation tools"
+    # Aggregate ALL agent outputs + validation tool results
+    validator_output = {
+        "recommendation": recommendation,
+        "confidence_level": confidence_level,
+        "explanation": explanation,
+        
+        # === VALIDATION TOOLS RESULTS ===
+        "retrieval": retrieval_result,
+        "entity_matching": entity_result,
+        "rules": rules_result,
+        
+        # === AGENT OUTPUTS SUMMARY ===
+        "agent_summary": {
+            "radiologist": {
+                "findings": state.get("radiologist_output").findings[:200] if state.get("radiologist_output") else None,
+                "impression": state.get("radiologist_output").impression[:200] if state.get("radiologist_output") else None,
+                "kle_uncertainty": state.get("radiologist_kle_uncertainty")
+            },
+            "chexbert": {
+                "positive_labels": [
+                    label for label, val in state.get("chexbert_output").labels.items() 
+                    if val == "Positive"
+                ] if state.get("chexbert_output") else [],
+                "uncertain_labels": [
+                    label for label, val in state.get("chexbert_output").labels.items() 
+                    if val == "Uncertain"
+                ] if state.get("chexbert_output") else []
+            },
+            "critic": {
+                "is_overconfident": state.get("critic_output").is_overconfident if state.get("critic_output") else None,
+                "concern_count": len(state.get("critic_output").concern_flags) if state.get("critic_output") else 0,
+                "safety_score": state.get("critic_output").safety_score if state.get("critic_output") else None
+            },
+            "historian": {
+                "supporting_facts_count": len(state.get("historian_output").supporting_facts) if state.get("historian_output") else 0,
+                "contradicting_facts_count": len(state.get("historian_output").contradicting_facts) if state.get("historian_output") else 0
+            },
+            "literature": {
+                "evidence_strength": state.get("literature_output").overall_evidence_strength if state.get("literature_output") else None,
+                "citation_count": len(state.get("literature_output").citations) if state.get("literature_output") else 0
+            },
+            "debate": {
+                "consensus_reached": state.get("debate_output").final_consensus if state.get("debate_output") else None,
+                "rounds": len(state.get("debate_output").rounds) if state.get("debate_output") else 0,
+                "escalated": state.get("debate_output").escalate_to_chief if state.get("debate_output") else False
+            }
+        },
+        
+        # === VALIDATION SUMMARY ===
+        "summary": {
+            "historical_support": retrieval_result.get("support_count", "0 out of 5"),
+            "entity_match_f1": entity_result.get("entity_f1", 0.0),
+            "flags": rules_result.get("flag_count", 0),
+            "warnings": rules_result.get("warn_count", 0)
+        },
+        
+        # === FINAL VERDICT FOR HUMAN ===
+        "final_verdict": {
+            "recommendation": recommendation,
+            "confidence": confidence_level,
+            "reasoning": explanation,
+            "all_agents_agree": _check_agent_agreement(state),
+            "external_evidence_strength": _assess_external_evidence(state),
+            "key_concerns": rules_result.get("triggered_rule_names", [])
+        }
+    }
+    
+    return {
+        "validator_output": validator_output,
+        "routing_decision": recommendation,
+        "trace": trace_entries
+    }
+
+
+def _check_agent_agreement(state: VerifaiState) -> bool:
+    """Check if Critic, Historian, and Literature all support the diagnosis."""
+    critic = state.get("critic_output")
+    hist = state.get("historian_output")
+    lit = state.get("literature_output")
+    
+    # High agreement if:
+    # - Critic not overconfident
+    # - Historian has supporting facts
+    # - Literature has medium/high evidence
+    
+    critic_ok = not critic.is_overconfident if critic else False
+    hist_ok = len(hist.supporting_facts) > 0 if hist else False
+    lit_ok = lit.overall_evidence_strength in ["medium", "high"] if lit else False
+    
+    return critic_ok and hist_ok and lit_ok
+
+
+def _assess_external_evidence(state: VerifaiState) -> str:
+    """Assess overall external evidence strength."""
+    hist = state.get("historian_output")
+    lit = state.get("literature_output")
+    
+    hist_count = len(hist.supporting_facts) if hist else 0
+    lit_strength = lit.overall_evidence_strength if lit else "none"
+    
+    if hist_count >= 2 and lit_strength in ["medium", "high"]:
+        return "strong"
+    elif hist_count >= 1 or lit_strength in ["medium", "high"]:
+        return "moderate"
+    else:
+        return "weak"
