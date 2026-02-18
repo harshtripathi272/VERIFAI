@@ -136,13 +136,19 @@ def historian_node(state: VerifaiState) -> dict:
         f"HISTORIAN: Sources - Impression text + CheXbert labels"
     ]
 
-    for hypothesis_name in hypotheses:
+    # 1. Fetch FHIR evidence (Optimized: Fetch once, filter in-memory)
+    try:
+        full_context = fhir_client.fetch_full_patient_context(patient_id)
+    except Exception as e:
+        return {
+            "historian_output": None,
+            "trace": trace + [f"HISTORIAN: Error querying FHIR DB: {str(e)}"]
+        }
 
-        # 1. Fetch FHIR evidence
-        evidence = fhir_client.fetch_evidence_for_hypothesis(
-            patient_id=patient_id,
-            hypothesis=hypothesis_name
-        )
+    for hypothesis_name in hypotheses:
+        # Filter evidence for this specific hypothesis
+        evidence = fhir_client.filter_patient_context(full_context, hypothesis_name)
+        
         # 2. Reason with MedGemma-4B
         
         reasoning = reason_over_fhir(
@@ -150,44 +156,34 @@ def historian_node(state: VerifaiState) -> dict:
             evidence=evidence
         )
 
-        """
-        Expected reasoning structure (parsed upstream or directly returned):
-        {
-          "supporting_facts": [
-            {"description": "...", "resource_type": "...", "resource_id": "..."}
-          ],
-          "contradicting_facts": [...],
-          "confidence_adjustment": +0.12
-        }
-        """
-        # 3. Convert reasoning → HistorianFact
+        # 2. Reason with MedGemma-4B
         
-        for fact in reasoning.get("supporting_facts", []):
-            all_supporting.append(
-                HistorianFact(
-                    fact_type="supporting",
-                    description=f"[{hypothesis_name}] {fact['description']}",
-                    fhir_resource_id=fact.get("resource_id"),
-                    fhir_resource_type=fact.get("resource_type")
-                )
-            )
+        # Now returns HistorianOutput object
+        reasoning_output = reason_over_fhir(
+            hypothesis=hypothesis_name,
+            evidence=evidence
+        )
 
-        for fact in reasoning.get("contradicting_facts", []):
-            all_contradicting.append(
-                HistorianFact(
-                    fact_type="contradicting",
-                    description=f"[{hypothesis_name}] {fact['description']}",
-                    fhir_resource_id=fact.get("resource_id"),
-                    fhir_resource_type=fact.get("resource_type")
-                )
-            )
+        """
+        reasoning_output is now a HistorianOutput object.
+        We need to accumulate facts and confidence from it.
+        """
+        # 3. Accumulate facts from structured output
+        
+        for fact in reasoning_output.supporting_facts:
+            # Prepend hypothesis name to description for context in final list
+            fact.description = f"[{hypothesis_name}] {fact.description}"
+            all_supporting.append(fact)
+
+        for fact in reasoning_output.contradicting_facts:
+            fact.description = f"[{hypothesis_name}] {fact.description}"
+            all_contradicting.append(fact)
 
         # 4. Accumulate confidence delta
-        delta = reasoning.get("confidence_adjustment", 0.0)
-        net_confidence_adjustment += delta
+        net_confidence_adjustment += reasoning_output.confidence_adjustment
 
         trace.append(
-            f"HISTORIAN: {hypothesis_name} Δconfidence={delta:+.2f}"
+            f"HISTORIAN: {hypothesis_name} Δconfidence={reasoning_output.confidence_adjustment:+.2f}"
         )
 
     # 5. Build final HistorianOutput

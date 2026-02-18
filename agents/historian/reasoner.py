@@ -4,6 +4,8 @@ import threading
 import torch
 from app.config import settings
 from app.shared_model_loader import load_shared_medgemma, get_inference_lock
+from langchain_core.output_parsers import PydanticOutputParser
+from graph.state import HistorianOutput, HistorianFact
 
 # Thread-safe singleton pattern - now using shared loader
 processor = None
@@ -77,16 +79,26 @@ def summarize_fhir_evidence(evidence: dict) -> str:
     return "\n".join(lines) if lines else "No relevant historical records found."
 
 
-def reason_over_fhir(hypothesis: str, evidence: dict) -> dict:
+def reason_over_fhir(hypothesis: str, evidence: dict) -> HistorianOutput:
+    """
+    Reason over FHIR evidence using MedGemma and return structured HistorianOutput.
+    """
+    # Setup parser
+    parser = PydanticOutputParser(pydantic_object=HistorianOutput)
+    
     if settings.MOCK_MODELS:
-        return {
-            "supporting_facts": [],
-            "contradicting_facts": [],
-            "confidence_adjustment": 0.0
-        }
+        return HistorianOutput(
+            supporting_facts=[],
+            contradicting_facts=[],
+            confidence_adjustment=0.0,
+            clinical_summary="Mocked output."
+        )
 
     load_medgemma()
     summary = summarize_fhir_evidence(evidence)
+
+    # Convert Pydantic instructions to a format suitable for the prompt
+    format_instructions = parser.get_format_instructions()
 
     prompt = f"""
 You are a senior clinical historian assisting a radiologist.
@@ -105,18 +117,9 @@ Rules:
 1. Use ONLY the provided evidence.
 2. For document-based evidence, identify specific snippets that confirm or rule out the diagnosis.
 3. Reference resource IDs exactly (e.g., Condition/123).
-4. Output VALID JSON ONLY.
+4. You MUST output a JSON object formatted according to the schema below.
 
-JSON schema:
-{{
-  "supporting_facts": [
-    {{"description": "...", "resource_type": "...", "resource_id": "..."}}
-  ],
-  "contradicting_facts": [
-    {{"description": "...", "resource_type": "...", "resource_id": "..."}}
-  ],
-  "confidence_adjustment": number
-}}
+{format_instructions}
 """
 
     # CRITICAL: Acquire lock before using model (shared across agents)
@@ -146,12 +149,12 @@ JSON schema:
         
         input_len = inputs["input_ids"].shape[-1]
         print(f"[Historian] Input tokens: {inputs['input_ids'].shape}")
-        print(f"[Historian] Starting generation (max_new_tokens=500)...")
+        print(f"[Historian] Starting generation (max_new_tokens=600)...")
         
         with torch.inference_mode():
             outputs = model.generate(
                 **inputs,
-                max_new_tokens=500,
+                max_new_tokens=600, # Increased for JSON structure overhead
                 do_sample=False  # Greedy decoding for deterministic output
             )
         
@@ -162,49 +165,44 @@ JSON schema:
         raw = processor.decode(generated_tokens, skip_special_tokens=True)
         
         print(f"[Historian] Generated output length: {len(raw)} chars")
-        print(f"[Historian] Output preview: {raw[:300]}...")
+        # print(f"[Historian] Output preview: {raw[:300]}...")
         print(f"[Thread-{threading.current_thread().name}] Historian released model lock")
 
 
-
-    # Clean up output - remove any special tokens that weren't caught
-    raw = re.sub(r'<unused\d+>', '', raw)  # Remove <unusedNN> tokens
-    raw = re.sub(r'<[^>]+>', '', raw)  # Remove any other special tags
+    # Clean up output - remove any special tokens
+    raw = re.sub(r'<unused\d+>', '', raw)
+    raw = re.sub(r'<[^>]+>', '', raw)
     
-    # Try to extract JSON - look for complete JSON object with our expected schema
-    match = re.search(r'\{[^{}]*"supporting_facts"[^{}]*\}', raw, re.DOTALL)
-    if not match:
-        # Fallback: look for any JSON-like structure
-        match = re.search(r"\{.*\}", raw, re.DOTALL)
-    
-    if not match:
-        print("[Historian] WARNING: No JSON found in output")
-        print(f"[Historian] Raw text: {raw[:500]}...")
-        return {
-            "supporting_facts": [],
-            "contradicting_facts": [],
-            "confidence_adjustment": 0.0
-        }
-
+    # Attempt to parse using PydanticOutputParser
     try:
-        json_str = match.group()
-        result = json.loads(json_str)
-        print(f"[Historian] Successfully parsed JSON")
+        # Sometimes models wrap JSON in markdown code blocks
+        match = re.search(r"```json\s*(\{.*?\})\s*```", raw, re.DOTALL)
+        if match:
+            json_str = match.group(1)
+        else:
+            # Fallback to finding the first { and last }
+            match = re.search(r"\{.*\}", raw, re.DOTALL)
+            if match:
+                 json_str = match.group(0)
+            else:
+                json_str = raw
+
+        parsed_output = parser.parse(json_str)
+        print(f"[Historian] Successfully parsed JSON into HistorianOutput")
+        
+        # Clamp confidence safely
+        adj = parsed_output.confidence_adjustment
+        parsed_output.confidence_adjustment = max(-0.3, min(0.3, adj))
+        
+        return parsed_output
+
     except Exception as e:
         print(f"[Historian] JSON parse error: {e}")
-        print(f"[Historian] Attempted to parse: {match.group()[:200]}...")
-        return {
-            "supporting_facts": [],
-            "contradicting_facts": [],
-            "confidence_adjustment": 0.0
-        }
-
-    # Clamp confidence safely (-0.3 to 0.3 as history can be quite telling)
-    try:
-        adj = float(result.get("confidence_adjustment", 0.0))
-        result["confidence_adjustment"] = max(-0.3, min(0.3, adj))
-    except (ValueError, TypeError):
-        result["confidence_adjustment"] = 0.0
-    print(result)
-
-    return result
+        print(f"[Historian] Raw output was: {raw}")
+        # Return valid empty object on failure
+        return HistorianOutput(
+            supporting_facts=[],
+            contradicting_facts=[],
+            confidence_adjustment=0.0,
+            clinical_summary=f"Failed to parse reasoning output: {str(e)}"
+        )
