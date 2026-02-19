@@ -141,7 +141,7 @@ def generate_findings(image_path: str, view: str = "AP") -> dict:
         }
     ]
 
-    import utils.inference  # Lazy import to avoid circular dep if any
+    
     from utils.inference import extract_json
 
     # Process Inputs
