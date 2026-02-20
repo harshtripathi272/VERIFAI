@@ -4,27 +4,59 @@ import re
 from graph.state import VerifaiState, HistorianOutput, HistorianFact
 from .fhir_client import fhir_client
 from .reasoner import reason_over_fhir
+import logging
+
+logger = logging.getLogger("historian")
+
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter(
+        "[%(name)s] %(levelname)s: %(message)s"
+    )
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
+logger.setLevel(logging.INFO)
+logger.propagate = False
+
+def log_retrieved_evidence(hypothesis: str, evidence: dict, top_k: int = 3):
+    """
+    Log top retrieved evidence for debugging hybrid retrieval.
+    """
+
+    logger.info(f"\n=== Retrieved Evidence for '{hypothesis}' ===")
+
+    for category in ["conditions", "observations", "documents"]:
+        items = evidence.get(category, [])
+        logger.info(f"{category.upper()} count: {len(items)}")
+
+        for i, item in enumerate(items[:top_k]):
+            score = item.get("_relevance_score", "N/A")
+            summary = item.get("_summary", "")
+
+            if isinstance(summary, str):
+                summary = summary[:150].replace("\n", " ")
+
+            logger.info(
+                f"  {i+1}. score={score} | {summary}"
+            )
+
+    logger.info("==========================================\n")
+
+
 
 
 def extract_diagnostic_concepts(impression: str) -> list[str]:
     """
     Extract diagnostic hypotheses from plain-text radiologist impression.
-    
-    Uses regex patterns to identify diagnostic concepts from common
-    radiology phrasing patterns.
-    
-    Args:
-        impression: Plain-text impression field from RadiologistOutput
-    
-    Returns:
-        List of extracted diagnostic concepts (max 3)
+    Uses regex patterns to identify diagnostic concepts.
     """
+
     if not impression:
         return []
-    
+
     concepts = []
-    
-    # Pattern 1: "consistent with X", "suggestive of X"
+
     patterns = [
         r'consistent with ([^.,;]+)',
         r'suggestive of ([^.,;]+)',
@@ -32,85 +64,83 @@ def extract_diagnostic_concepts(impression: str) -> list[str]:
         r'(?:possible|probable|likely) ([^.,;]+)',
         r'(?:differential includes?|consider) ([^.,;]+)',
     ]
-    
+
     for pattern in patterns:
         matches = re.findall(pattern, impression, re.IGNORECASE)
         concepts.extend([m.strip() for m in matches if m.strip()])
-    
-    # Fallback: Use first sentence if no patterns match
+
+    # Fallback: use first sentence
     if not concepts:
         first_sentence = impression.split('.')[0].strip()
         if first_sentence and len(first_sentence) < 200:
             concepts.append(first_sentence)
-    
-    # Deduplicate and limit to top 3
+
+    # Deduplicate (max 3)
     seen = set()
-    unique_concepts = []
-    for concept in concepts:
-        concept_lower = concept.lower()
-        if concept_lower not in seen:
-            seen.add(concept_lower)
-            unique_concepts.append(concept)
-        if len(unique_concepts) >= 3:
+    unique = []
+    for c in concepts:
+        c_lower = c.lower()
+        if c_lower not in seen:
+            seen.add(c_lower)
+            unique.append(c)
+        if len(unique) >= 3:
             break
-    
-    return unique_concepts
 
+    return unique
 
+# Historian Agent Node
 def historian_node(state: VerifaiState) -> dict:
     """
     Historian Agent
 
-    Uses BOTH radiologist findings and CheXbert labels to gather FHIR evidence.
-    
-    Inputs:
-    - radiologist_output.findings: Detailed observations
-    - radiologist_output.impression: Diagnostic conclusion
-    - chexbert_output.labels: Structured pathology labels (present/uncertain)
-    
-    For each condition (from impression + CheXbert):
-    1. Fetch hypothesis-specific FHIR evidence
-    2. Reason over evidence using MedGemma-4B
-    3. Extract supporting facts, contradicting facts, confidence deltas
+    Uses:
+    - Radiologist impression (text extraction)
+    - CheXbert structured labels
 
-    Returns a fully populated HistorianOutput.
+    For each hypothesis:
+        1. Fetch hypothesis-specific hybrid FHIR evidence
+        2. Run MedGemma reasoning
+        3. Accumulate supporting/contradicting facts
+        4. Aggregate confidence adjustments
     """
 
     patient_id = state.get("patient_id")
     rad_output = state.get("radiologist_output")
     chexbert_output = state.get("chexbert_output")
 
-    # Validate inputs: Require patient_id AND radiologist output with BOTH findings/impression
+    # -------------------------------------------------------
+    # Validate Inputs
+    # -------------------------------------------------------
+
     if not patient_id:
         return {
             "historian_output": None,
             "trace": ["HISTORIAN: Missing patient_id"]
         }
-        
+
     if not rad_output:
         return {
             "historian_output": None,
             "trace": ["HISTORIAN: No radiologist output available"]
         }
-        
+
     if not rad_output.impression or not rad_output.findings:
         return {
             "historian_output": None,
             "trace": ["HISTORIAN: Missing findings or impression in radiologist report"]
         }
 
-    # Build hypothesis list from BOTH sources
     hypotheses = []
-    
-    # 1. Extract concepts from impression text
+
+    # 1. Extract from impression
     text_concepts = extract_diagnostic_concepts(rad_output.impression)
     hypotheses.extend(text_concepts)
-    
-    # 2. Add CheXbert labels (present and uncertain conditions)
+
+    # 2. Add CheXbert labels
     if chexbert_output and chexbert_output.labels:
-        for condition in chexbert_output.labels.keys():
-            hypotheses.append(condition)
-    
+        for label in chexbert_output.labels.keys():
+            hypotheses.append(label)
+
     # Deduplicate while preserving order
     seen = set()
     unique_hypotheses = []
@@ -119,74 +149,82 @@ def historian_node(state: VerifaiState) -> dict:
         if h_lower not in seen:
             seen.add(h_lower)
             unique_hypotheses.append(h)
-    
+
     hypotheses = unique_hypotheses
-    
+
     if not hypotheses:
         return {
             "historian_output": None,
             "trace": ["HISTORIAN: Could not extract diagnostic concepts"]
         }
+
     
+    # Prepare Aggregation
     all_supporting: list[HistorianFact] = []
     all_contradicting: list[HistorianFact] = []
     net_confidence_adjustment = 0.0
+
     trace = [
         f"HISTORIAN: Analyzing {len(hypotheses)} conditions",
-        f"HISTORIAN: Sources - Impression text + CheXbert labels"
+        "HISTORIAN: Using hypothesis-specific hybrid retrieval"
     ]
 
-    # 1. Fetch FHIR evidence (Optimized: Fetch once, filter in-memory)
-    try:
-        full_context = fhir_client.fetch_full_patient_context(patient_id)
-    except Exception as e:
-        return {
-            "historian_output": None,
-            "trace": trace + [f"HISTORIAN: Error querying FHIR DB: {str(e)}"]
-        }
+    # -------------------------------------------------------
+    # Process Each Hypothesis (Correct Hybrid Flow)
+    # -------------------------------------------------------
 
     for hypothesis_name in hypotheses:
-        # Filter evidence for this specific hypothesis
-        evidence = fhir_client.filter_patient_context(full_context, hypothesis_name)
-        
-        # 2. Reason with MedGemma-4B
-        
-        reasoning = reason_over_fhir(
-            hypothesis=hypothesis_name,
-            evidence=evidence
-        )
 
-        # 2. Reason with MedGemma-4B
-        
-        # Now returns HistorianOutput object
+        try:
+            # 🔥 Hypothesis-specific hybrid retrieval
+            evidence = fhir_client.fetch_evidence_hybrid(
+                patient_id,
+                hypothesis_name
+            )
+        except Exception as e:
+            trace.append(
+                f"HISTORIAN: FHIR retrieval error for '{hypothesis_name}': {str(e)}"
+            )
+            continue
+        # 🔍 DEBUG LOGGING
+        log_retrieved_evidence(hypothesis_name, evidence)
+
+        # 🔥 Single MedGemma reasoning call
         reasoning_output = reason_over_fhir(
             hypothesis=hypothesis_name,
             evidence=evidence
         )
 
-        """
-        reasoning_output is now a HistorianOutput object.
-        We need to accumulate facts and confidence from it.
-        """
-        # 3. Accumulate facts from structured output
-        
+        # ---------------------------------------------------
+        # Accumulate Supporting Facts
+        # ---------------------------------------------------
+
         for fact in reasoning_output.supporting_facts:
-            # Prepend hypothesis name to description for context in final list
             fact.description = f"[{hypothesis_name}] {fact.description}"
             all_supporting.append(fact)
+
+        # ---------------------------------------------------
+        # Accumulate Contradicting Facts
+        # ---------------------------------------------------
 
         for fact in reasoning_output.contradicting_facts:
             fact.description = f"[{hypothesis_name}] {fact.description}"
             all_contradicting.append(fact)
 
-        # 4. Accumulate confidence delta
+        # ---------------------------------------------------
+        # Accumulate Confidence
+        # ---------------------------------------------------
+
         net_confidence_adjustment += reasoning_output.confidence_adjustment
 
         trace.append(
-            f"HISTORIAN: {hypothesis_name} Δconfidence={reasoning_output.confidence_adjustment:+.2f}"
+            f"HISTORIAN: {hypothesis_name} Δconfidence="
+            f"{reasoning_output.confidence_adjustment:+.2f}"
         )
 
-    # 5. Build final HistorianOutput
+    # -------------------------------------------------------
+    # Final Structured Output
+    # -------------------------------------------------------
 
     output = HistorianOutput(
         supporting_facts=all_supporting,
@@ -194,7 +232,7 @@ def historian_node(state: VerifaiState) -> dict:
         confidence_adjustment=round(net_confidence_adjustment, 3),
         clinical_summary=(
             f"Evaluated {len(hypotheses)} diagnostic concepts using "
-            f"FHIR-grounded historical evidence."
+            f"hypothesis-specific FHIR-grounded historical evidence."
         )
     )
 

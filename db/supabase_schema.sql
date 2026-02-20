@@ -366,3 +366,105 @@ END;
 $$ LANGUAGE plpgsql;
 
 COMMENT ON FUNCTION get_feedback_context IS 'Retrieves complete workflow context for a session to support feedback loop reprocessing';
+
+
+-- ============================================================
+-- PAST MISTAKES — pgvector HNSW (run before enabling USE_CLOUD_VECTOR_DB)
+-- ============================================================
+
+-- 1. Enable pgvector extension (requires Supabase pgvector addon or PG>=15 self-hosted)
+CREATE EXTENSION IF NOT EXISTS vector;
+
+-- 2. Past-mistakes table with a native pgvector column
+--    (Case embeddings are 384-dim from sentence-transformers/all-MiniLM-L6-v2)
+CREATE TABLE IF NOT EXISTS past_mistakes (
+    mistake_id           TEXT PRIMARY KEY,
+    session_id           TEXT NOT NULL,
+    image_path           TEXT,
+    created_at           TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    original_diagnosis   TEXT NOT NULL,
+    corrected_diagnosis  TEXT NOT NULL,
+    disease_type         TEXT NOT NULL,
+    error_type           TEXT NOT NULL,
+    severity_level       INTEGER NOT NULL CHECK (severity_level BETWEEN 1 AND 5),
+    kle_uncertainty      REAL,
+    safety_score         REAL,
+    chexbert_labels      TEXT,   -- JSON-encoded dict
+    clinical_summary     TEXT,
+    debate_summary       TEXT,
+    case_embedding       VECTOR(384) NOT NULL
+);
+
+-- 3. Structured indexes for fast metadata pre-filtering
+CREATE INDEX IF NOT EXISTS idx_pm_disease     ON past_mistakes (disease_type);
+CREATE INDEX IF NOT EXISTS idx_pm_error_type  ON past_mistakes (error_type);
+CREATE INDEX IF NOT EXISTS idx_pm_severity    ON past_mistakes (severity_level);
+CREATE INDEX IF NOT EXISTS idx_pm_kle         ON past_mistakes (kle_uncertainty);
+CREATE INDEX IF NOT EXISTS idx_pm_created_at  ON past_mistakes (created_at);
+CREATE INDEX IF NOT EXISTS idx_pm_session     ON past_mistakes (session_id);
+
+-- 4. HNSW index for approximate nearest-neighbour cosine similarity
+--    Must be created BEFORE the match_mistakes function is called in production.
+CREATE INDEX IF NOT EXISTS idx_pm_case_embedding_hnsw
+    ON past_mistakes
+    USING hnsw (case_embedding vector_cosine_ops);
+
+-- 5. RPC function called by SupabasePastMistakesRepository
+--    Performs cosine similarity search ordered by ascending distance (HNSW optimal).
+--    Returns similarity = 1 - cosine_distance so callers use standard [0, 1] scoring.
+CREATE OR REPLACE FUNCTION match_mistakes(
+    query_embedding  VECTOR(384),
+    disease_type     TEXT,
+    kle_min          FLOAT,
+    kle_max          FLOAT,
+    severity_min     INT,
+    top_k            INT
+)
+RETURNS TABLE (
+    mistake_id           TEXT,
+    session_id           TEXT,
+    image_path           TEXT,
+    original_diagnosis   TEXT,
+    corrected_diagnosis  TEXT,
+    disease_type         TEXT,
+    error_type           TEXT,
+    severity_level       INT,
+    kle_uncertainty      FLOAT,
+    safety_score         FLOAT,
+    chexbert_labels      TEXT,
+    clinical_summary     TEXT,
+    debate_summary       TEXT,
+    created_at           TIMESTAMP WITH TIME ZONE,
+    similarity           FLOAT
+)
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT
+        pm.mistake_id,
+        pm.session_id,
+        pm.image_path,
+        pm.original_diagnosis,
+        pm.corrected_diagnosis,
+        pm.disease_type,
+        pm.error_type,
+        pm.severity_level,
+        pm.kle_uncertainty,
+        pm.safety_score,
+        pm.chexbert_labels,
+        pm.clinical_summary,
+        pm.debate_summary,
+        pm.created_at,
+        -- similarity: 1 - cosine_distance (higher = more similar)
+        1.0 - (pm.case_embedding <=> query_embedding) AS similarity
+    FROM past_mistakes pm
+    WHERE pm.disease_type     = match_mistakes.disease_type
+      AND pm.kle_uncertainty  BETWEEN kle_min AND kle_max
+      AND pm.severity_level  >= severity_min
+    ORDER BY pm.case_embedding <=> query_embedding  -- ascending distance exercised by HNSW
+    LIMIT top_k * 2;   -- over-fetch; Python layer applies similarity threshold & top_k cap
+$$;
+
+COMMENT ON FUNCTION match_mistakes IS
+    'pgvector HNSW cosine similarity search over past_mistakes. '
+    'Used by SupabasePastMistakesRepository when USE_CLOUD_VECTOR_DB=True.';

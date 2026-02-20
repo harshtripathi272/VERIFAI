@@ -27,9 +27,8 @@ print("\n[Test 1] Running Radiologist Node...")
 print("-" * 60)
 
 rad_state: VerifaiState = {
-    "image_path": "test_image.jpg",  # Dummy path
+    "image_path": "img1.jpg",  # Dummy path
     "patient_id": "TEST-001",
-    "dicom_metadata": {"StudyDate": "20260210"},
     "radiologist_output": None,
     "critic_output": None,
     "historian_output": None,

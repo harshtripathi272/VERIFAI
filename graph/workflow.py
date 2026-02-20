@@ -29,9 +29,8 @@ from agents.validator import validator_node, initialize_validator_tools  # Valid
 from agents.feedback.agent import feedback_node  # Doctor feedback processing
 
 
-# =============================================================================
 # THREAD-LOCAL LOGGER REGISTRY (one logger per session)
-# =============================================================================
+
 import threading
 _logger_registry: dict[str, Any] = {}
 _registry_lock = threading.Lock()

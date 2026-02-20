@@ -24,14 +24,14 @@ class Settings(BaseSettings):
     SEMANTIC_SCHOLAR_API_KEYS: list | None = None
     
     # === Model Paths (HAI-DEF Models) ===
-    # MEDSIGLIP_MODEL: str = "google/medsiglip-448"  <-- REMOVED (Shared vision tower used)
+    MEDSIGLIP_BASE_MODEL: str = "google/medsiglip-448" 
+    MEDSIGLIP_WEIGHTS_PATH : str = "../output/medsiglip_full_model.pt" 
     MEDGEMMA_4B_MODEL: str = "google/medgemma-1.5-4b-it"
     #MEDGEMMA_27B_MODEL: str = "google/medgemma-27b-it"
     
     # === MedGemma 4B Fine-Tuned Paths ===
-    MEDGEMMA_LORA_ROOT: str = os.getenv("MEDGEMMA_LORA_ROOT", "../dataset/med/fine_tuned_model/v1/")
-    MEDGEMMA_LORA_ADAPTERS: str = os.getenv("MEDGEMMA_LORA_ADAPTERS", "../dataset/med/fine_tuned_model/v1/lora_adapters")
-    MEDGEMMA_PROJECTOR_WEIGHTS: str = os.getenv("MEDGEMMA_PROJECTOR_WEIGHTS", "../dataset/med/fine_tuned_model/v1/projector.pt")
+    MEDGEMMA_LORA_ROOT: str = os.getenv("MEDGEMMA_LORA_ROOT", "../dataset/med/fine_tuned_model/v1/checkpoint-700/")
+    MEDGEMMA_LORA_ADAPTERS: str = os.getenv("MEDGEMMA_LORA_ADAPTERS", "../dataset/med/fine_tuned_model/v1/checkpoint-700/")
     
     # === Text Embedding Model (for KLE Uncertainty) ===
     # Switch to any sentence-transformers compatible model
@@ -96,6 +96,11 @@ class Settings(BaseSettings):
     PAST_MISTAKES_SIMILARITY_THRESHOLD: float = 0.75  # Minimum cosine similarity
     PAST_MISTAKES_KLE_TOLERANCE: float = 0.2  # +/- range for KLE filtering
     ENABLE_PAST_MISTAKES_RERANKING: bool = bool(os.getenv("ENABLE_PAST_MISTAKES_RERANKING", "True"))  # Neural re-ranking
+
+    # Use Supabase pgvector HNSW as primary vector search backend for past mistakes.
+    # Falls back to DuckDB automatically on any Supabase connectivity failure.
+    USE_CLOUD_VECTOR_DB: bool = bool(os.getenv("USE_CLOUD_VECTOR_DB", "False"))
+
     
     # === SUPABASE (Cloud Database) ===
     # Supabase connection for cloud-based structured logging

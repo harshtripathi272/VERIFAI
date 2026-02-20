@@ -51,8 +51,8 @@ def initialize_validator_tools(vision_encoder, image_processor):
     # Initialize retrieval tool
     try:
         _retriever = CXRRetrieverTool(
-            index_path="data/mimic_corpus.faiss",
-            metadata_path="data/mimic_corpus_metadata.json",
+            index_path="retrieval_data/retrieval_index.faiss",
+            metadata_path="retrieval_data/retrieval_metadata.json",
             vision_encoder=vision_encoder,
             image_processor=image_processor
         )

@@ -38,25 +38,177 @@ from nltk.tokenize import sent_tokenize
 from transformers import AutoImageProcessor
 from transformers import SiglipVisionModel
 
-from app.config import settings
+"""
+VERIFAI Configuration
+
+Environment variables, model paths, and thresholds.
+"""
+
+import os
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from dotenv import load_dotenv
+load_dotenv()
+
+class Settings(BaseSettings):
+    """Application settings loaded from environment or .env file."""
+    
+    # === API Keys ===
+    NCBI_API_KEY: str | None = os.getenv("NCBI_API_KEY")  # For higher E-utilities rate limits
+    NCBI_EMAIL: str | None = os.getenv("NCBI_EMAIL")  # Required for Entrez (optional for testing)
+    SEMANTIC_SCHOLAR_API_KEY: str | None = os.getenv("SEMANTIC_SCHOLAR_API_KEY")
+    HUGGINGFACE_TOKEN: str | None = os.getenv("HUGGINGFACE_TOKEN")  # For gated models
+    
+    # === Multiple API Keys Support (Advanced) ===
+    # Format: [{"key": "xxx", "requests_per_second": 10}, {"key": "yyy", "requests_per_second": 1}]
+    NCBI_API_KEYS: list | None = None
+    SEMANTIC_SCHOLAR_API_KEYS: list | None = None
+    
+    # === Model Paths (HAI-DEF Models) ===
+    MEDSIGLIP_BASE_MODEL: str = "google/medsiglip-448" 
+    MEDSIGLIP_WEIGHTS_PATH : str = "../output/medsiglip_full_model.pt" 
+    MEDGEMMA_4B_MODEL: str = "google/medgemma-1.5-4b-it"
+    #MEDGEMMA_27B_MODEL: str = "google/medgemma-27b-it"
+    
+    # === MedGemma 4B Fine-Tuned Paths ===
+    MEDGEMMA_LORA_ROOT: str = os.getenv("MEDGEMMA_LORA_ROOT", "../dataset/med/fine_tuned_model/v1/checkpoint-700/")
+    MEDGEMMA_LORA_ADAPTERS: str = os.getenv("MEDGEMMA_LORA_ADAPTERS", "../dataset/med/fine_tuned_model/v1/checkpoint-700/")
+    
+    # === Text Embedding Model (for KLE Uncertainty) ===
+    # Switch to any sentence-transformers compatible model
+    TEXT_EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
+    
+    # === KLE Uncertainty Settings ===
+    KLE_UNCERTAINTY_THRESHOLD: float = 0.30  # Consensus requires uncertainty < threshold
+    KLE_NUM_SAMPLES: int = 3  # Number of samples to generate for KLE
+    
+    # === FHIR Configuration ===
+    FHIR_BASE_URL: str = "https://fhir.mimic-iv-demo.physionet.org/fhir"  # Public test server
+    FHIR_AUTH_TOKEN: str | None = None
+    
+    # === Uncertainty Thresholds ===
+    THRESHOLD_HISTORIAN: float = 0.30  # U >= 0.30 -> invoke Historian
+    THRESHOLD_LITERATURE: float = 0.40  # U >= 0.40 -> invoke Literature
+    THRESHOLD_CHIEF: float = 0.50  # U >= 0.50 -> escalate to Chief
+    
+    # === Execution Limits ===
+    MAX_ROUTING_STEPS: int = 5  # Prevent infinite loops
+    
+    # === DEBATE SETTINGS ===
+    # Maximum rounds of debate between Critic and Evidence Team
+    DEBATE_MAX_ROUNDS: int = 3
+    
+    # Maximum confidence disagreement for consensus (0.15 = 15%)
+    DEBATE_CONSENSUS_THRESHOLD: float = 0.15
+    
+    # Enable debate workflow (set False to use legacy routing)
+    USE_DEBATE_WORKFLOW: bool = True
+    
+    # === OPTIMIZATION FLAGS ===
+    # Enable fast literature mode (parallel search without ReAct)
+    # Set to False to use MedGemma for literature reasoning (slower but potentially more accurate)
+    USE_FAST_LITERATURE_MODE: bool = False  # CHANGED: Now Literature uses GPU too
+    
+    # Enable literature query caching
+    USE_LITERATURE_CACHE: bool = True
+    
+    # Enable parallel agent execution where possible
+    USE_PARALLEL_AGENTS: bool = True
+    
+    # Preload models at startup (uses more memory but faster inference)
+    PRELOAD_MODELS: bool = False
+    
+    # === LLM CRITIC FLAGS ===
+    # Enable second-stage MedGemma semantic critic in Critic agent
+    ENABLE_LLM_CRITIC: bool = False
+    
+    # === PAST MISTAKES MEMORY ===
+    # Enable historical mistake retrieval in critic
+    ENABLE_PAST_MISTAKES_MEMORY: bool = bool(os.getenv("ENABLE_PAST_MISTAKES_MEMORY", "True"))
+    
+    # Past mistakes database path (DuckDB with VSS extension)
+    PAST_MISTAKES_DB_PATH: str = os.path.join(
+        os.path.dirname(os.path.dirname(__file__)), 
+        "verifai_past_mistakes.duckdb"
+    )
+    
+    # Retrieval settings
+    PAST_MISTAKES_TOP_K: int = 5  # Maximum similar cases to retrieve
+    PAST_MISTAKES_SIMILARITY_THRESHOLD: float = 0.75  # Minimum cosine similarity
+    PAST_MISTAKES_KLE_TOLERANCE: float = 0.2  # +/- range for KLE filtering
+    ENABLE_PAST_MISTAKES_RERANKING: bool = bool(os.getenv("ENABLE_PAST_MISTAKES_RERANKING", "True"))  # Neural re-ranking
+    
+    # === SUPABASE (Cloud Database) ===
+    # Supabase connection for cloud-based structured logging
+    SUPABASE_URL: str | None = os.getenv("SUPABASE_URL")
+    SUPABASE_KEY: str | None = os.getenv("SUPABASE_KEY")
+    SUPABASE_SERVICE_KEY: str | None = os.getenv("SUPABASE_SERVICE_KEY")  # Optional: for admin operations
+    
+    # Database mode selection
+    DATABASE_MODE: str = os.getenv("DATABASE_MODE", "supabase")  # 'supabase' or 'sqlite'
+    
+    # === DOCTOR FEEDBACK LOOP ===
+    # Enable doctor feedback-driven reprocessing
+    ENABLE_DOCTOR_FEEDBACK: bool = bool(os.getenv("ENABLE_DOCTOR_FEEDBACK", "True"))
+    
+    # Automatically restart from critic when feedback is provided
+    FEEDBACK_RESTART_FROM_CRITIC: bool = bool(os.getenv("FEEDBACK_RESTART_FROM_CRITIC", "True"))
+    
+    # === Mock Mode ===
+    # Enable to run without downloading large models (~50GB+)
+    MOCK_MODELS: bool = False  # CHANGED: Use real models, not mocks
+    
+    # === Environment ===
+    ENV: str = "development"
+    DEBUG: bool = True
+    
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore"
+    )
+
+
+settings = Settings()
+
 
 
 def load_vision_encoder():
-    """Load MedSigLIP vision encoder."""
-    print(f"Loading MedSigLIP: {settings.MEDSIGLIP_MODEL}")
-    
-    image_processor = AutoImageProcessor.from_pretrained(
-        settings.MEDSIGLIP_MODEL,
-        size={"height": 384, "width": 384}
-    )
-    
+    """Load custom saved MedSigLIP encoder."""
+
+    print(f"Loading custom MedSigLIP encoder from: {settings.MEDSIGLIP_WEIGHTS_PATH}")
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # Load base architecture
     vision_encoder = SiglipVisionModel.from_pretrained(
-        settings.MEDSIGLIP_MODEL,
-        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-        device_map="cuda" if torch.cuda.is_available() else "cpu"
-    ).eval()
-    
+        settings.MEDSIGLIP_BASE_MODEL
+    )
+
+    # Load your trained weights
+    state_dict = torch.load(
+        settings.MEDSIGLIP_WEIGHTS_PATH,
+        map_location=device
+    )
+
+    # If checkpoint contains full wrapper, extract backbone
+    if "vision_model." in list(state_dict.keys())[0]:
+        new_state_dict = {}
+        for k, v in state_dict.items():
+            if k.startswith("vision_model."):
+                new_state_dict[k.replace("vision_model.", "")] = v
+        state_dict = new_state_dict
+
+    vision_encoder.load_state_dict(state_dict, strict=False)
+
+    vision_encoder = vision_encoder.to(device)
+    vision_encoder.eval()
+
+    image_processor = AutoImageProcessor.from_pretrained(
+        settings.MEDSIGLIP_BASE_MODEL
+    )
+
     return vision_encoder, image_processor
+
 
 
 def select_study_images(all_images: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -130,7 +282,7 @@ def embed_image(image_path: str, vision_encoder, image_processor) -> np.ndarray:
             # Fallback: mean pool over patches
             embedding = vision_outputs.last_hidden_state.mean(dim=1).squeeze()
         
-        embedding = embedding.cpu().numpy()
+        embedding = embedding.float().cpu().numpy().astype("float32")
     
     return embedding
 
@@ -212,213 +364,133 @@ def load_mimic_reports(mimic_root: Path) -> pd.DataFrame:
     return pd.DataFrame(reports)
 
 
-def build_index(
-    mimic_root: Path,
+def build_index_from_jsonl(
+    jsonl_path: Path,
+    image_root: Path,
     output_dir: Path,
-    num_studies: int = None,
-    split: str = "train"
+    num_studies: int = None
 ):
-    """
-    Build FAISS index from MIMIC-CXR training set.
-    
-    Args:
-        mimic_root: Root directory of MIMIC-CXR dataset
-        output_dir: Where to save index and metadata
-        num_studies: Limit to first N studies (for testing)
-        split: Which split to use ('train', 'validate', 'test')
-    """
     print("="*80)
-    print("MIMIC-CXR Retrieval Index Builder")
+    print("Building Retrieval Index From JSONL Dataset")
     print("="*80)
-    
-    # Ensure NLTK punkt is available
-    try:
-        import nltk
-        nltk.data.find('tokenizers/punkt')
-    except LookupError:
-        print("Downloading NLTK punkt tokenizer...")
-        import nltk
-        nltk.download('punkt')
-    
-    # Load vision encoder
+
     vision_encoder, image_processor = load_vision_encoder()
-    print(f"Vision encoder loaded on: {vision_encoder.device}")
-    
-    # Load MIMIC metadata
-    print(f"\nLoading MIMIC-CXR metadata from {mimic_root}...")
-    metadata_df = load_mimic_metadata(mimic_root)
-    print(f"Loaded {len(metadata_df)} records")
-    
-    # Filter to training set
-    train_df = metadata_df[metadata_df['split'] == split].copy()
-    print(f"Filtered to {len(train_df)} {split} records")
-    
-    # Load reports
-    print(f"\nLoading radiology reports...")
-    reports_df = load_mimic_reports(mimic_root)
-    print(f"Loaded {len(reports_df)} reports")
-    
-    # Merge images with reports
-    train_df = train_df.merge(reports_df, on='study_id', how='inner')
-    print(f"Merged to {len(train_df)} records with reports")
-    
-    # Group by study_id
-    studies = train_df.groupby('study_id')
-    print(f"\nProcessing {len(studies)} unique studies...")
-    
+
+    studies = []
+
+    # Load JSONL
+    with open(jsonl_path, "r") as f:
+        for line in f:
+            if line.strip():
+                studies.append(json.loads(line))
+
     if num_studies:
-        study_ids = list(studies.groups.keys())[:num_studies]
-        print(f"Limited to first {num_studies} studies")
-    else:
-        study_ids = list(studies.groups.keys())
-    
-    # Build embeddings and metadata
+        studies = studies[:num_studies]
+
+    print(f"Loaded {len(studies)} studies")
+
     embeddings = []
     metadata = []
-    
-    for study_id in tqdm(study_ids, desc="Embedding studies"):
-        study_group = studies.get_group(study_id)
-        
-        # Get all images for this study
-        study_images = []
-        for _, row in study_group.iterrows():
-            img_path = mimic_root / "files" / f"p{str(row['subject_id'])[:2]}" / f"p{row['subject_id']}" / f"s{study_id}" / f"{row['dicom_id']}.jpg"
-            
-            if img_path.exists():
-                study_images.append({
-                    "path": str(img_path),
-                    "view_position": row['ViewPosition']
-                })
-        
-        if not study_images:
+
+    for study in tqdm(studies, desc="Embedding studies"):
+
+        findings = study.get("findings", "")
+        impression = study.get("impression", "")
+        images_info = study.get("images", [])
+
+        if not findings and not impression:
             continue
-        
-        # Select 1-2 representative images
-        selected_images = select_study_images(study_images)
-        
-        # Embed each selected image
+
+        # Select representative images (reuse your logic)
+        selected_images = select_study_images([
+            {
+                "path": str(image_root / img["path"]),
+                "view_position": img.get("view", "UNKNOWN")
+            }
+            for img in images_info
+        ])
+
         study_embeddings = []
+
         for img_info in selected_images:
-            try:
-                embedding = embed_image(img_info["path"], vision_encoder, image_processor)
-                study_embeddings.append(embedding)
-            except Exception as e:
-                print(f"\nWarning: Failed to embed {img_info['path']}: {e}")
+            if not Path(img_info["path"]).exists():
                 continue
-        
+
+            try:
+                emb = embed_image(img_info["path"], vision_encoder, image_processor)
+                study_embeddings.append(emb)
+            except:
+                continue
+
         if not study_embeddings:
             continue
-        
-        # Average embeddings if we have 2 views
+
+        # Normalize + average
         if len(study_embeddings) == 2:
-            avg_embedding = np.mean(study_embeddings, axis=0)
+            emb = np.vstack(study_embeddings)
+            emb = emb / np.linalg.norm(emb, axis=1, keepdims=True)
+            avg_embedding = np.mean(emb, axis=0)
+            avg_embedding = avg_embedding / np.linalg.norm(avg_embedding)
         else:
             avg_embedding = study_embeddings[0]
-        
-        # Get report text
-        report_row = study_group.iloc[0]
-        report_text = report_row['findings'] + " " + report_row['impression']
-        
-        # Split into sentences
-        try:
-            sentences = sent_tokenize(report_text)
-        except Exception as e:
-            print(f"\nWarning: Failed to tokenize report for {study_id}: {e}")
-            continue
-        
-        # Infer primary label (simplified - you may want more sophisticated logic)
-        primary_label = "No Finding"  # Default
-        if "pneumonia" in report_text.lower():
-            primary_label = "Pneumonia"
-        elif "cardiomegaly" in report_text.lower():
-            primary_label = "Cardiomegaly"
-        elif "effusion" in report_text.lower():
-            primary_label = "Effusion"
-        # Add more label extraction logic as needed
-        
-        # Store one entry per sentence (all share same averaged embedding)
+            avg_embedding = avg_embedding / np.linalg.norm(avg_embedding)
+
+        report_text = findings + " " + impression
+        sentences = sent_tokenize(report_text)
+
         for sentence in sentences:
-            if len(sentence.strip()) < 10:  # Skip very short sentences
+            if len(sentence.strip()) < 10:
                 continue
-            
-            embeddings.append(avg_embedding)
+
+            embeddings.append(avg_embedding.astype("float32"))
             metadata.append({
                 "sentence": sentence.strip(),
-                "study_id": study_id,
-                "primary_label": primary_label,
                 "views_used": [img["view_position"] for img in selected_images]
             })
-    
-    print(f"\n\nBuilt {len(embeddings)} sentence embeddings from {len(study_ids)} studies")
-    
-    # Build FAISS index
-    print("\nBuilding FAISS index...")
+
+    if len(embeddings) == 0:
+        raise ValueError("No embeddings generated.")
+
+    print(f"Built {len(embeddings)} sentence embeddings")
+
+    # Build FAISS
     embedding_matrix = np.array(embeddings).astype("float32")
-    faiss.normalize_L2(embedding_matrix)  # L2 normalize for cosine similarity
-    
-    index = faiss.IndexFlatIP(embedding_matrix.shape[1])  # Inner product = cosine after normalize
+    faiss.normalize_L2(embedding_matrix)
+
+    dim = embedding_matrix.shape[1]
+    index = faiss.IndexFlatIP(dim)
     index.add(embedding_matrix)
-    
-    print(f"FAISS index built with {index.ntotal} vectors of dimension {embedding_matrix.shape[1]}")
-    
-    # Save
+
     output_dir.mkdir(parents=True, exist_ok=True)
-    
-    index_path = output_dir / "mimic_corpus.faiss"
-    metadata_path = output_dir / "mimic_corpus_metadata.json"
-    
+
+    index_path = output_dir / "retrieval_index.faiss"
+    metadata_path = output_dir / "retrieval_metadata.json"
+
     faiss.write_index(index, str(index_path))
-    with open(metadata_path, 'w') as f:
+    with open(metadata_path, "w") as f:
         json.dump(metadata, f, indent=2)
-    
-    print(f"\n✓ Index saved to: {index_path}")
-    print(f"✓ Metadata saved to: {metadata_path}")
-    print("\nDone!")
+
+    print(f"Index saved to {index_path}")
+    print(f"Metadata saved to {metadata_path}")
+
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Build MIMIC-CXR retrieval index")
-    parser.add_argument(
-        "--mimic_root",
-        type=str,
-        required=True,
-        help="Root directory of MIMIC-CXR dataset"
-    )
-    parser.add_argument(
-        "--output_dir",
-        type=str,
-        default="data",
-        help="Output directory for index and metadata"
-    )
-    parser.add_argument(
-        "--num_studies",
-        type=int,
-        default=None,
-        help="Limit to first N studies (for testing)"
-    )
-    parser.add_argument(
-        "--split",
-        type=str,
-        default="train",
-        choices=["train", "validate", "test"],
-        help="Which split to use"
-    )
-    
+    parser = argparse.ArgumentParser(description="Build Retrieval Index from JSONL")
+    parser.add_argument("--jsonl_path", type=str, required=True)
+    parser.add_argument("--image_root", type=str, required=True)
+    parser.add_argument("--output_dir", type=str, default="data")
+    parser.add_argument("--num_studies", type=int, default=None)
+
     args = parser.parse_args()
-    
-    mimic_root = Path(args.mimic_root)
-    output_dir = Path(args.output_dir)
-    
-    if not mimic_root.exists():
-        print(f"Error: MIMIC-CXR root directory not found: {mimic_root}")
-        return
-    
-    build_index(
-        mimic_root=mimic_root,
-        output_dir=output_dir,
-        num_studies=args.num_studies,
-        split=args.split
+
+    build_index_from_jsonl(
+        jsonl_path=Path(args.jsonl_path),
+        image_root=Path(args.image_root),
+        output_dir=Path(args.output_dir),
+        num_studies=args.num_studies
     )
+
 
 
 if __name__ == "__main__":

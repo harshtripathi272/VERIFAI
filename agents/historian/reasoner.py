@@ -81,12 +81,7 @@ def summarize_fhir_evidence(evidence: dict) -> str:
 
 
 def reason_over_fhir(hypothesis: str, evidence: dict) -> HistorianOutput:
-    """
-    Reason over FHIR evidence using MedGemma and return structured HistorianOutput.
-    """
-    # Setup parser
-    parser = PydanticOutputParser(pydantic_object=HistorianOutput)
-    
+
     if settings.MOCK_MODELS:
         return HistorianOutput(
             supporting_facts=[],
@@ -98,99 +93,119 @@ def reason_over_fhir(hypothesis: str, evidence: dict) -> HistorianOutput:
     load_medgemma()
     summary = summarize_fhir_evidence(evidence)
 
-    # Convert Pydantic instructions to a format suitable for the prompt
-    format_instructions = parser.get_format_instructions()
-
     prompt = f"""
 You are a senior clinical historian assisting a radiologist.
 
-Hypothesis to evaluate:
+Hypothesis:
 {hypothesis}
 
-Full FHIR-based Clinical History:
+FHIR Clinical History:
 {summary}
 
-Analysis Objective:
-Determine if the patient's history supports or contradicts the current radiology hypothesis.
-Consider prior diagnoses, lab trends, recent procedures, and the text of previous reports.
+Task:
+Determine whether the history SUPPORTS or CONTRADICTS the hypothesis.
+
+CRITICAL OUTPUT REQUIREMENTS:
+
+You MUST return STRICT JSON with EXACT field names.
+
+Schema:
+
+{{
+  "supporting_facts": [
+    {{
+      "fact_type": "supporting",
+      "description": "string",
+      "fhir_resource_id": "UUID only (no prefix)",
+      "fhir_resource_type": "Condition | DiagnosticReport | Observation | DocumentReference | MedicationRequest | Procedure | Encounter"
+    }}
+  ],
+  "contradicting_facts": [
+    {{
+      "fact_type": "contradicting",
+      "description": "string",
+      "fhir_resource_id": "UUID only",
+      "fhir_resource_type": "ResourceType"
+    }}
+  ],
+  "confidence_adjustment": -0.3 to 0.3,
+  "clinical_summary": "string"
+}}
+CRITICAL REASONING RULES:
+
+1. Evidence may support ONLY hypotheses that are explicitly diagnosed or clearly indicated.
+2. If evidence is nonspecific (e.g., atelectasis), it MUST NOT strongly support multiple competing diagnoses.
+3. If a finding could be caused by many conditions and no specific confirmation exists,
+   classify it as weak support (+0.1) or neutral (0.0).
+4. Do NOT assign +0.3 unless the diagnosis is explicitly confirmed in the record.
+5. If evidence is an alternative explanation for the hypothesis, classify as contradiction.
 
 Rules:
-1. Use ONLY the provided evidence.
-2. For document-based evidence, identify specific snippets that confirm or rule out the diagnosis.
-3. Reference resource IDs exactly (e.g., Condition/123).
-4. You MUST output a JSON object formatted according to the schema below.
-
-{format_instructions}
+- DO NOT create a field called "resource_id"
+- DO NOT combine type and ID
+- fhir_resource_id must contain ONLY the UUID
+- fact_type must be either "supporting" or "contradicting"
+- If no evidence, return empty arrays
+- Return ONLY valid JSON
 """
 
-    # CRITICAL: Acquire lock before using model (shared across agents)
+
     _inference_lock = get_inference_lock()
+
     with _inference_lock:
-        print(f"[Thread-{threading.current_thread().name}] Historian acquired model lock")
-        print(f"[Historian] Preparing text-only message with prompt length: {len(prompt)} chars")
-        
-        # Use chat template format for MedGemma 1.5 (text-only, no image)
+
         messages = [
             {
                 "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt}
-                ]
+                "content": [{"type": "text", "text": prompt}]
             }
         ]
-        
-        # Apply chat template using processor
+
         inputs = processor.apply_chat_template(
             messages,
             add_generation_prompt=True,
             tokenize=True,
             return_dict=True,
             return_tensors="pt"
-        ).to(model.device, dtype=torch.float16)
-        
+        ).to(model.device, dtype=torch.bfloat16)
+
         input_len = inputs["input_ids"].shape[-1]
-        print(f"[Historian] Input tokens: {inputs['input_ids'].shape}")
-        print(f"[Historian] Starting generation (max_new_tokens=600)...")
-        
+
         with torch.inference_mode():
             outputs = model.generate(
                 **inputs,
-                max_new_tokens=600, # Increased for JSON structure overhead
-                do_sample=False  # Greedy decoding for deterministic output
+                max_new_tokens=600,
+                do_sample=False
             )
-        
-        print(f"[Historian] Generation complete! Output tokens: {outputs.shape}")
-        
-        # Extract only the newly generated tokens (skip the input prompt)
+
         generated_tokens = outputs[0][input_len:]
-        raw = processor.decode(generated_tokens, skip_special_tokens=True)
-        
-        print(f"[Historian] Generated output length: {len(raw)} chars")
-        # print(f"[Historian] Output preview: {raw[:300]}...")
-        print(f"[Thread-{threading.current_thread().name}] Historian released model lock")
 
-
-    # Parse JSON
-    try:
-        parsed_dict = extract_json(raw)
-        
-        # Pydantic validation
-        parsed_output = HistorianOutput(**parsed_dict)
-        print(f"[Historian] Successfully parsed JSON into HistorianOutput")
-        
-        # Clamp confidence safely
-        adj = parsed_output.confidence_adjustment
-        parsed_output.confidence_adjustment = max(-0.3, min(0.3, adj))
-        
-        return parsed_output
-
-    except Exception as e:
-        print(f"[Historian] JSON parse error: {e}")
-        print(f"[Historian] Raw output was: {raw}")
-        # Return valid empty object on failure
+        raw = processor.decode(
+            generated_tokens,
+            skip_special_tokens=True
+        ).strip()
+        print("[Historian] Raw output:", raw)
+    if not raw:
+        print("[Historian] WARNING: Model returned empty string")
         return HistorianOutput(
             supporting_facts=[],
             contradicting_facts=[],
             confidence_adjustment=0.0,
-            clinical_summary=f"Failed to parse reasoning output: {str(e)}"
+            clinical_summary="Model returned empty output."
+        )
+
+    try:
+        parsed = extract_json(raw)
+        output = HistorianOutput(**parsed)
+        output.confidence_adjustment = max(-0.3, min(0.3, output.confidence_adjustment))
+        return output
+
+    except Exception as e:
+        print("[Historian] JSON parse error:", e)
+        print("RAW OUTPUT:", raw)
+        return HistorianOutput(
+            supporting_facts=[],
+            contradicting_facts=[],
+            confidence_adjustment=0.0,
+            clinical_summary="Failed to parse model output."
         )

@@ -80,9 +80,10 @@ class CriticOutput(BaseModel):
     historical_risk_level: str = Field(default="none", description="Risk level based on past mistakes: none/low/medium/high")
 
 
+from typing import Literal
+
 class HistorianFact(BaseModel):
-    """A fact retrieved from FHIR."""
-    fact_type: str  # "supporting" or "contradicting"
+    fact_type: Literal["supporting", "contradicting"]
     description: str
     fhir_resource_id: str
     fhir_resource_type: str

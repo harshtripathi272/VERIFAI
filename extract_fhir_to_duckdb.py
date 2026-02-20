@@ -1,7 +1,13 @@
 import json
-from pathlib import Path
 import duckdb
-
+import base64
+import os
+import faiss
+import numpy as np
+import logging
+from pathlib import Path
+from datetime import datetime
+from sentence_transformers import SentenceTransformer
 
 # ==========================
 # CONFIG
@@ -9,6 +15,12 @@ import duckdb
 
 FHIR_DIR = Path("output/fhir")
 DB_PATH = "verifai_fhir.duckdb"
+FAISS_INDEX_PATH = "verifai_fhir.faiss"
+ID_MAPPING_PATH = "verifai_fhir_mapping.json"
+EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
 
 RELEVANT_RESOURCES = {
     "Patient",
@@ -22,20 +34,26 @@ RELEVANT_RESOURCES = {
     "Encounter"
 }
 
-
 # ==========================
 # HELPERS
 # ==========================
 
-def normalize_reference(ref: str | None) -> str | None:
+def safe_timestamp(ts: str | None):
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+def normalize_reference(ref: str | None):
     if not ref:
         return None
     if ref.startswith("urn:uuid:"):
         return ref.replace("urn:uuid:", "Patient/")
     return ref
 
-
-def extract_patient_id(resource: dict) -> str | None:
+def extract_patient_id(resource: dict):
     if resource["resourceType"] == "Patient":
         return resource.get("id")
 
@@ -45,11 +63,9 @@ def extract_patient_id(resource: dict) -> str | None:
             ref = normalize_reference(participant["reference"])
             if ref and ref.startswith("Patient/"):
                 return ref.split("/")[-1]
-
     return None
 
-
-def extract_encounter_id(resource: dict) -> str | None:
+def extract_encounter_id(resource: dict):
     enc = resource.get("encounter")
     if enc and "reference" in enc:
         ref = normalize_reference(enc["reference"])
@@ -57,61 +73,118 @@ def extract_encounter_id(resource: dict) -> str | None:
             return ref.split("/")[-1]
     return None
 
-
-def extract_event_time(resource: dict) -> str | None:
-    """
-    Extract best available timestamp for timeline sorting.
-    Priority order is important.
-    """
-
-    # Most clinical events
-    if "effectiveDateTime" in resource:
-        return resource.get("effectiveDateTime")
-
-    if "recordedDate" in resource:
-        return resource.get("recordedDate")
-
-    if "onsetDateTime" in resource:
-        return resource.get("onsetDateTime")
-
-    if "authoredOn" in resource:
-        return resource.get("authoredOn")
-
-    if "issued" in resource:
-        return resource.get("issued")
+def extract_event_time(resource: dict):
+    for key in [
+        "effectiveDateTime",
+        "recordedDate",
+        "onsetDateTime",
+        "authoredOn",
+        "issued",
+        "date",
+        "occurrenceDateTime"
+    ]:
+        if key in resource:
+            return resource.get(key)
 
     if "period" in resource and "start" in resource["period"]:
-        return resource["period"].get("start")
+        return resource["period"]["start"]
 
     return None
 
+def get_primary_code(resource: dict):
+    code_obj = resource.get("code")
+    if not code_obj and "medicationCodeableConcept" in resource:
+        code_obj = resource.get("medicationCodeableConcept")
+
+    if code_obj and "coding" in code_obj:
+        coding = code_obj["coding"][0]
+        return coding.get("code"), coding.get("display")
+
+    return None, None
 
 # ==========================
-# MAIN EXTRACTION
+# NORMALIZATION
+# ==========================
+
+def normalize_resource(resource: dict):
+    rtype = resource.get("resourceType")
+    rid = resource.get("id")
+    patient_id = extract_patient_id(resource)
+    encounter_id = extract_encounter_id(resource)
+    event_time_raw = extract_event_time(resource)
+    event_time = safe_timestamp(event_time_raw)
+
+    primary_code, display = get_primary_code(resource)
+
+    summary_parts = []
+
+    if rtype == "Condition":
+        summary_parts.append(f"Condition: {display}")
+
+    elif rtype == "DiagnosticReport":
+        summary_parts.append(f"Report: {display}")
+        if resource.get("conclusion"):
+            summary_parts.append(f"Conclusion: {resource['conclusion']}")
+
+    elif rtype == "Observation":
+        summary_parts.append(f"Observation: {display}")
+
+    elif rtype == "Encounter":
+        summary_parts.append("Encounter")
+
+    if not summary_parts:
+        summary_parts.append(f"{rtype}: {display}")
+
+    return {
+        "id": rid,
+        "resourceType": rtype,
+        "patient_id": patient_id,
+        "encounter_id": encounter_id,
+        "event_time": event_time,
+        "primary_code": primary_code,
+        "normalized_summary": " ".join(summary_parts),
+        "raw_json": json.dumps(resource)
+    }
+
+# ==========================
+# MAIN
 # ==========================
 
 def main():
+    logger.info("Starting FHIR extraction...")
+
     con = duckdb.connect(DB_PATH)
 
-    # Create historian-ready schema
     con.execute("""
-        CREATE TABLE IF NOT EXISTS fhir (
+        CREATE TABLE IF NOT EXISTS fhir_resources (
+            id TEXT PRIMARY KEY,
+            patient_ref TEXT,
             resourceType TEXT,
-            id TEXT,
-            patient_id TEXT,
-            encounter_id TEXT,
+            primary_code TEXT,
             event_time TIMESTAMP,
-            json TEXT
+            encounter_ref TEXT,
+            normalized_summary TEXT,
+            raw_json JSON
         )
     """)
 
-    # Clean previous run
-    con.execute("DELETE FROM fhir")
+    con.execute("DELETE FROM fhir_resources")
 
-    total = 0
+    id_mapping = {}
+    all_embeddings = []
+    current_faiss_id = 0
 
-    for bundle_path in sorted(FHIR_DIR.glob("*.json")):
-        print(f"📦 Processing {bundle_path.name}")
+    logger.info(f"Loading embedding model: {EMBEDDING_MODEL}")
+    embedder = SentenceTransformer(EMBEDDING_MODEL)
+    embedding_dim = embedder.get_sentence_embedding_dimension()
+    index = faiss.IndexFlatIP(embedding_dim)
+
+    files = sorted(FHIR_DIR.glob("*.json"))
+
+    total_resources = 0
+
+    for bundle_path in files:
+        logger.info(f"Processing {bundle_path.name}")
 
         with open(bundle_path, "r", encoding="utf-8") as f:
             bundle = json.load(f)
@@ -121,50 +194,56 @@ def main():
             if not resource:
                 continue
 
-            rtype = resource.get("resourceType")
-
-            if rtype not in RELEVANT_RESOURCES:
+            if resource.get("resourceType") not in RELEVANT_RESOURCES:
                 continue
 
-            rid = resource.get("id")
-            patient_id = extract_patient_id(resource)
-            encounter_id = extract_encounter_id(resource)
-            event_time = extract_event_time(resource)
+            norm = normalize_resource(resource)
 
-            # Normalize references
-            for ref_key in ["subject", "patient", "encounter"]:
-                if ref_key in resource and "reference" in resource[ref_key]:
-                    resource[ref_key]["reference"] = normalize_reference(
-                        resource[ref_key]["reference"]
-                    )
+            if resource["resourceType"] != "Patient" and not norm["patient_id"]:
+                continue
 
-            con.execute(
-                """
-                INSERT INTO fhir
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    rtype,
-                    rid,
-                    patient_id,
-                    encounter_id,
-                    event_time,
-                    json.dumps(resource)
-                )
+            embedding = embedder.encode(
+                norm["normalized_summary"],
+                convert_to_numpy=True,
+                normalize_embeddings=True
             )
 
-            total += 1
+            all_embeddings.append(embedding.astype("float32"))
+            id_mapping[str(current_faiss_id)] = norm["id"]
 
-    # Create indexes for fast historian queries
-    con.execute("CREATE INDEX IF NOT EXISTS idx_patient ON fhir(patient_id)")
-    con.execute("CREATE INDEX IF NOT EXISTS idx_time ON fhir(event_time)")
-    con.execute("CREATE INDEX IF NOT EXISTS idx_type ON fhir(resourceType)")
+            con.execute("""
+                INSERT INTO fhir_resources VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                norm["id"],
+                norm["patient_id"],
+                norm["resourceType"],
+                norm["primary_code"],
+                norm["event_time"],
+                norm["encounter_id"],
+                norm["normalized_summary"],
+                norm["raw_json"]
+            ))
+
+            current_faiss_id += 1
+            total_resources += 1
+
+    if all_embeddings:
+        index.add(np.array(all_embeddings))
+        faiss.write_index(index, FAISS_INDEX_PATH)
+
+        with open(ID_MAPPING_PATH, "w") as f:
+            json.dump(id_mapping, f)
+
+        logger.info(f"Indexed {index.ntotal} vectors.")
+
+    con.execute("CREATE INDEX IF NOT EXISTS idx_patient ON fhir_resources(patient_ref)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_type ON fhir_resources(resourceType)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_code ON fhir_resources(primary_code)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_time ON fhir_resources(event_time)")
 
     con.close()
 
-    print(f"\n✅ Done. Stored {total} FHIR resources in {DB_PATH}")
-    print("Historian-ready database created.")
-
+    logger.info(f"Finished. Total resources indexed: {total_resources}")
 
 if __name__ == "__main__":
     main()

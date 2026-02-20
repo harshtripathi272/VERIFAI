@@ -15,13 +15,12 @@ import re
 from app.config import settings
 from .llm_critic import medgemma_critic  # >>> LLM-CRITIC
 
-# Historical mistake memory
+# Historical mistake memory — via repository abstraction (Supabase HNSW or DuckDB fallback)
 try:
-    from db.past_mistakes import retrieve_similar_mistakes
+    from db.past_mistakes_repository import get_past_mistakes_repository
     from uncertainty.case_embedding import generate_case_summary, generate_case_embedding
     PAST_MISTAKES_AVAILABLE = True
 except ImportError as e:
-    logger.warning(f"Past mistakes module not available: {e}")
     PAST_MISTAKES_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
@@ -238,18 +237,38 @@ class CriticModel:
                 )
                 current_embedding = generate_case_embedding(current_summary)
                 
-                # Retrieve historically similar mistakes
+                # Retrieve historically similar mistakes via hybrid repository
                 kle_min = max(0.0, kle_uncertainty - settings.PAST_MISTAKES_KLE_TOLERANCE)
                 kle_max = min(1.0, kle_uncertainty + settings.PAST_MISTAKES_KLE_TOLERANCE)
-                
-                similar_mistakes = retrieve_similar_mistakes(
-                    disease_type=disease_type,
-                    embedding=current_embedding,
-                    kle_uncertainty_range=(kle_min, kle_max),
-                    severity_min=1,
-                    top_k=settings.PAST_MISTAKES_TOP_K,
-                    similarity_threshold=settings.PAST_MISTAKES_SIMILARITY_THRESHOLD
+
+                _repo = get_past_mistakes_repository()
+                logger.info(
+                    f"[CRITIC] Past-mistakes backend: {_repo.backend_name}"
                 )
+
+                try:
+                    similar_mistakes = _repo.retrieve_similar_mistakes(
+                        disease_type=disease_type,
+                        embedding=current_embedding,
+                        kle_uncertainty_range=(kle_min, kle_max),
+                        severity_min=1,
+                        top_k=settings.PAST_MISTAKES_TOP_K,
+                        similarity_threshold=settings.PAST_MISTAKES_SIMILARITY_THRESHOLD,
+                    )
+                except Exception as _repo_err:
+                    logger.warning(
+                        f"[CRITIC] Primary repository ({_repo.backend_name}) failed: "
+                        f"{_repo_err}. Falling back to DuckDB."
+                    )
+                    from db.past_mistakes_repository import DuckDBPastMistakesRepository
+                    similar_mistakes = DuckDBPastMistakesRepository().retrieve_similar_mistakes(
+                        disease_type=disease_type,
+                        embedding=current_embedding,
+                        kle_uncertainty_range=(kle_min, kle_max),
+                        severity_min=1,
+                        top_k=settings.PAST_MISTAKES_TOP_K,
+                        similarity_threshold=settings.PAST_MISTAKES_SIMILARITY_THRESHOLD,
+                    )
                 
                 # Apply neural re-ranking if enabled
                 if similar_mistakes and getattr(settings, 'ENABLE_PAST_MISTAKES_RERANKING', False):
