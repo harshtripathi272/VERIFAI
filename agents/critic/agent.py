@@ -69,12 +69,16 @@ def critic_node(state: VerifaiState) -> dict:
     )
     
     # Unpack result
-    if len(result) == 6:
+    if len(result) == 7:
+        is_overconfident, concern_flags, recommended_hedging, safety_score, similar_mistakes_count, historical_risk_level, historical_context = result
+    elif len(result) == 6:
         is_overconfident, concern_flags, recommended_hedging, safety_score, similar_mistakes_count, historical_risk_level = result
+        historical_context = []
     else:
         is_overconfident, concern_flags, recommended_hedging, safety_score = result
         similar_mistakes_count = 0
         historical_risk_level = "none"
+        historical_context = []
     
     # NEW: Inject doctor feedback concerns if present
     if is_feedback_iteration and doctor_feedback:
@@ -98,7 +102,8 @@ def critic_node(state: VerifaiState) -> dict:
         recommended_hedging=recommended_hedging,
         safety_score=round(safety_score, 3),
         similar_mistakes_count=similar_mistakes_count,
-        historical_risk_level=historical_risk_level
+        historical_risk_level=historical_risk_level,
+        historical_context=historical_context,
     )
     
     # Map safety score to uncertainty for routing

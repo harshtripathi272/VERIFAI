@@ -216,6 +216,7 @@ class CriticModel:
         
         similar_mistakes_count = 0
         historical_risk_level = "none"
+        historical_context: list[dict] = []
         
         if settings.ENABLE_PAST_MISTAKES_MEMORY and PAST_MISTAKES_AVAILABLE:
             try:
@@ -284,6 +285,20 @@ class CriticModel:
                 
                 similar_mistakes_count = len(similar_mistakes)
                 
+                # --- Build structured top-3 context list -------------------------
+                historical_context: list[dict] = []
+                for m in similar_mistakes[:3]:
+                    historical_context.append({
+                        "disease_type":    m.get("disease_type", ""),
+                        "error_type":      m.get("error_type", ""),
+                        "severity_level":  m.get("severity_level"),
+                        "kle_uncertainty": m.get("kle_uncertainty"),
+                        "clinical_summary": (
+                            (m.get("clinical_summary") or "")[:300]
+                        ),
+                        "similarity": round(float(m.get("similarity", 0.0)), 4),
+                    })
+                
                 if similar_mistakes:
                     # Analyze severity of similar mistakes
                     high_severity_count = sum(1 for m in similar_mistakes if m['severity_level'] >= 4)
@@ -299,9 +314,9 @@ class CriticModel:
                         )
                         
                         # Show specific past error types
-                        error_types = [m['error_type'] for m in similar_mistakes[:3]]
+                        error_types_hist = [m['error_type'] for m in similar_mistakes[:3]]
                         concern_flags.append(
-                            f"[HISTORY] Past error patterns: {', '.join(set(error_types))}"
+                            f"[HISTORY] Past error patterns: {', '.join(set(error_types_hist))}"
                         )
                         
                         # Increase risk weighting significantly
@@ -325,6 +340,37 @@ class CriticModel:
                         # Small penalty
                         safety_score = max(0.0, safety_score - 0.05)
                     
+                    # --- Generate human-readable narrative paragraph -----------
+                    n = len(similar_mistakes)
+                    count_word = {1: "One", 2: "Two", 3: "Three"}.get(n, str(n))
+                    primary_errors = list({
+                        m["error_type"].replace("_", " ") for m in similar_mistakes[:3]
+                    })
+                    error_phrase = (
+                        primary_errors[0] if len(primary_errors) == 1
+                        else ", ".join(primary_errors[:-1]) + f" and {primary_errors[-1]}"
+                    )
+                    avg_sim = sum(m.get("similarity", 0.0) for m in similar_mistakes[:3]) / min(n, 3)
+                    avg_kle = [
+                        m["kle_uncertainty"] for m in similar_mistakes[:3]
+                        if m.get("kle_uncertainty") is not None
+                    ]
+                    kle_phrase = (
+                        f" under similar uncertainty conditions (avg KLE ≈ {sum(avg_kle)/len(avg_kle):.2f})"
+                        if avg_kle else ""
+                    )
+                    top_summary = historical_context[0]["clinical_summary"] if historical_context else ""
+                    summary_snippet = (
+                        f' The most relevant case notes: "{top_summary[:120]}…"'
+                        if top_summary else ""
+                    )
+                    narrative = (
+                        f"{count_word} similar {disease_type} case(s) were previously matched "
+                        f"(avg cosine similarity {avg_sim:.2f}), primarily involving {error_phrase}{kle_phrase}."
+                        f"{summary_snippet}"
+                    )
+                    concern_flags.append(f"[HISTORY CONTEXT] {narrative}")
+                    
                     # Log for debugging
                     logger.info(
                         f"CRITIC-HISTORY: Found {similar_mistakes_count} similar mistakes "
@@ -332,6 +378,7 @@ class CriticModel:
                     )
                     
             except Exception as exc:
+                historical_context = []
                 logger.warning(f"[CRITIC] Past mistakes retrieval failed: {exc}")
                 # Don't fail the entire evaluation if history lookup fails
 
@@ -401,10 +448,16 @@ class CriticModel:
                     "CRITIC-LLM: Semantic critic unavailable — using rule-based output only"
                 )
 
-        # Return with historical signals
-        # Note: We need to return as tuple for backward compatibility
-        # The graph state will extract these from critic_output object
-        return is_overconfident, concern_flags, recommended_hedging, safety_score, similar_mistakes_count, historical_risk_level
+        # Return with historical signals (7-tuple)
+        return (
+            is_overconfident,
+            concern_flags,
+            recommended_hedging,
+            safety_score,
+            similar_mistakes_count,
+            historical_risk_level,
+            historical_context,
+        )
     
     def _mentions_differentials(self, impression: str) -> bool:
         """Check if impression mentions differential diagnoses."""

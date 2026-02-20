@@ -45,9 +45,7 @@ class Settings(BaseSettings):
     FHIR_BASE_URL: str = "https://fhir.mimic-iv-demo.physionet.org/fhir"  # Public test server
     FHIR_AUTH_TOKEN: str | None = None
     
-    PAST_MISTAKES_SIMILARITY_THRESHOLD: float = 0.4
-    
-    
+
     # === Execution Limits ===
     MAX_ROUTING_STEPS: int = 5  # Prevent infinite loops
     
@@ -85,7 +83,7 @@ class Settings(BaseSettings):
     
     # Past mistakes retrieval settings
     PAST_MISTAKES_TOP_K: int = 5  # Maximum similar cases to retrieve
-    PAST_MISTAKES_SIMILARITY_THRESHOLD: float = 0.75  # Minimum cosine similarity
+    PAST_MISTAKES_SIMILARITY_THRESHOLD: float = 0.4   # Minimum cosine similarity (lowered for small seed sets)
     PAST_MISTAKES_KLE_TOLERANCE: float = 0.2  # +/- range for KLE filtering
     ENABLE_PAST_MISTAKES_RERANKING: bool = bool(os.getenv("ENABLE_PAST_MISTAKES_RERANKING", "True"))  # Neural re-ranking
 

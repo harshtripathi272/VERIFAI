@@ -78,6 +78,16 @@ class CriticOutput(BaseModel):
     # Historical mistake signals
     similar_mistakes_count: int = Field(default=0, description="Number of similar past errors found")
     historical_risk_level: str = Field(default="none", description="Risk level based on past mistakes: none/low/medium/high")
+    
+    # Structured contextual information about top matched past mistakes
+    historical_context: List[dict] = Field(
+        default_factory=list,
+        description=(
+            "Top matched past mistakes (up to 3), each containing: "
+            "disease_type, error_type, severity_level, kle_uncertainty, "
+            "clinical_summary, similarity"
+        )
+    )
 
 
 from typing import Literal
