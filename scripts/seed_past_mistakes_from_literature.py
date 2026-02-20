@@ -1,98 +1,79 @@
-#!/usr/bin/env python3
-
 """
-Seed Past Mistakes DB with peer-reviewed radiology error archetypes.
-
-Sources:
-- Pinto et al., Radiographics 2013
-- Bruno et al., Radiographics 2015
-- Waite et al., JACR 2017
+Test Critic Historical Memory (Aligned with Seeded Literature Cases)
 """
 
 import numpy as np
+from types import SimpleNamespace
 from sentence_transformers import SentenceTransformer
-from db.past_mistakes import insert_validated_mistake
 
+from agents.critic.agent import critic_node
+from graph.state import VerifaiState
+from app.config import settings
+
+# Enable historical memory
+settings.ENABLE_PAST_MISTAKES_MEMORY = True
+settings.ENABLE_LLM_CRITIC = False
+
+# Use same embedding model as seeding
 sbert = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
 
-literature_cases = [
 
-    {
-        "summary": (
-            "Small apical pneumothorax missed on supine AP chest radiograph. "
-            "Subtle pleural line overlooked."
-        ),
-        "disease": "pneumothorax",
-        "error_type": "missed_differential",
-        "severity": 3,
-        "source": "Pinto et al., Radiographics 2013"
-    },
+def build_mock_state():
+    """
+    Pneumonia-style case similar to seeded mistake:
+    'Early pneumonia misinterpreted as atelectasis'
+    """
 
-    {
-        "summary": (
-            "Early pneumonia misinterpreted as atelectasis due to overlapping "
-            "radiographic appearance in lower lobes."
-        ),
-        "disease": "pneumonia",
-        "error_type": "misdiagnosis",
-        "severity": 2,
-        "source": "Bruno et al., Radiographics 2015"
-    },
-
-    {
-        "summary": (
-            "Small pleural effusion overlooked on portable AP film with minimal "
-            "costophrenic angle blunting."
-        ),
-        "disease": "pleural_effusion",
-        "error_type": "missed_differential",
-        "severity": 2,
-        "source": "Waite et al., JACR 2017"
-    },
-
-    {
-        "summary": (
-            "AP projection exaggerates cardiac silhouette leading to false "
-            "positive cardiomegaly diagnosis."
-        ),
-        "disease": "cardiomegaly",
-        "error_type": "misdiagnosis",
-        "severity": 1,
-        "source": "Bruno et al., Radiographics 2015"
-    },
-
-    {
-        "summary": (
-            "Second subtle lesion missed after identifying major abnormality "
-            "due to satisfaction of search phenomenon."
-        ),
-        "disease": "multiple_findings",
-        "error_type": "missed_differential",
-        "severity": 3,
-        "source": "Pinto et al., Radiographics 2013"
-    },
-]
-
-print("Seeding literature-based mistakes...\n")
-
-for case in literature_cases:
-
-    embedding = sbert.encode(case["summary"])
-    embedding = np.array(embedding, dtype=np.float32)
-
-    insert_validated_mistake(
-        session_id="literature_seed",
-        image_path=None,
-        original_diagnosis="incorrect_initial_assessment",
-        corrected_diagnosis="validated_true_finding",
-        disease_type=case["disease"],
-        error_type=case["error_type"],
-        severity_level=case["severity"],
-        case_embedding=embedding,
-        clinical_summary=case["summary"],
-        debate_summary=f"Literature Source: {case['source']}"
+    findings = (
+        "Patchy opacity in the right lower lobe with overlapping densities."
     )
 
-    print(f"Inserted: {case['disease']} ({case['error_type']})")
+    impression = (
+        "Likely pneumonia in the right lower lobe."
+    )
 
-print("\nDone.")
+    radiologist_output = SimpleNamespace(
+        findings=findings,
+        impression=impression
+    )
+
+    chexbert_output = SimpleNamespace(
+        labels={"Pneumonia": "present"}
+    )
+
+    state = VerifaiState()
+    state["radiologist_output"] = radiologist_output
+    state["radiologist_kle_uncertainty"] = 0.55  # within normal test range
+    state["chexbert_output"] = chexbert_output
+    state["historian_output"] = None
+    state["literature_output"] = None
+
+    return state
+
+
+def test_critic_with_history():
+    print("\n=== Running Critic Historical Memory Test ===")
+
+    state = build_mock_state()
+
+    result = critic_node(state)
+
+    critic_output = result["critic_output"]
+
+    print("\n--- Critic Output ---")
+    print("Overconfident:", critic_output.is_overconfident)
+    print("Safety Score:", critic_output.safety_score)
+    print("Similar Mistakes Count:", critic_output.similar_mistakes_count)
+    print("Historical Risk Level:", critic_output.historical_risk_level)
+
+    print("\nConcern Flags:")
+    for flag in critic_output.concern_flags:
+        print(" -", flag)
+
+    print("\nTrace:")
+    for t in result["trace"]:
+        print(" -", t)
+
+
+if __name__ == "__main__":
+    test_critic_with_history()

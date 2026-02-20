@@ -31,6 +31,7 @@ _local = threading.local()
 # Connection settings
 SUPABASE_URL: Optional[str] = os.getenv("SUPABASE_URL")
 SUPABASE_KEY: Optional[str] = os.getenv("SUPABASE_KEY")
+SUPABASE_SERVICE_KEY: Optional[str] = os.getenv("SUPABASE_SERVICE_KEY")
 
 # Initialize flag
 _initialized = False
@@ -39,24 +40,51 @@ _init_lock = threading.Lock()
 
 def get_client() -> Optional[Client]:
     """
-    Get a thread-local Supabase client.
-    
+    Get a thread-local Supabase client using the anon/public key.
+
+    Used for general structured logging (workflow_sessions, agent_invocations, …).
     Each thread gets its own client instance to avoid threading issues.
-    Clients are reused within the same thread.
     """
     if not SUPABASE_AVAILABLE:
         raise ImportError("supabase-py is not installed. Run: pip install supabase")
-    
+
     if not SUPABASE_URL or not SUPABASE_KEY:
         raise ValueError(
             "SUPABASE_URL and SUPABASE_KEY must be set in environment variables. "
             "Check your .env file."
         )
-    
+
     if not hasattr(_local, 'client') or _local.client is None:
         _local.client = create_client(SUPABASE_URL, SUPABASE_KEY)
-    
+
     return _local.client
+
+
+def get_service_client() -> Optional[Client]:
+    """
+    Get a thread-local Supabase client using the service-role key.
+
+    Required for past-mistakes memory operations — the service-role key bypasses
+    Row Level Security on the ``past_mistakes`` table so the repository can
+    read and upsert records without user context.
+
+    Raises RuntimeError if SUPABASE_URL or SUPABASE_SERVICE_KEY are not set.
+    """
+    if not SUPABASE_AVAILABLE:
+        raise ImportError("supabase-py is not installed. Run: pip install supabase")
+
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        raise RuntimeError(
+            "[SUPABASE] SUPABASE_URL and SUPABASE_SERVICE_KEY must be set. "
+            "These are required for the past-mistakes memory backend. "
+            "Check your .env file."
+        )
+
+    # Use a separate thread-local slot so anon and service clients don't collide.
+    if not hasattr(_local, 'service_client') or _local.service_client is None:
+        _local.service_client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+
+    return _local.service_client
 
 
 @contextmanager

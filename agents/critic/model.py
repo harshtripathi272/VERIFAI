@@ -92,9 +92,11 @@ class CriticModel:
         findings: str,
         impression: str,
         kle_uncertainty: float,
-        historian_output=None,  # NEW: FHIR clinical context
-        literature_output=None   # NEW: Literature evidence
-    ) -> tuple[bool, list[str], str | None, float]:
+        chexbert_output=None,   # ✅ NEW
+        historian_output=None,
+        literature_output=None
+        ) -> tuple[bool, list[str], str | None, float]:
+
         """
         Evaluate whether the linguistic certainty is appropriate given the epistemic uncertainty
         AND enriched clinical context.
@@ -219,11 +221,12 @@ class CriticModel:
             try:
                 # Extract disease type from chexbert labels or impression
                 chexbert_labels_dict = {}
-                if hasattr(self, '_current_chexbert_output') and self._current_chexbert_output:
-                    chexbert_labels_dict = self._current_chexbert_output.labels
+                if chexbert_output and hasattr(chexbert_output, "labels"):
+                    chexbert_labels_dict = chexbert_output.labels
                 
                 disease_type = self._extract_disease_type(impression, chexbert_labels_dict)
-                
+                print("HISTORY DEBUG — disease_type:", disease_type)
+
                 # Generate current case summary and embedding
                 current_summary = generate_case_summary(
                     disease_type=disease_type,
@@ -238,9 +241,8 @@ class CriticModel:
                 current_embedding = generate_case_embedding(current_summary)
                 
                 # Retrieve historically similar mistakes via hybrid repository
-                kle_min = max(0.0, kle_uncertainty - settings.PAST_MISTAKES_KLE_TOLERANCE)
-                kle_max = min(1.0, kle_uncertainty + settings.PAST_MISTAKES_KLE_TOLERANCE)
-
+                kle_min = 0.0
+                kle_max = 1.0
                 _repo = get_past_mistakes_repository()
                 logger.info(
                     f"[CRITIC] Past-mistakes backend: {_repo.backend_name}"
@@ -257,18 +259,10 @@ class CriticModel:
                     )
                 except Exception as _repo_err:
                     logger.warning(
-                        f"[CRITIC] Primary repository ({_repo.backend_name}) failed: "
-                        f"{_repo_err}. Falling back to DuckDB."
+                        f"[CRITIC] Past-mistakes retrieval via {_repo.backend_name} failed: "
+                        f"{_repo_err}. Skipping historical context for this evaluation."
                     )
-                    from db.past_mistakes_repository import DuckDBPastMistakesRepository
-                    similar_mistakes = DuckDBPastMistakesRepository().retrieve_similar_mistakes(
-                        disease_type=disease_type,
-                        embedding=current_embedding,
-                        kle_uncertainty_range=(kle_min, kle_max),
-                        severity_min=1,
-                        top_k=settings.PAST_MISTAKES_TOP_K,
-                        similarity_threshold=settings.PAST_MISTAKES_SIMILARITY_THRESHOLD,
-                    )
+                    similar_mistakes = []
                 
                 # Apply neural re-ranking if enabled
                 if similar_mistakes and getattr(settings, 'ENABLE_PAST_MISTAKES_RERANKING', False):
@@ -443,8 +437,8 @@ class CriticModel:
                     'infiltration': 'pneumonia',
                     'pneumonia': 'pneumonia',
                     'edema': 'edema',
-                    'effusion': 'effusion',
-                    'pleural effusion': 'effusion',
+                    'effusion': 'pleural_effusion',
+                    'pleural effusion': 'pleural_effusion',
                     'atelectasis': 'atelectasis',
                     'cardiomegaly': 'cardiomegaly',
                     'enlarged cardiomediastinum': 'cardiomegaly',

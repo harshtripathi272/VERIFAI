@@ -31,6 +31,7 @@ def critic_node(state: VerifaiState) -> dict:
     # Get enriched context
     hist_output = state.get("historian_output")
     lit_output = state.get("literature_output")
+    chexbert_output = state.get("chexbert_output")
     
     # NEW: Get doctor feedback if this is a reprocessing iteration
     doctor_feedback = state.get("doctor_feedback")
@@ -62,6 +63,7 @@ def critic_node(state: VerifaiState) -> dict:
         findings=findings,
         impression=impression,
         kle_uncertainty=kle_uncertainty,
+        chexbert_output=chexbert_output,   # ✅ NEW
         historian_output=hist_output,
         literature_output=lit_output
     )

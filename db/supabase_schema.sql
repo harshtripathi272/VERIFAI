@@ -6,9 +6,7 @@
 -- 2. Go to SQL Editor and run this script
 -- 3. Update .env with your Supabase credentials
 
--- ============================================================
 -- 1. WORKFLOW SESSIONS — one row per full pipeline invocation
--- ============================================================
 CREATE TABLE IF NOT EXISTS workflow_sessions (
     session_id          TEXT PRIMARY KEY,
     image_path          TEXT NOT NULL,
@@ -30,9 +28,7 @@ CREATE TABLE IF NOT EXISTS workflow_sessions (
     feedback_count      INTEGER DEFAULT 0
 );
 
--- ============================================================
 -- 2. AGENT INVOCATIONS — one row per agent call within a session
--- ============================================================
 CREATE TABLE IF NOT EXISTS agent_invocations (
     invocation_id       SERIAL PRIMARY KEY,
     session_id          TEXT NOT NULL,
@@ -71,9 +67,7 @@ CREATE TABLE IF NOT EXISTS radiologist_logs (
     FOREIGN KEY (invocation_id) REFERENCES agent_invocations(invocation_id) ON DELETE CASCADE
 );
 
--- ============================================================
 -- 4. CRITIC LOGS — overconfidence detection via KLE consistency
--- ============================================================
 CREATE TABLE IF NOT EXISTS critic_logs (
     log_id              SERIAL PRIMARY KEY,
     session_id          TEXT NOT NULL,
@@ -91,9 +85,7 @@ CREATE TABLE IF NOT EXISTS critic_logs (
     FOREIGN KEY (invocation_id) REFERENCES agent_invocations(invocation_id) ON DELETE CASCADE
 );
 
--- ============================================================
 -- 5. HISTORIAN LOGS — FHIR-based clinical context
--- ============================================================
 CREATE TABLE IF NOT EXISTS historian_logs (
     log_id              SERIAL PRIMARY KEY,
     session_id          TEXT NOT NULL,
@@ -122,9 +114,7 @@ CREATE TABLE IF NOT EXISTS historian_facts (
     FOREIGN KEY (session_id) REFERENCES workflow_sessions(session_id) ON DELETE CASCADE
 );
 
--- ============================================================
 -- 6. LITERATURE LOGS — PubMed/PMC/SemanticScholar results
--- ============================================================
 CREATE TABLE IF NOT EXISTS literature_logs (
     log_id              SERIAL PRIMARY KEY,
     session_id          TEXT NOT NULL,
@@ -156,9 +146,7 @@ CREATE TABLE IF NOT EXISTS literature_citations (
     FOREIGN KEY (session_id) REFERENCES workflow_sessions(session_id) ON DELETE CASCADE
 );
 
--- ============================================================
 -- 7. DEBATE LOGS — full debate rounds and arguments
--- ============================================================
 CREATE TABLE IF NOT EXISTS debate_logs (
     log_id              SERIAL PRIMARY KEY,
     session_id          TEXT NOT NULL,
@@ -205,9 +193,7 @@ CREATE TABLE IF NOT EXISTS debate_arguments (
     FOREIGN KEY (session_id) REFERENCES workflow_sessions(session_id) ON DELETE CASCADE
 );
 
--- ============================================================
 -- 8. CHIEF LOGS — final arbitration decisions
--- ============================================================
 CREATE TABLE IF NOT EXISTS chief_logs (
     log_id              SERIAL PRIMARY KEY,
     session_id          TEXT NOT NULL,
@@ -224,9 +210,7 @@ CREATE TABLE IF NOT EXISTS chief_logs (
     FOREIGN KEY (invocation_id) REFERENCES agent_invocations(invocation_id) ON DELETE CASCADE
 );
 
--- ============================================================
 -- 9. TRACE LOG — flat audit trail (mirrors state.trace)
--- ============================================================
 CREATE TABLE IF NOT EXISTS trace_log (
     trace_id            SERIAL PRIMARY KEY,
     session_id          TEXT NOT NULL,
@@ -237,9 +221,8 @@ CREATE TABLE IF NOT EXISTS trace_log (
     FOREIGN KEY (session_id) REFERENCES workflow_sessions(session_id) ON DELETE CASCADE
 );
 
--- ============================================================
 -- 10. DOCTOR FEEDBACK — NEW: Captures doctor's input when rejecting diagnosis
--- ============================================================
+
 CREATE TABLE IF NOT EXISTS doctor_feedback (
     feedback_id         SERIAL PRIMARY KEY,
     session_id          TEXT NOT NULL,
@@ -267,9 +250,9 @@ CREATE TABLE IF NOT EXISTS doctor_feedback (
     FOREIGN KEY (reprocess_session_id) REFERENCES workflow_sessions(session_id) ON DELETE SET NULL
 );
 
--- ============================================================
+
 -- INDEXES FOR PERFORMANCE
--- ============================================================
+
 
 -- Session indexes
 CREATE INDEX IF NOT EXISTS idx_sessions_patient ON workflow_sessions(patient_id);
