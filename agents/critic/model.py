@@ -161,58 +161,88 @@ class CriticModel:
             safety_score = min(safety_score, 0.5)  # Cap safety if overconfident
 
         
-        # NEW: Stage 1.5: Context-enriched evaluation
-        
-        # Evaluate consistency with clinical history and literature
-        context_penalty = 0.0
-        
-        # Check FHIR clinical history
+        # ── Stage 2: Deterministic Historian Challenge ──────────────────────────
+        #
+        # Always runs when historian_output is present, regardless of ENABLE_LLM_CRITIC.
+        # Checks whether contradicting clinical facts are unaddressed in the impression.
+
         if historian_output:
-            contradicting = historian_output.contradicting_facts if hasattr(historian_output, 'contradicting_facts') else []
-            supporting = historian_output.supporting_facts if hasattr(historian_output, 'supporting_facts') else []
-            
-            # Flag if many contradictions not addressed in impression
-            if len(contradicting) > 2:
-                concern_flags.append(
-                    f"Clinical history contains {len(contradicting)} contradicting facts not addressed in impression"
+            contradicting = (
+                historian_output.contradicting_facts
+                if hasattr(historian_output, "contradicting_facts") else []
+            )
+            supporting = (
+                historian_output.supporting_facts
+                if hasattr(historian_output, "supporting_facts") else []
+            )
+
+            if contradicting:
+                # Build a brief description from top contradictions (max 3)
+                top_desc = "; ".join(
+                    f.description[:80] for f in contradicting[:3]
                 )
-                context_penalty += 0.10
-            
-            # Flag if strong clinical support exists but impression is overly cautious
+                concern_flags.append(
+                    f"[HISTORIAN CHALLENGE] {len(contradicting)} contradicting clinical "
+                    f"fact(s) not addressed in impression. Top: {top_desc}"
+                )
+                # Proportional penalty: 5% per contradiction, capped at 20%
+                hist_penalty = min(0.05 * len(contradicting), 0.20)
+                safety_score = max(0.0, safety_score - hist_penalty)
+                logger.info(
+                    "[CRITIC] Historian challenge: %d contradictions, penalty=%.2f",
+                    len(contradicting), hist_penalty,
+                )
+
             if len(supporting) > 3 and linguistic_certainty < 0.4:
+                # Strong clinical support exists but impression is overly cautious
+                # (not a problem — deliberately NOT penalised)
                 concern_flags.append(
-                    "Strong clinical support exists but impression remains overly cautious"
+                    f"[HISTORIAN NOTE] {len(supporting)} supporting clinical facts available; "
+                    "impression is appropriately cautious."
                 )
-                # This is actually GOOD (appropriate caution), so reduce penalty slightly
-                context_penalty -= 0.05
-        
-        # Check literature evidence
+
+        # ── Stage 3: Deterministic Literature Challenge ──────────────────────────
+        #
+        # Always runs when literature_output is present.
+        # Flags when published evidence suggests differentials the impression omits.
+
         if literature_output:
-            # Handle both structured and string outputs
+            impression_mentions_differentials = self._mentions_differentials(impression)
+
             if isinstance(literature_output, str):
-                # String summary - check if it mentions differentials
-                if "differential" in literature_output.lower() or "alternative" in literature_output.lower():
-                    if not self._mentions_differentials(impression):
-                        concern_flags.append(
-                            "Literature suggests alternative diagnoses not mentioned in impression"
-                        )
-                        context_penalty += 0.08
+                # String summary path
+                lit_lower = literature_output.lower()
+                if (
+                    ("differential" in lit_lower or "alternative" in lit_lower)
+                    and not impression_mentions_differentials
+                ):
+                    concern_flags.append(
+                        "[LITERATURE CHALLENGE] Literature evidence suggests alternative "
+                        "diagnoses; impression does not mention differentials."
+                    )
+                    safety_score = max(0.0, safety_score - 0.05)
+                    logger.info("[CRITIC] Literature challenge (string): differentials omitted")
             else:
-                # Structured output
-                citations = literature_output.citations if hasattr(literature_output, 'citations') else []
-                if len(citations) > 0:
-                    # Literature found relevant studies
-                    if not self._mentions_differentials(impression):
-                        concern_flags.append(
-                            f"Literature found {len(citations)} relevant studies but impression does not mention differentials"
-                        )
-                        context_penalty += 0.08
-        
-        # Apply context penalty to safety score
-        safety_score = max(0.0, min(1.0, safety_score - context_penalty))
+                # Structured LiteratureOutput path
+                citations = (
+                    literature_output.citations
+                    if hasattr(literature_output, "citations") else []
+                )
+                if citations and not impression_mentions_differentials:
+                    top_title = citations[0].title[:80] if citations else ""
+                    concern_flags.append(
+                        f"[LITERATURE CHALLENGE] {len(citations)} relevant study(ies) found; "
+                        f"impression omits differentials. Top study: \"{top_title}\""
+                    )
+                    safety_score = max(0.0, safety_score - 0.08)
+                    logger.info(
+                        "[CRITIC] Literature challenge: %d citations, differentials omitted",
+                        len(citations),
+                    )
 
 
-        # Stage 1.75: Historical Mistake Memory Retrieval  >>> PAST-MISTAKES
+        # ── Stage 4: Historical Mistake Memory Retrieval ─────────────────────────
+        # >>> PAST-MISTAKES
         
         similar_mistakes_count = 0
         historical_risk_level = "none"
