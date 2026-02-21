@@ -3,276 +3,227 @@ import { useState } from "react";
 import { CheckCircle2, AlertTriangle, FileText, ImageIcon, BookOpen, Activity, User, ShieldAlert, ChevronLeft, Download, Database } from "lucide-react";
 import { cn } from "@/lib/utils";
 import Link from "next/link";
+import { GradientText } from "@/components/GradientText";
 
 export default function ResultsPage({ params }: { params: { id: string } }) {
   const [activeTab, setActiveTab] = useState("visual");
 
   const tabs = [
     { id: "visual", label: "Visual Proof", icon: ImageIcon },
-    { id: "clinical", label: "Clinical Proof", icon: User },
-    { id: "literary", label: "Literary Proof", icon: BookOpen },
+    { id: "clinical", label: "Clinical", icon: User },
+    { id: "literary", label: "Literature", icon: BookOpen },
     { id: "audit", label: "Audit Trail", icon: ShieldAlert },
   ];
 
   return (
-    <div className="max-w-7xl mx-auto p-4 md:p-8 mb-20 animate-in fade-in zoom-in-95 duration-500">
-      
-      <div className="mb-6 flex justify-between items-center bg-background/50 sticky top-16 z-40 py-4 backdrop-blur-md border-b border-transparent">
-        <Link href="/diagnose" className="text-muted-foreground hover:text-foreground inline-flex items-center text-sm transition-colors cursor-pointer group">
-          <ChevronLeft className="h-4 w-4 mr-1 group-hover:-translate-x-1 transition-transform" /> Back to Dashboard
+    <div className="max-w-7xl mx-auto px-6 py-8 mb-20 relative z-10">
+      {/* Top Bar */}
+      <div className="flex justify-between items-center mb-8 animate-fadeInUp">
+        <Link href="/diagnose" className="text-white/30 hover:text-white/60 text-sm flex items-center gap-1 transition-colors group">
+          <ChevronLeft className="h-4 w-4 group-hover:-translate-x-0.5 transition-transform" /> Back
         </Link>
-        <button className="inline-flex items-center px-4 py-2 border border-primary/20 bg-primary/5 rounded-md text-primary text-sm hover:bg-primary/10 transition-colors shadow-[0_0_10px_rgba(0,229,255,0.1)] hover:shadow-[0_0_15px_rgba(0,229,255,0.2)]">
-          <Download className="h-4 w-4 mr-2" /> Export Evidence Packet
+        <button className="flex items-center gap-2 px-4 py-2 text-[13px] text-[#00E5FF] bg-[#00E5FF]/[0.06] border border-[#00E5FF]/15 rounded-lg hover:bg-[#00E5FF]/10 transition-all glow-cyan">
+          <Download className="h-3.5 w-3.5" /> Export PDF
         </button>
       </div>
 
-      <div className="flex flex-col md:flex-row justify-between items-start md:items-end mb-8 gap-6">
+      {/* Diagnosis Header */}
+      <div className="flex flex-col lg:flex-row justify-between items-start lg:items-end gap-6 mb-10 animate-fadeInUp-delay-1">
         <div>
-          <div className="inline-flex items-center px-3 py-1 mb-4 rounded-full border border-primary/30 bg-primary/10 text-primary text-xs font-semibold tracking-wider uppercase shadow-[0_0_10px_rgba(0,229,255,0.1)]">
-            <span className="flex h-1.5 w-1.5 rounded-full bg-primary mr-2 shadow-[0_0_5px_rgba(0,229,255,1)]"></span>
-            Study {params.id} • Verified
+          <div className="inline-flex items-center gap-2 px-3 py-1 mb-4 rounded-full border border-[#00E5FF]/20 bg-[#00E5FF]/[0.04] text-[11px] text-[#00E5FF] uppercase tracking-[0.15em] font-medium">
+            <span className="relative flex h-1.5 w-1.5">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#00E5FF] opacity-75"></span>
+              <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-[#00E5FF]"></span>
+            </span>
+            Study {params.id} &bull; Verified
           </div>
-          <h1 className="text-3xl md:text-5xl font-heading font-bold text-foreground">
-            Pneumocystis Pneumonia <span className="text-muted-foreground font-normal">(PCP)</span>
+          <h1 className="text-3xl md:text-5xl font-[var(--font-outfit)] font-bold text-white/90 leading-tight">
+            <GradientText colors={["#00E5FF", "#64FFDA", "#00E5FF"]}>Pneumocystis Pneumonia</GradientText>
           </h1>
-          <p className="text-muted-foreground mt-3 flex items-center bg-white/5 inline-flex px-3 py-1 rounded-md text-sm border border-white/10">
-            <User className="h-4 w-4 mr-2 text-primary" /> MRN-74892 • 45 Y.O. Male • Immunocompromised
+          <p className="text-white/30 mt-3 text-sm flex items-center gap-2">
+            <User className="h-3.5 w-3.5 text-[#00E5FF]/60" /> MRN-74892 &bull; 45 Y.O. Male &bull; Immunocompromised
           </p>
         </div>
-        
-        <div className="flex gap-4 w-full md:w-auto">
-          <div className="bg-card backdrop-blur-md border border-white/10 rounded-xl p-4 min-w-[140px] flex-1 md:flex-none relative overflow-hidden group hover:border-green-500/50 transition-colors">
-            <div className="absolute inset-0 bg-gradient-to-tr from-green-500/10 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
-            <p className="text-xs text-muted-foreground uppercase tracking-widest mb-1">Confidence</p>
-            <div className="flex items-end gap-2">
-              <span className="text-4xl font-bold text-green-400 drop-shadow-[0_0_10px_rgba(74,222,128,0.5)]">87%</span>
-            </div>
+
+        {/* Metrics */}
+        <div className="flex gap-3 w-full lg:w-auto">
+          <div className="flex-1 lg:min-w-[140px] rounded-xl border border-white/[0.04] bg-white/[0.02] p-4 group hover:border-green-500/20 transition-colors">
+            <p className="text-[11px] uppercase tracking-[0.15em] text-white/25 mb-1">Confidence</p>
+            <span className="text-3xl font-bold text-green-400 font-[var(--font-outfit)]">87<span className="text-lg">%</span></span>
           </div>
-          <div className="bg-card backdrop-blur-md border border-white/10 rounded-xl p-4 min-w-[140px] flex-1 md:flex-none relative overflow-hidden group hover:border-yellow-500/50 transition-colors">
-            <div className="absolute inset-0 bg-gradient-to-tr from-yellow-500/10 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
-            <p className="text-xs text-muted-foreground uppercase tracking-widest mb-1 flex items-center">
-              Uncertainty <AlertTriangle className="h-3 w-3 ml-1 text-yellow-500" />
+          <div className="flex-1 lg:min-w-[140px] rounded-xl border border-white/[0.04] bg-white/[0.02] p-4 group hover:border-yellow-500/20 transition-colors">
+            <p className="text-[11px] uppercase tracking-[0.15em] text-white/25 mb-1 flex items-center gap-1">
+              Uncertainty <AlertTriangle className="h-3 w-3 text-yellow-500/50" />
             </p>
-            <div className="flex items-end gap-2">
-              <span className="text-4xl font-bold text-yellow-500 drop-shadow-[0_0_10px_rgba(234,179,8,0.5)]">25%</span>
-            </div>
+            <span className="text-3xl font-bold text-yellow-500 font-[var(--font-outfit)]">25<span className="text-lg">%</span></span>
           </div>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Left Column: CheXbert Labels & Impression */}
-        <div className="space-y-6 lg:col-span-4">
-          <div className="glass p-6 rounded-xl border border-white/5 relative overflow-hidden group">
-            <div className="absolute top-0 right-0 p-4 opacity-5 group-hover:scale-110 transition-transform duration-500">
-              <Activity className="h-24 w-24" />
-            </div>
-            <h3 className="font-heading font-semibold text-lg mb-4 flex items-center relative z-10">
-              <Activity className="h-5 w-5 mr-2 text-primary" />
+      {/* Main Grid */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 animate-fadeInUp-delay-2">
+        {/* Left Sidebar */}
+        <div className="lg:col-span-4 space-y-5">
+          {/* CheXbert Labels */}
+          <div className="rounded-2xl border border-white/[0.04] bg-white/[0.02] p-5">
+            <h3 className="text-sm font-semibold text-white/70 mb-4 flex items-center gap-2">
+              <Activity className="h-4 w-4 text-[#00E5FF]" />
               Structured Pathology
             </h3>
-            <div className="space-y-3 relative z-10">
-              <div className="flex justify-between items-center p-3 rounded-lg bg-black/40 border border-white/5 hover:border-primary/30 transition-colors">
-                <span className="text-sm font-medium">Pneumonia</span>
-                <span className="text-xs px-2 py-1 rounded bg-green-500/10 text-green-400 border border-green-500/20 shadow-[0_0_10px_rgba(74,222,128,0.1)]">Present</span>
-              </div>
-              <div className="flex justify-between items-center p-3 rounded-lg bg-black/40 border border-white/5 hover:border-primary/30 transition-colors">
-                <span className="text-sm font-medium">Consolidation</span>
-                <span className="text-xs px-2 py-1 rounded bg-green-500/10 text-green-400 border border-green-500/20 shadow-[0_0_10px_rgba(74,222,128,0.1)]">Present</span>
-              </div>
-              <div className="flex justify-between items-center p-3 rounded-lg bg-black/40 border border-white/5 hover:border-yellow-500/30 transition-colors">
-                <span className="text-sm font-medium">Pleural Effusion</span>
-                <span className="text-xs px-2 py-1 rounded bg-yellow-500/10 text-yellow-500 border border-yellow-500/20 shadow-[0_0_10px_rgba(234,179,8,0.1)] animate-pulse">Uncertain</span>
-              </div>
-              <div className="flex justify-between items-center p-3 rounded-lg bg-black/40 border border-white/5">
-                <span className="text-sm font-medium text-muted-foreground">Cardiomegaly</span>
-                <span className="text-xs px-2 py-1 rounded bg-white/5 text-muted-foreground border border-white/5">Not Mentioned</span>
-              </div>
+            <div className="space-y-2">
+              {[
+                { label: "Pneumonia", status: "present", color: "green" },
+                { label: "Consolidation", status: "present", color: "green" },
+                { label: "Pleural Effusion", status: "uncertain", color: "yellow" },
+                { label: "Cardiomegaly", status: "absent", color: "neutral" },
+              ].map((item) => (
+                <div key={item.label} className="flex justify-between items-center p-3 rounded-lg bg-black/20 border border-white/[0.03]">
+                  <span className={`text-sm ${item.color === "neutral" ? "text-white/25" : "text-white/70"}`}>{item.label}</span>
+                  <span className={cn("text-[11px] px-2 py-0.5 rounded-full font-medium", {
+                    "bg-green-500/10 text-green-400 border border-green-500/20": item.color === "green",
+                    "bg-yellow-500/10 text-yellow-500 border border-yellow-500/20": item.color === "yellow",
+                    "bg-white/[0.03] text-white/20 border border-white/[0.03]": item.color === "neutral",
+                  })}>
+                    {item.status}
+                  </span>
+                </div>
+              ))}
             </div>
           </div>
 
-          <div className="glass p-6 rounded-xl border border-white/5 group hover:border-white/10 transition-colors">
-            <h3 className="font-heading font-semibold text-lg mb-4 flex items-center">
-              <FileText className="h-5 w-5 mr-2 text-primary group-hover:rotate-12 transition-transform" />
-              Radiologist Impression
+          {/* Radiologist Impression */}
+          <div className="rounded-2xl border border-white/[0.04] bg-white/[0.02] p-5">
+            <h3 className="text-sm font-semibold text-white/70 mb-4 flex items-center gap-2">
+              <FileText className="h-4 w-4 text-[#00E5FF]" />
+              Impression
             </h3>
-            <div className="p-4 rounded-lg bg-primary/5 text-primary border border-primary/20 text-sm italic mb-4 shadow-[inset_0_0_20px_rgba(0,229,255,0.05)]">
-              "Bilateral diffuse ground-glass opacities, predominantly perihilar."
-            </div>
-            <p className="text-sm text-foreground/80 leading-relaxed">
-              Findings are highly suspicious for Pneumocystis jirovecii pneumonia given the patient&apos;s immunocompromised status. Mild pleural effusion cannot be entirely excluded. Recommend correlation with clinical markers and sputum analysis.
+            <blockquote className="text-sm text-[#00E5FF]/80 italic border-l-2 border-[#00E5FF]/30 pl-4 mb-4 leading-relaxed">
+              &ldquo;Bilateral diffuse ground-glass opacities, predominantly perihilar.&rdquo;
+            </blockquote>
+            <p className="text-[13px] text-white/40 leading-relaxed">
+              Highly suspicious for PCP given immunocompromised status. Recommend correlation with CD4 count and sputum analysis.
             </p>
           </div>
         </div>
 
-        {/* Right Column: Evidence Tabs */}
-        <div className="glass rounded-xl border border-white/5 lg:col-span-8 flex flex-col overflow-hidden min-h-[500px] shadow-2xl shadow-black/50">
-          <div className="border-b border-white/5 flex overflow-x-auto no-scrollbar bg-black/20">
+        {/* Right Panel: Evidence Tabs */}
+        <div className="lg:col-span-8 rounded-2xl border border-white/[0.04] bg-white/[0.015] overflow-hidden min-h-[500px] flex flex-col">
+          {/* Tab Header */}
+          <div className="flex border-b border-white/[0.04] bg-black/20">
             {tabs.map((tab) => (
               <button
                 key={tab.id}
                 onClick={() => setActiveTab(tab.id)}
                 className={cn(
-                  "flex items-center px-6 py-4 text-sm font-medium outline-none transition-all whitespace-nowrap",
-                  activeTab === tab.id 
-                    ? "text-primary border-b-2 border-primary bg-primary/5" 
-                    : "text-muted-foreground hover:text-foreground hover:bg-white/5"
+                  "flex items-center gap-1.5 px-5 py-3.5 text-[13px] font-medium transition-all whitespace-nowrap",
+                  activeTab === tab.id
+                    ? "text-[#00E5FF] border-b-2 border-[#00E5FF] bg-[#00E5FF]/[0.03]"
+                    : "text-white/30 hover:text-white/50 hover:bg-white/[0.02]"
                 )}
               >
-                <tab.icon className={cn("h-4 w-4 mr-2", activeTab === tab.id ? "text-primary" : "text-muted-foreground")} />
+                <tab.icon className="h-3.5 w-3.5" />
                 {tab.label}
               </button>
             ))}
           </div>
 
-          <div className="p-6 md:p-8 flex-1">
+          {/* Tab Content */}
+          <div className="p-6 flex-1">
             {activeTab === "visual" && (
-              <div className="space-y-6 animate-in fade-in duration-300">
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                  <div className="space-y-3">
-                    <div className="flex items-center justify-between">
-                      <p className="text-sm text-muted-foreground uppercase tracking-wider font-semibold">Original DICOM</p>
-                      <span className="text-xs bg-white/10 px-2 py-1 rounded text-foreground border border-white/5">AP View</span>
-                    </div>
-                    <div className="aspect-[4/3] bg-black rounded-lg border border-white/10 flex items-center justify-center overflow-hidden relative group shadow-lg">
-                      <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent z-10" />
-                      <p className="absolute bottom-4 left-4 z-20 text-xs text-white/70 flex items-center font-mono">
-                        <Activity className="w-3 h-3 mr-1 text-primary" /> 14:02:55
-                      </p>
-                      {/* Fake lung image placeholder - a dark gradient to simulate an X-Ray */}
-                      <div className="w-full h-full bg-[radial-gradient(ellipse_at_center,_var(--tw-gradient-stops))] from-slate-500 via-slate-800 to-[#050505] opacity-90 group-hover:scale-105 transition-transform duration-700" />
-                      <div className="absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/stardust.png')] opacity-10 mix-blend-overlay" />
+              <div className="space-y-5">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <p className="text-[11px] uppercase tracking-[0.15em] text-white/25 mb-3">Original DICOM</p>
+                    <div className="aspect-[4/3] bg-black/40 rounded-xl border border-white/[0.04] relative overflow-hidden">
+                      <div className="w-full h-full bg-gradient-to-br from-slate-700/40 via-slate-800/60 to-black" />
+                      <p className="absolute bottom-3 left-3 text-[10px] text-white/20 font-mono">AP View &bull; 14:02:55</p>
                     </div>
                   </div>
-                  <div className="space-y-3">
-                    <div className="flex items-center justify-between">
-                      <p className="text-sm text-primary uppercase tracking-wider font-semibold flex items-center group">
-                        <AlertTriangle className="h-4 w-4 mr-1 group-hover:animate-bounce" /> Grad-CAM Heatmap
-                      </p>
-                      <span className="text-xs bg-primary/20 text-primary border border-primary/30 px-2 py-1 rounded shadow-[0_0_10px_rgba(0,229,255,0.2)]">Attention Map</span>
-                    </div>
-                    <div className="aspect-[4/3] bg-black rounded-lg border border-primary/30 flex items-center justify-center overflow-hidden relative shadow-[0_0_30px_rgba(0,229,255,0.15)] group">
-                       <div className="w-full h-full bg-[radial-gradient(ellipse_at_center,_var(--tw-gradient-stops))] from-slate-500 via-slate-800 to-[#050505] opacity-90 group-hover:scale-105 transition-transform duration-700" />
-                       <div className="absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/stardust.png')] opacity-10 mix-blend-overlay" />
-                       {/* Fake heatmap spots representing Bilateral diffuse ground-glass opacities */}
-                       <div className="absolute top-1/4 left-1/4 w-32 h-40 bg-red-500/40 rounded-[100%] blur-[25px] mix-blend-screen animate-pulse duration-[3000ms]" />
-                       <div className="absolute top-1/3 right-1/4 w-40 h-48 bg-orange-500/30 rounded-[100%] blur-[35px] mix-blend-screen animate-pulse duration-[4000ms]" />
-                       <div className="absolute top-1/2 left-1/3 w-20 h-20 bg-yellow-400/20 rounded-full blur-[20px] mix-blend-screen" />
+                  <div>
+                    <p className="text-[11px] uppercase tracking-[0.15em] text-[#00E5FF]/50 mb-3 flex items-center gap-1">
+                      Grad-CAM Heatmap
+                    </p>
+                    <div className="aspect-[4/3] bg-black/40 rounded-xl border border-[#00E5FF]/10 relative overflow-hidden glow-cyan">
+                      <div className="w-full h-full bg-gradient-to-br from-slate-700/40 via-slate-800/60 to-black" />
+                      <div className="absolute top-1/4 left-1/4 w-28 h-36 bg-red-500/30 rounded-[100%] blur-[25px] animate-pulse" />
+                      <div className="absolute top-1/3 right-1/4 w-32 h-40 bg-orange-500/20 rounded-[100%] blur-[30px] animate-pulse" style={{ animationDelay: "1s" }} />
                     </div>
                   </div>
                 </div>
-                <div className="bg-primary/5 border border-primary/20 rounded-lg p-5 text-sm text-primary flex items-start shadow-inner">
-                  <CheckCircle2 className="h-5 w-5 mr-3 shrink-0 text-primary" />
-                  <p className="leading-relaxed">Vision Encoder identifies highest activation in the perihilar regions bilaterally, consistent with the expected visual presentation of PCP.</p>
+                <div className="bg-[#00E5FF]/[0.04] border border-[#00E5FF]/10 rounded-xl p-4 text-[13px] text-[#00E5FF]/70 flex items-start gap-3">
+                  <CheckCircle2 className="h-4 w-4 shrink-0 text-[#00E5FF] mt-0.5" />
+                  Peak activation in perihilar regions bilaterally, consistent with PCP visual presentation.
                 </div>
               </div>
             )}
 
             {activeTab === "clinical" && (
-              <div className="space-y-6 animate-in fade-in duration-300">
-                <div className="p-5 rounded-xl bg-black/40 border border-white/5 border-l-4 border-l-primary relative overflow-hidden group hover:bg-black/60 transition-colors shadow-lg shadow-black/20">
-                  <div className="absolute top-0 right-0 p-3 opacity-10 group-hover:opacity-20 transition-opacity">
-                    <User className="h-16 w-16" />
-                  </div>
-                  <div className="flex justify-between items-start mb-3 relative z-10">
-                    <h4 className="text-base font-semibold text-foreground flex items-center">
-                      <FileText className="h-4 w-4 mr-2 text-primary" />
-                      Condition snippet from FHIR Resource
+              <div className="space-y-4">
+                <div className="rounded-xl border border-white/[0.04] bg-black/20 p-5 border-l-2 border-l-[#00E5FF]/40">
+                  <div className="flex justify-between items-start mb-3">
+                    <h4 className="text-sm font-medium text-white/70 flex items-center gap-2">
+                      <FileText className="h-3.5 w-3.5 text-[#00E5FF]" /> FHIR Condition Resource
                     </h4>
-                    <span className="text-xs font-mono text-muted-foreground bg-white/5 border border-white/10 px-2 py-1 rounded shadow-sm">3 days ago</span>
+                    <span className="text-[11px] text-white/20 font-mono bg-white/[0.03] px-2 py-1 rounded">3 days ago</span>
                   </div>
-                  <p className="text-sm text-foreground/80 font-mono bg-background/50 p-4 rounded-lg border border-white/5 leading-relaxed">
-                    "Patient presented with progressive dyspnea and dry cough over the past week. Known history of HIV, recent CD4 count 180 cells/µL. Prescribed prophylactic trimethoprim-sulfamethoxazole."
-                  </p>
-                  <div className="mt-4 flex flex-wrap gap-2 relative z-10">
-                    <span className="text-xs px-3 py-1.5 rounded-full bg-primary/10 text-primary border border-primary/20 shadow-[0_0_10px_rgba(0,229,255,0.1)]">Immunocompromised</span>
-                    <span className="text-xs px-3 py-1.5 rounded-full bg-red-500/10 text-red-400 border border-red-500/20 shadow-[0_0_10px_rgba(248,113,113,0.1)]">CD4 = 180 (&lt;200)</span>
-                    <span className="text-xs px-3 py-1.5 rounded-full bg-white/5 text-muted-foreground border border-white/10">Dyspnea</span>
+                  <div className="text-sm text-white/50 bg-black/30 p-4 rounded-lg font-mono leading-relaxed border border-white/[0.03]">
+                    Patient presented with progressive dyspnea and dry cough. Known HIV, CD4 count 180 cells/&micro;L. On prophylactic TMP-SMX.
+                  </div>
+                  <div className="flex flex-wrap gap-2 mt-4">
+                    <span className="text-[11px] px-2.5 py-1 rounded-full bg-[#00E5FF]/[0.06] text-[#00E5FF] border border-[#00E5FF]/15">Immunocompromised</span>
+                    <span className="text-[11px] px-2.5 py-1 rounded-full bg-red-500/[0.06] text-red-400 border border-red-500/15">CD4 = 180</span>
+                    <span className="text-[11px] px-2.5 py-1 rounded-full bg-white/[0.03] text-white/30 border border-white/[0.04]">Dyspnea</span>
                   </div>
                 </div>
               </div>
             )}
 
             {activeTab === "literary" && (
-              <div className="space-y-6 animate-in fade-in duration-300">
-                <div className="p-5 rounded-xl bg-black/40 border border-white/5 hover:border-primary/30 transition-colors cursor-pointer group shadow-lg shadow-black/20 relative overflow-hidden">
-                  <div className="absolute inset-0 bg-gradient-to-r from-primary/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
-                  <div className="flex items-center gap-2 mb-3 text-xs text-primary font-medium tracking-wide relative z-10">
-                    <CheckCircle2 className="h-4 w-4" /> PubMed: HIGH RELEVANCE SCORE <span className="text-white/80 bg-primary/20 px-1 rounded ml-1 font-mono">0.92</span>
+              <div className="space-y-4">
+                <div className="rounded-xl border border-white/[0.04] bg-black/20 p-5 hover:border-[#00E5FF]/10 transition-colors cursor-pointer group">
+                  <div className="flex items-center gap-2 mb-3 text-[11px] text-[#00E5FF] font-medium tracking-wide">
+                    <CheckCircle2 className="h-3.5 w-3.5" /> HIGH RELEVANCE
+                    <span className="bg-[#00E5FF]/10 px-1.5 py-0.5 rounded font-mono text-[10px]">0.92</span>
                   </div>
-                  <h4 className="text-lg font-semibold text-foreground mb-2 group-hover:text-primary transition-colors relative z-10">
+                  <h4 className="text-sm font-medium text-white/80 mb-2 group-hover:text-[#00E5FF] transition-colors">
                     Radiographic manifestations of Pneumocystis jirovecii pneumonia in HIV patients
                   </h4>
-                  <p className="text-sm text-muted-foreground mb-4 font-mono relative z-10 flex items-center">
-                    <BookOpen className="h-3 w-3 mr-1" /> Journal of Thoracic Imaging • 2021 • PMID: 33458291
+                  <p className="text-[11px] text-white/25 font-mono mb-3 flex items-center gap-1">
+                    <BookOpen className="h-3 w-3" /> J Thoracic Imaging &bull; 2021 &bull; PMID: 33458291
                   </p>
-                  <p className="text-sm text-foreground/80 leading-relaxed border-l-2 border-primary/50 pl-4 bg-primary/5 py-3 pr-3 rounded-r-lg relative z-10 shadow-inner">
-                    Bilateral ground-glass opacities, which may be patchy or diffuse, are the hallmark of PCP on chest radiography and CT, occurring in up to 90% of cases...
+                  <p className="text-[13px] text-white/40 leading-relaxed border-l-2 border-[#00E5FF]/20 pl-4">
+                    Bilateral ground-glass opacities are the hallmark of PCP on chest radiography, occurring in up to 90% of cases...
                   </p>
                 </div>
               </div>
             )}
 
             {activeTab === "audit" && (
-              <div className="space-y-6 animate-in fade-in duration-300 relative before:absolute before:inset-0 before:ml-5 before:-translate-x-px md:before:mx-auto md:before:translate-x-0 before:h-full before:w-px before:bg-gradient-to-b before:from-primary/50 before:via-white/10 before:to-transparent pt-4">
-                
-                {/* Timeline Item 1 */}
-                <div className="relative flex items-center justify-between md:justify-normal md:odd:flex-row-reverse group is-active">
-                  <div className="flex items-center justify-center w-10 h-10 rounded-full border-2 border-primary/50 bg-background text-primary shrink-0 md:order-1 md:group-odd:-translate-x-1/2 md:group-even:translate-x-1/2 shadow-[0_0_15px_rgba(0,229,255,0.4)] z-10 ring-4 ring-background group-hover:scale-110 transition-transform">
-                    <Activity className="h-5 w-5" />
-                  </div>
-                  <div className="w-[calc(100%-4rem)] md:w-[calc(50%-3rem)] p-5 rounded-xl border border-primary/30 bg-primary/5 shadow-lg relative group-hover:border-primary/50 transition-colors">
-                    {/* Directional Arrow */}
-                    <div className="absolute top-5 -right-2 w-4 h-4 bg-primary/5 border-t border-r border-primary/30 rotate-45 hidden md:block group-hover:border-primary/50 transition-colors"></div>
-                    <div className="flex items-center justify-between mb-2">
-                      <div className="font-bold text-primary text-base flex items-center font-heading">
-                        Radiologist Agent
+              <div className="space-y-5 relative pl-8">
+                <div className="absolute left-3 top-0 bottom-0 w-px bg-gradient-to-b from-[#00E5FF]/30 via-white/5 to-transparent" />
+
+                {[
+                  { agent: "Radiologist", time: "0ms", color: "#00E5FF", detail: "Generated findings. Token entropy: 0.12 (High Confidence).", icon: Activity },
+                  { agent: "CheXbert", time: "+120ms", color: "#64FFDA", detail: "Extracted 3 labels: Pneumonia (present), Consolidation (present), Pleural Effusion (uncertain).", icon: Activity },
+                  { agent: "Historian", time: "+450ms", color: "#7C4DFF", detail: "FHIR query returned CD4=180. Strongly supports PCP hypothesis.", icon: Database },
+                  { agent: "Critic", time: "+1200ms", color: "#FFD740", detail: "Flagged Pleural Effusion as uncertain. Increased overall uncertainty by +0.15.", icon: ShieldAlert },
+                ].map((item) => (
+                  <div key={item.agent} className="relative flex items-start gap-4 group">
+                    <div
+                      className="absolute -left-5 w-6 h-6 rounded-full border-2 flex items-center justify-center bg-[#050507] z-10 group-hover:scale-110 transition-transform"
+                      style={{ borderColor: `${item.color}50` }}
+                    >
+                      <item.icon className="h-3 w-3" style={{ color: item.color }} />
+                    </div>
+                    <div className="rounded-xl border border-white/[0.04] bg-black/20 p-4 flex-1 group-hover:border-white/[0.08] transition-colors">
+                      <div className="flex justify-between items-center mb-2">
+                        <span className="text-sm font-semibold" style={{ color: item.color }}>{item.agent}</span>
+                        <span className="text-[10px] text-white/20 font-mono bg-white/[0.03] px-2 py-0.5 rounded">{item.time}</span>
                       </div>
-                      <time className="font-mono text-xs text-muted-foreground bg-black/40 border border-white/5 px-2 py-1 rounded shadow-inner">0ms</time>
-                    </div>
-                    <div className="text-sm text-foreground/80 leading-relaxed">
-                      Generated Findings & Impression. Token entropy measured at <span className="text-green-400 font-mono bg-green-400/10 px-1 py-0.5 rounded ml-1 border border-green-400/20">0.12</span> (High Confidence).
+                      <p className="text-[13px] text-white/40 leading-relaxed">{item.detail}</p>
                     </div>
                   </div>
-                </div>
-
-                {/* Timeline Item 2 */}
-                <div className="relative flex items-center justify-between md:justify-normal md:odd:flex-row-reverse group is-active mt-8">
-                  <div className="flex items-center justify-center w-10 h-10 rounded-full border-2 border-purple-500/50 bg-background text-purple-400 shrink-0 md:order-1 md:group-odd:-translate-x-1/2 md:group-even:translate-x-1/2 shadow-[0_0_15px_rgba(168,85,247,0.3)] z-10 ring-4 ring-background group-hover:scale-110 transition-transform">
-                    <Database className="h-5 w-5" />
-                  </div>
-                  <div className="w-[calc(100%-4rem)] md:w-[calc(50%-3rem)] p-5 rounded-xl border border-purple-500/20 bg-purple-500/5 shadow-lg relative group-hover:border-purple-500/40 transition-colors">
-                    {/* Directional Arrow */}
-                    <div className="absolute top-5 -left-2 w-4 h-4 bg-purple-500/5 border-b border-l border-purple-500/20 rotate-45 hidden md:block md:group-odd:hidden md:group-even:block group-hover:border-purple-500/40 transition-colors"></div>
-                    <div className="flex items-center justify-between mb-2">
-                      <div className="font-bold text-purple-400 text-base font-heading">Historian Agent</div>
-                      <time className="font-mono text-xs text-muted-foreground bg-black/40 border border-white/5 px-2 py-1 rounded shadow-inner">+450ms</time>
-                    </div>
-                    <div className="text-sm text-foreground/80 leading-relaxed">
-                      Queried FHIR. Found CD4 count = 180. Evidence strongly supports PCP hypothesis.
-                    </div>
-                  </div>
-                </div>
-
-                {/* Timeline Item 3 */}
-                <div className="relative flex items-center justify-between md:justify-normal md:odd:flex-row-reverse group is-active mt-8">
-                  <div className="flex items-center justify-center w-10 h-10 rounded-full border-2 border-yellow-500/50 bg-background text-yellow-500 shrink-0 md:order-1 md:group-odd:-translate-x-1/2 md:group-even:translate-x-1/2 shadow-[0_0_15px_rgba(234,179,8,0.3)] z-10 ring-4 ring-background group-hover:scale-110 transition-transform">
-                    <ShieldAlert className="h-5 w-5" />
-                  </div>
-                  <div className="w-[calc(100%-4rem)] md:w-[calc(50%-3rem)] p-5 rounded-xl border border-yellow-500/30 bg-yellow-500/5 shadow-lg relative group-hover:border-yellow-500/50 transition-colors">
-                    <div className="absolute top-5 -right-2 w-4 h-4 bg-yellow-500/5 border-t border-r border-yellow-500/30 rotate-45 hidden md:block group-hover:border-yellow-500/50 transition-colors"></div>
-                    <div className="flex items-center justify-between mb-2">
-                      <div className="font-bold text-yellow-500 text-base flex items-center font-heading">
-                        <AlertTriangle className="h-4 w-4 mr-1" /> Critic Head
-                      </div>
-                      <time className="font-mono text-xs text-muted-foreground bg-black/40 border border-white/5 px-2 py-1 rounded shadow-inner">+1200ms</time>
-                    </div>
-                    <div className="text-sm text-foreground/80 leading-relaxed">
-                      Flagged CheXbert label 'Pleural Effusion' as <span className="text-yellow-500 font-mono bg-yellow-500/10 px-1 py-0.5 rounded ml-1 border border-yellow-500/20">Uncertain</span>. Increased overall uncertainty score by +0.15.
-                    </div>
-                  </div>
-                </div>
-
+                ))}
               </div>
             )}
           </div>
