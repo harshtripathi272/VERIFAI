@@ -517,12 +517,10 @@ print(result.uncertainty_trajectory)  # [0.6, 0.4, 0.25]
 ├── 📁 tests
 │   ├── 🐍 __init__.py
 │   └── 🐍 test_router.py
-├── 📁 tools
-│   ├── 🐍 __init__.py
-│   └── 🐍 registry.py
-├── 📁 ui
-│   ├── 🐍 __init__.py
-│   └── 🐍 streamlit_app.py
+├── 📁 frontend
+│   ├── 📁 src/app
+│   ├── 📁 src/components
+│   └── 📄 package.json
 ├── ⚙️ .gitignore
 ├── 📝 ARCHITECTURE_DEEP_DIVE.md
 ├── 📝 ARCHITECTURE_UPDATE.md
