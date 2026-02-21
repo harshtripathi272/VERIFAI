@@ -92,7 +92,23 @@ def logged_critic_node(state: VerifaiState) -> dict:
     result = critic_node(state)
     critic_output = result.get('critic_output')
     if critic_output:
-        print(f"[WORKFLOW] Critic completed - Risk Score: {critic_output.final_risk_score:.2f}")
+        print(f"[WORKFLOW] Critic completed")
+        print(f"  Safety Score   : {critic_output.safety_score:.3f}")
+        print(f"  Overconfident  : {critic_output.is_overconfident}")
+        print(f"  Historical Risk: {critic_output.historical_risk_level.upper()}")
+        print(f"  Similar Mistakes: {critic_output.similar_mistakes_count}")
+        if critic_output.concern_flags:
+            print(f"  Concern Flags  :")
+            for flag in critic_output.concern_flags[:5]:  # Top 5
+                print(f"    - {flag}")
+        if critic_output.recommended_hedging:
+            print(f"  Hedging        : {critic_output.recommended_hedging[:120]}")
+        if critic_output.historical_context:
+            print(f"  Historical Context ({len(critic_output.historical_context)} matched cases):")
+            for ctx in critic_output.historical_context[:3]:
+                print(f"    [{ctx.get('disease_type','?')}] err={ctx.get('error_type','?')} sim={ctx.get('similarity',0):.3f}")
+    else:
+        print("[WORKFLOW] Critic completed - No output")
     try:
         logger.log_critic(state, result)
     except Exception as e:
@@ -108,8 +124,36 @@ def logged_evidence_gathering_node(state: VerifaiState) -> dict:
     logger = _get_or_create_logger(state)
     result = evidence_gathering_node(state)
     print(f"[WORKFLOW] Evidence gathering completed")
-    print(f"  - Historian output: {'✓' if result.get('historian_output') else '✗'}")
-    print(f"  - Literature output: {'✓' if result.get('literature_output') else '✗'}")
+
+    # --- Historian ---
+    hist = result.get('historian_output')
+    if hist:
+        print(f"  ✓ Historian:")
+        print(f"    Confidence Adjustment : {hist.confidence_adjustment:+.3f}")
+        print(f"    Supporting Facts      : {len(hist.supporting_facts)}")
+        print(f"    Contradicting Facts   : {len(hist.contradicting_facts)}")
+        print(f"    Clinical Summary      : {hist.clinical_summary[:120]}")
+        if hist.supporting_facts:
+            print(f"    Top Support:")
+            for f in hist.supporting_facts[:3]:
+                print(f"      [{f.fhir_resource_type}] {f.description[:100]}")
+        if hist.contradicting_facts:
+            print(f"    Top Contradictions:")
+            for f in hist.contradicting_facts[:2]:
+                print(f"      [{f.fhir_resource_type}] {f.description[:100]}")
+    else:
+        print(f"  ✗ Historian: No output (patient_id may be missing or no FHIR data)")
+
+    # --- Literature ---
+    lit = result.get('literature_output')
+    if lit:
+        if isinstance(lit, str):
+            print(f"  ✓ Literature: {lit[:200]}")
+        else:
+            print(f"  ✓ Literature: Evidence strength={getattr(lit,'overall_evidence_strength','?')}, Citations={len(getattr(lit,'citations',[]))}")
+    else:
+        print(f"  ✗ Literature: No output")
+
     try:
         logger.log_evidence_gathering(state, result)
     except Exception as e:
@@ -145,8 +189,42 @@ def logged_validator_node(state: VerifaiState) -> dict:
         print("[WORKFLOW] Validator mode: ESCALATION (max rounds exceeded)")
     print("="*60)
     result = validator_node(state)
-    recommendation = (result.get("validator_output") or {}).get("recommendation", "FINALIZE")
-    print(f"[WORKFLOW] Validator completed - Recommendation: {recommendation}")
+    vout = result.get("validator_output") or {}
+    recommendation = vout.get("recommendation", "FINALIZE")
+    print(f"[WORKFLOW] Validator completed")
+    print(f"  Recommendation : {recommendation}")
+    print(f"  Confidence     : {vout.get('confidence_level', '?')}")
+    print(f"  Explanation    : {vout.get('explanation', '')[:120]}")
+
+    # Retrieval tool results
+    retrieval = vout.get('retrieval', {})
+    if retrieval and not retrieval.get('error'):
+        print(f"  Retrieval      : {len(retrieval.get('retrieved_sentences',[]))} similar cases"
+              f" | consensus={retrieval.get('consensus_diagnosis','?')}"
+              f" | agrees_with_chexbert={retrieval.get('agrees_with_chexbert','?')}")
+    else:
+        print(f"  Retrieval      : {'Not available' if not retrieval else retrieval.get('error','?')}")
+
+    # Entity matching
+    entity = vout.get('entity_matching', {})
+    print(f"  Entity F1      : {entity.get('entity_f1', 'N/A')} | verdict={entity.get('verdict','?')}")
+
+    # Rules engine
+    rules = vout.get('rules', {})
+    print(f"  Rules          : flags={rules.get('flag_count',0)}, warnings={rules.get('warn_count',0)}"
+          f", critical={rules.get('has_critical_flag',False)}")
+    if rules.get('triggered_rule_names'):
+        print(f"  Triggered Rules: {rules['triggered_rule_names']}")
+
+    # Agent agreement summary
+    agent_sum = vout.get('agent_summary', {})
+    if agent_sum:
+        critic_sum = agent_sum.get('critic', {})
+        hist_sum = agent_sum.get('historian', {})
+        lit_sum = agent_sum.get('literature', {})
+        print(f"  Agent Summary  : critic_safety={critic_sum.get('safety_score','?')}"
+              f" | hist_support={hist_sum.get('supporting_facts_count',0)}"
+              f" | lit_strength={lit_sum.get('evidence_strength','?')}")
     return result
 
 
@@ -192,19 +270,21 @@ def evidence_gathering_node(state: VerifaiState) -> dict:
             literature_future = executor.submit(literature_node, state)
             
             # Wait for both to complete
+            # NOTE: 300s timeout because both agents share the GPU inference lock
+            # and must execute sequentially - literature can take 60-120s alone.
             try:
-                historian_result = historian_future.result(timeout=30)
+                historian_result = historian_future.result(timeout=300)
                 results["historian_output"] = historian_result.get("historian_output")
                 trace_entries.extend(historian_result.get("trace", []))
             except Exception as e:
-                trace_entries.append(f"EVIDENCE_GATHER: Historian failed - {str(e)[:50]}")
+                trace_entries.append(f"EVIDENCE_GATHER: Historian failed - {str(e)[:100]}")
             
             try:
-                literature_result = literature_future.result(timeout=30)
+                literature_result = literature_future.result(timeout=300)
                 results["literature_output"] = literature_result.get("literature_output")
                 trace_entries.extend(literature_result.get("trace", []))
             except Exception as e:
-                trace_entries.append(f"EVIDENCE_GATHER: Literature failed - {str(e)[:50]}")
+                trace_entries.append(f"EVIDENCE_GATHER: Literature failed - {str(e)[:100]}")
     else:
         # Sequential execution (fallback)
         try:

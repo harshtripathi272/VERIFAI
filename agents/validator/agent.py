@@ -266,8 +266,16 @@ def validator_node(state: VerifaiState) -> Dict[str, Any]:
                 "contradicting_facts_count": len(state.get("historian_output").contradicting_facts) if state.get("historian_output") else 0
             },
             "literature": {
-                "evidence_strength": state.get("literature_output").overall_evidence_strength if state.get("literature_output") else None,
-                "citation_count": len(state.get("literature_output").citations) if state.get("literature_output") else 0
+                "evidence_strength": (
+                    state.get("literature_output").overall_evidence_strength
+                    if state.get("literature_output") and hasattr(state.get("literature_output"), "overall_evidence_strength")
+                    else "text_only" if isinstance(state.get("literature_output"), str) else None
+                ),
+                "citation_count": (
+                    len(state.get("literature_output").citations)
+                    if state.get("literature_output") and hasattr(state.get("literature_output"), "citations")
+                    else 0
+                )
             },
             "debate": {
                 "consensus_reached": state.get("debate_output").final_consensus if state.get("debate_output") else None,
@@ -315,7 +323,11 @@ def _check_agent_agreement(state: VerifaiState) -> bool:
     
     critic_ok = not critic.is_overconfident if critic else False
     hist_ok = len(hist.supporting_facts) > 0 if hist else False
-    lit_ok = lit.overall_evidence_strength in ["medium", "high"] if lit else False
+    lit_ok = (
+        lit.overall_evidence_strength in ["medium", "high"]
+        if lit and hasattr(lit, "overall_evidence_strength")
+        else bool(lit) if isinstance(lit, str) else False  # non-empty string = some evidence
+    )
     
     return critic_ok and hist_ok and lit_ok
 
@@ -326,7 +338,11 @@ def _assess_external_evidence(state: VerifaiState) -> str:
     lit = state.get("literature_output")
     
     hist_count = len(hist.supporting_facts) if hist else 0
-    lit_strength = lit.overall_evidence_strength if lit else "none"
+    lit_strength = (
+        lit.overall_evidence_strength
+        if lit and hasattr(lit, "overall_evidence_strength")
+        else "medium" if isinstance(lit, str) and lit else "none"
+    )
     
     if hist_count >= 2 and lit_strength in ["medium", "high"]:
         return "strong"
