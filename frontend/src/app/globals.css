@@ -1,0 +1,53 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: #0A0A0B; /* Deep slate/black */
+    --foreground: #FAFAFA;
+    
+    /* Medical Blue / Electric Cyan core */
+    --primary: #00E5FF;
+    --primary-foreground: #000000;
+    
+    --muted: #1A1A1D;
+    --muted-foreground: #A1A1AA;
+    
+    --accent: #2979FF;
+    --accent-foreground: #FFFFFF;
+
+    --card: rgba(26, 26, 29, 0.6);
+    --card-foreground: #FFFFFF;
+    
+    --border: #27272A;
+  }
+}
+
+@layer base {
+  body {
+    background-color: var(--background);
+    color: var(--foreground);
+    @apply antialiased;
+  }
+}
+
+@layer utilities {
+  .glass {
+    @apply bg-card backdrop-blur-xl border border-white/5 shadow-[0_4px_24px_-8px_rgba(0,0,0,0.5)];
+  }
+  
+  .text-glow {
+    text-shadow: 0 0 20px rgba(0, 229, 255, 0.5);
+  }
+  
+  .animate-slow-pan {
+    animation: pan 20s linear infinite;
+  }
+}
+
+@keyframes pan {
+  0% { transform: scale(1.1) translate(0, 0); }
+  50% { transform: scale(1.1) translate(-2%, 2%); }
+  100% { transform: scale(1.1) translate(0, 0); }
+}
