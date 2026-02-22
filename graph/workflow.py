@@ -16,6 +16,14 @@ from concurrent.futures import ThreadPoolExecutor, wait
 from graph.state import VerifaiState, FinalDiagnosis
 from app.config import settings
 from db.adapter import get_logger  # Unified database adapter (SQLite or Supabase)
+from uncertainty.muc import (
+    compute_ig,
+    compute_historian_uncertainty, compute_historian_alignment,
+    compute_literature_uncertainty, compute_literature_alignment,
+    compute_debate_ds_fusion,
+    compute_validator_uncertainty, compute_validator_alignment,
+    compute_critic_uncertainty, compute_critic_alignment,
+)
 
 
 # Import agent nodes
@@ -72,10 +80,15 @@ def logged_radiologist_node(state: VerifaiState) -> dict:
     """Radiologist node with automatic DB logging."""
     print("\n" + "="*60)
     print("[WORKFLOW] Starting Radiologist Node")
+    u_in = state.get("current_uncertainty", 0.50)
+    print(f"  ⤷ Uncertainty IN  : {u_in:.2%}")
     print("="*60)
     logger = _get_or_create_logger(state)
     result = radiologist_node(state)
+    u_out = result.get("current_uncertainty", u_in)
+    delta = u_out - u_in
     print(f"[WORKFLOW] Radiologist completed - Generated {len(result.get('radiologist_output', {}).findings or '')} chars of findings")
+    print(f"  ⤷ Uncertainty OUT : {u_out:.2%}  (Δ = {delta:+.3f})")
     try:
         logger.log_radiologist(state, result)
     except Exception as e:
@@ -83,14 +96,49 @@ def logged_radiologist_node(state: VerifaiState) -> dict:
     return result
 
 
+def logged_chexbert_node(state: VerifaiState) -> dict:
+    """CheXbert node with automatic DB logging and MUC uncertainty tracking."""
+    print("\n" + "="*60)
+    print("[WORKFLOW] Starting CheXbert Node")
+    u_in = state.get("current_uncertainty", 0.50)
+    print(f"  ⤷ Uncertainty IN  : {u_in:.2%}")
+    print("="*60)
+    logger = _get_or_create_logger(state)
+    result = chexbert_node(state)
+    chex_output = result.get('chexbert_output')
+    u_out = result.get("current_uncertainty", u_in)
+    delta = u_out - u_in
+    if chex_output:
+        num_present = sum(1 for s in chex_output.labels.values() if s == "present")
+        num_uncertain = sum(1 for s in chex_output.labels.values() if s == "uncertain")
+        print(f"[WORKFLOW] CheXbert completed")
+        print(f"  Present      : {num_present}")
+        print(f"  Uncertain    : {num_uncertain}")
+        if chex_output.labels:
+            labels_str = ", ".join([f"{c} ({s})" for c, s in chex_output.labels.items()])
+            print(f"  Labels       : {labels_str}")
+    else:
+        print("[WORKFLOW] CheXbert completed - No output")
+    print(f"  ⤷ Uncertainty OUT : {u_out:.2%}  (Δ = {delta:+.3f})")
+    # Log trace entries from agent
+    for t in result.get("trace", []):
+        if "MUC" in t:
+            print(f"  {t}")
+    return result
+
+
 def logged_critic_node(state: VerifaiState) -> dict:
     """Critic node with automatic DB logging."""
     print("\n" + "="*60)
     print("[WORKFLOW] Starting Critic Node")
+    u_in = state.get("current_uncertainty", 0.50)
+    print(f"  ⤷ Uncertainty IN  : {u_in:.2%}")
     print("="*60)
     logger = _get_or_create_logger(state)
     result = critic_node(state)
     critic_output = result.get('critic_output')
+    u_out = result.get("current_uncertainty", u_in)
+    delta = u_out - u_in
     if critic_output:
         print(f"[WORKFLOW] Critic completed")
         print(f"  Safety Score   : {critic_output.safety_score:.3f}")
@@ -109,6 +157,7 @@ def logged_critic_node(state: VerifaiState) -> dict:
                 print(f"    [{ctx.get('disease_type','?')}] err={ctx.get('error_type','?')} sim={ctx.get('similarity',0):.3f}")
     else:
         print("[WORKFLOW] Critic completed - No output")
+    print(f"  ⤷ Uncertainty OUT : {u_out:.2%}  (Δ = {delta:+.3f})")
     try:
         logger.log_critic(state, result)
     except Exception as e:
@@ -120,39 +169,95 @@ def logged_evidence_gathering_node(state: VerifaiState) -> dict:
     """Evidence gathering node with automatic DB logging."""
     print("\n" + "="*60)
     print("[WORKFLOW] Starting Evidence Gathering (Historian + Literature in parallel)")
+    u_in = state.get("current_uncertainty", 0.50)
+    print(f"  ⤷ Uncertainty IN  : {u_in:.2%}")
     print("="*60)
     logger = _get_or_create_logger(state)
     result = evidence_gathering_node(state)
-    print(f"[WORKFLOW] Evidence gathering completed")
-
-    # --- Historian ---
+    # === MUC: Compute IG for Historian ===
+    u_current = u_in
     hist = result.get('historian_output')
     if hist:
-        print(f"  ✓ Historian:")
-        print(f"    Confidence Adjustment : {hist.confidence_adjustment:+.3f}")
-        print(f"    Supporting Facts      : {len(hist.supporting_facts)}")
-        print(f"    Contradicting Facts   : {len(hist.contradicting_facts)}")
-        print(f"    Clinical Summary      : {hist.clinical_summary[:120]}")
+        supporting_count = len(hist.supporting_facts)
+        contradicting_count = len(hist.contradicting_facts)
+        hist_unc = compute_historian_uncertainty(supporting_count, contradicting_count)
+        hist_align = compute_historian_alignment(
+            supporting_count, contradicting_count, hist.confidence_adjustment
+        )
+        hist_ig = compute_ig(
+            agent_name="historian",
+            agent_uncertainty=hist_unc,
+            alignment_score=hist_align,
+            system_uncertainty=u_current,
+        )
+        u_current = hist_ig.system_uncertainty_after
+        print(f"  Historian:")
+        print(f"    Supporting/Contradicting : {supporting_count}/{contradicting_count}")
+        print(f"    Confidence Adjustment    : {hist.confidence_adjustment:+.3f}")
+        print(f"    MUC: unc={hist_unc:.3f}, align={hist_align:.3f}, IG={hist_ig.information_gain:.4f}")
         if hist.supporting_facts:
-            print(f"    Top Support:")
-            for f in hist.supporting_facts[:3]:
-                print(f"      [{f.fhir_resource_type}] {f.description[:100]}")
+            for f in hist.supporting_facts[:2]:
+                print(f"      + [{f.fhir_resource_type}] {f.description[:100]}")
         if hist.contradicting_facts:
-            print(f"    Top Contradictions:")
             for f in hist.contradicting_facts[:2]:
-                print(f"      [{f.fhir_resource_type}] {f.description[:100]}")
+                print(f"      - [{f.fhir_resource_type}] {f.description[:100]}")
     else:
-        print(f"  ✗ Historian: No output (patient_id may be missing or no FHIR data)")
+        print(f"  Historian: No output (patient_id may be missing or no FHIR data)")
 
-    # --- Literature ---
+    # === MUC: Compute IG for Literature ===
     lit = result.get('literature_output')
     if lit:
         if isinstance(lit, str):
-            print(f"  ✓ Literature: {lit[:200]}")
+            # Literature is a synthesis string — parse keywords for evidence strength
+            lit_lower = lit.lower()
+            if any(kw in lit_lower for kw in ["strongly support", "high evidence", "robust evidence"]):
+                ev_strength = "high"
+            elif any(kw in lit_lower for kw in ["contradicts", "does not support", "inconsistent"]):
+                ev_strength = "low"
+            elif any(kw in lit_lower for kw in ["limited evidence", "weak evidence", "insufficient"]):
+                ev_strength = "low"
+            else:
+                ev_strength = "medium"
+            has_contra = any(kw in lit_lower for kw in ["contradicts", "argues against", "inconsistent"])
+            lit_unc = compute_literature_uncertainty(
+                citation_count=lit_lower.count("doi:") + lit_lower.count("pmid") + 1,
+                evidence_strength=ev_strength,
+            )
+            lit_align = compute_literature_alignment(
+                evidence_strength=ev_strength,
+                has_contradicting_differentials=has_contra,
+                synthesis_text=lit,
+            )
         else:
-            print(f"  ✓ Literature: Evidence strength={getattr(lit,'overall_evidence_strength','?')}, Citations={len(getattr(lit,'citations',[]))}")
+            # Structured literature output
+            citations = getattr(lit, 'citations', [])
+            ev_strength = getattr(lit, 'overall_evidence_strength', 'medium')
+            high_count = sum(1 for c in citations if getattr(c, 'strength', '') == 'high')
+            high_ratio = high_count / len(citations) if citations else 0.0
+            lit_unc = compute_literature_uncertainty(
+                citation_count=len(citations),
+                evidence_strength=ev_strength,
+                high_strength_ratio=high_ratio,
+            )
+            lit_align = compute_literature_alignment(
+                evidence_strength=ev_strength,
+            )
+
+        lit_ig = compute_ig(
+            agent_name="literature",
+            agent_uncertainty=lit_unc,
+            alignment_score=lit_align,
+            system_uncertainty=u_current,
+        )
+        u_current = lit_ig.system_uncertainty_after
+        print(f"  Literature: [{ev_strength.upper()}]")
+        print(f"    MUC: unc={lit_unc:.3f}, align={lit_align:.3f}, IG={lit_ig.information_gain:.4f}")
     else:
-        print(f"  ✗ Literature: No output")
+        print(f"  Literature: No output")
+
+    # Store updated uncertainty in result
+    result["current_uncertainty"] = u_current
+    print(f"  Uncertainty OUT : {u_current:.2%}  (Δ = {u_current - u_in:+.3f})")
 
     try:
         logger.log_evidence_gathering(state, result)
@@ -165,12 +270,21 @@ def logged_debate_node(state: VerifaiState) -> dict:
     """Debate node with automatic DB logging."""
     print("\n" + "="*60)
     print("[WORKFLOW] Starting Debate Node")
+    u_in = state.get("current_uncertainty", 0.50)
+    print(f"  ⤷ Uncertainty IN  : {u_in:.2%}")
     print("="*60)
     logger = _get_or_create_logger(state)
     result = debate_node(state)
     debate_output = result.get('debate_output')
+    u_out = result.get("current_uncertainty", u_in)
+    delta = u_out - u_in
     if debate_output:
-        print(f"[WORKFLOW] Debate completed - Rounds: {len(debate_output.rounds)}, Consensus: {debate_output.final_consensus}")
+        print(f"\n[WORKFLOW] Debate completed")
+        print(f"  Rounds       : {len(debate_output.rounds)}")
+        print(f"  Consensus    : {'YES' if debate_output.final_consensus else 'NO'}")
+        print(f"  Confidence   : {debate_output.consensus_confidence:.2%}")
+        print(f"  Total Δ      : {debate_output.total_confidence_adjustment:+.3f}")
+    print(f"  ⤷ Uncertainty OUT : {u_out:.2%}  (Δ = {delta:+.3f})")
     try:
         logger.log_debate(state, result)
     except Exception as e:
@@ -182,6 +296,8 @@ def logged_validator_node(state: VerifaiState) -> dict:
     """Validator node — runs after debate in BOTH scenarios (consensus + max-rounds exceeded)."""
     print("\n" + "="*60)
     print("[WORKFLOW] Starting Validator Node")
+    u_in = state.get("current_uncertainty", 0.50)
+    print(f"  ⤷ Uncertainty IN  : {u_in:.2%}")
     debate = state.get("debate_output")
     if debate and debate.final_consensus:
         print("[WORKFLOW] Validator mode: CONSENSUS VALIDATION")
@@ -189,42 +305,40 @@ def logged_validator_node(state: VerifaiState) -> dict:
         print("[WORKFLOW] Validator mode: ESCALATION (max rounds exceeded)")
     print("="*60)
     result = validator_node(state)
+    # === MUC: Compute Validator IG ===
     vout = result.get("validator_output") or {}
-    recommendation = vout.get("recommendation", "FINALIZE")
-    print(f"[WORKFLOW] Validator completed")
-    print(f"  Recommendation : {recommendation}")
-    print(f"  Confidence     : {vout.get('confidence_level', '?')}")
-    print(f"  Explanation    : {vout.get('explanation', '')[:120]}")
-
-    # Retrieval tool results
-    retrieval = vout.get('retrieval', {})
-    if retrieval and not retrieval.get('error'):
-        print(f"  Retrieval      : {len(retrieval.get('retrieved_sentences',[]))} similar cases"
-              f" | consensus={retrieval.get('consensus_diagnosis','?')}"
-              f" | agrees_with_chexbert={retrieval.get('agrees_with_chexbert','?')}")
-    else:
-        print(f"  Retrieval      : {'Not available' if not retrieval else retrieval.get('error','?')}")
-
-    # Entity matching
     entity = vout.get('entity_matching', {})
-    print(f"  Entity F1      : {entity.get('entity_f1', 'N/A')} | verdict={entity.get('verdict','?')}")
-
-    # Rules engine
     rules = vout.get('rules', {})
-    print(f"  Rules          : flags={rules.get('flag_count',0)}, warnings={rules.get('warn_count',0)}"
-          f", critical={rules.get('has_critical_flag',False)}")
-    if rules.get('triggered_rule_names'):
-        print(f"  Triggered Rules: {rules['triggered_rule_names']}")
+    retrieval = vout.get('retrieval', {})
+    recommendation = vout.get('recommendation', 'FINALIZE')
 
-    # Agent agreement summary
-    agent_sum = vout.get('agent_summary', {})
-    if agent_sum:
-        critic_sum = agent_sum.get('critic', {})
-        hist_sum = agent_sum.get('historian', {})
-        lit_sum = agent_sum.get('literature', {})
-        print(f"  Agent Summary  : critic_safety={critic_sum.get('safety_score','?')}"
-              f" | hist_support={hist_sum.get('supporting_facts_count',0)}"
-              f" | lit_strength={lit_sum.get('evidence_strength','?')}")
+    entity_f1 = entity.get('entity_f1')
+    if isinstance(entity_f1, str):
+        try:
+            entity_f1 = float(entity_f1)
+        except (ValueError, TypeError):
+            entity_f1 = None
+
+    val_unc = compute_validator_uncertainty(
+        entity_f1=entity_f1 if entity_f1 is not None else 0.5,
+        has_critical_flags=rules.get('has_critical_flag', False),
+        flag_count=rules.get('flag_count', 0),
+        retrieval_agrees=retrieval.get('agrees_with_chexbert', True) if retrieval and not retrieval.get('error') else True,
+    )
+    val_align = compute_validator_alignment(recommendation)
+    val_ig = compute_ig(
+        agent_name="validator",
+        agent_uncertainty=val_unc,
+        alignment_score=val_align,
+        system_uncertainty=u_in,
+    )
+
+    print(f"  Recommendation : {recommendation}")
+    print(f"  MUC: unc={val_unc:.3f}, align={val_align:.3f}, IG={val_ig.information_gain:.4f}")
+    print(f"  Uncertainty OUT : {val_ig.system_uncertainty_after:.2%}  (Δ = {val_ig.system_uncertainty_after - u_in:+.3f})")
+
+    # Store updated uncertainty
+    result["current_uncertainty"] = val_ig.system_uncertainty_after
     return result
 
 
@@ -232,12 +346,19 @@ def logged_finalize_node(state: VerifaiState) -> dict:
     """Finalize node with automatic DB logging + session completion."""
     print("\n" + "="*60)
     print("[WORKFLOW] Starting Finalize Node")
+    u_in = state.get("current_uncertainty", 0.50)
+    print(f"  ⤷ Uncertainty IN  : {u_in:.2%}")
     print("="*60)
     logger = _get_or_create_logger(state)
     result = finalize_node(state)
     final_dx = result.get("final_diagnosis")
     if final_dx:
-        print(f"[WORKFLOW] Finalize completed - Diagnosis: {final_dx.diagnosis[:50] if final_dx.diagnosis else 'None'}... Confidence: {final_dx.calibrated_confidence:.2%}")
+        final_u = max(0.01, 1.0 - final_dx.calibrated_confidence)
+        print(f"[WORKFLOW] Finalize completed")
+        print(f"  Diagnosis    : {final_dx.diagnosis[:80] if final_dx.diagnosis else 'None'}")
+        print(f"  Confidence   : {final_dx.calibrated_confidence:.2%}")
+        print(f"  Deferred     : {final_dx.deferred}")
+        print(f"  ⤷ Final Uncertainty : {final_u:.2%}")
     try:
         logger.log_finalize(state, result)
         if final_dx:
@@ -321,7 +442,7 @@ def finalize_node(state: VerifaiState) -> dict:
     debate = state.get("debate_output")
     hist = state.get("historian_output")
     lit = state.get("literature_output")
-    kle_uncertainty = state.get("radiologist_kle_uncertainty", 0.5)
+    uncertainty = state.get("current_uncertainty", 0.5)
     validator_out = state.get("validator_output") or {}
     recommendation = validator_out.get("recommendation", "FINALIZE")
     validator_explanation = validator_out.get("explanation", "")
@@ -361,7 +482,7 @@ def finalize_node(state: VerifaiState) -> dict:
         base_explanation = f"Consensus reached through {len(debate.rounds)}-round debate. {debate.debate_summary}"
     else:
         diagnosis_text = rad.impression[:200]
-        confidence = max(0.1, 1.0 - kle_uncertainty)
+        confidence = max(0.1, 1.0 - uncertainty)
         if hist:
             confidence += hist.confidence_adjustment
         if lit and hasattr(lit, "overall_evidence_strength") and lit.overall_evidence_strength in ["medium", "high"]:
@@ -369,7 +490,7 @@ def finalize_node(state: VerifaiState) -> dict:
         if debate:
             confidence += debate.total_confidence_adjustment
         confidence = max(0.0, min(0.99, confidence))
-        base_explanation = f"No debate consensus after {len(debate.rounds) if debate else 0} rounds. Based on radiologist impression with KLE={kle_uncertainty:.3f}."
+        base_explanation = f"No debate consensus after {len(debate.rounds) if debate else 0} rounds. Based on radiologist impression with uncertainty={uncertainty:.3f}."
 
     # ── FINALIZE_LOW_CONFIDENCE: cap at 0.65 ─────────────────────────────────
     if recommendation == "FINALIZE_LOW_CONFIDENCE":
@@ -454,7 +575,7 @@ def build_workflow() -> StateGraph:
 
     # === Nodes ===
     graph.add_node("radiologist", logged_radiologist_node)
-    graph.add_node("chexbert", chexbert_node)
+    graph.add_node("chexbert", logged_chexbert_node)
     graph.add_node("evidence_gathering", logged_evidence_gathering_node)
     graph.add_node("critic", logged_critic_node)
     graph.add_node("critic_feedback", logged_critic_node)  # Same logic, different entry point

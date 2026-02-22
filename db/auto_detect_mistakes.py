@@ -148,7 +148,7 @@ def detect_mistake(
     """
     rad_output = workflow_state.get("radiologist_output")
     critic_output = workflow_state.get("critic_output")
-    kle_uncertainty = workflow_state.get("radiologist_kle_uncertainty", 0.5)
+    kle_uncertainty = workflow_state.get("current_uncertainty", workflow_state.get("radiologist_kle_uncertainty", 0.5))
     chexbert_output = workflow_state.get("chexbert_output")
     historian_output = workflow_state.get("historian_output")
     debate_output = workflow_state.get("debate_output")

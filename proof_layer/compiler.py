@@ -34,7 +34,7 @@ def compile_evidence_packet(state: VerifaiState) -> dict[str, Any]:
         packet["visual_evidence"] = {
             "findings": rad.findings,          # Plain text FINDINGS section
             "impression": rad.impression,      # Plain text IMPRESSION section
-            "kle_uncertainty": state.get("radiologist_kle_uncertainty"),
+            "uncertainty": state.get("current_uncertainty"),
         }
     
     # Clinical context
@@ -63,7 +63,7 @@ def compile_evidence_packet(state: VerifaiState) -> dict[str, Any]:
             "safety_score": critic.safety_score,
             "concern_flags": critic.concern_flags,
             "recommended_hedging": critic.recommended_hedging,
-            "kle_uncertainty": state.get("radiologist_kle_uncertainty"),
+            "uncertainty": state.get("current_uncertainty"),
         }
     
     return packet

@@ -2,13 +2,13 @@
 Radiologist Agent Node
 
 LangGraph node that processes chest X-ray images.
-Uses KLE-based epistemic uncertainty estimation via multiple text samples.
+Uses MUC token entropy for single-pass uncertainty estimation.
 """
 
 from graph.state import VerifaiState, RadiologistOutput
 from .model import generate_findings
 from app.config import settings
-from uncertainty.kle import compute_semantic_uncertainty
+from uncertainty.muc import compute_token_entropy_from_text
 
 def radiologist_node(state: VerifaiState) -> dict:
     """
@@ -17,17 +17,11 @@ def radiologist_node(state: VerifaiState) -> dict:
     Uses MedGemma-4B for reasoning.
     Produces plain-text FINDINGS and IMPRESSION sections.
     
-    Computes KLE-based semantic uncertainty by generating multiple independent
-    diagnosis samples and measuring their semantic dispersion using kernel language entropy.
-    Uncertainty is computed externally and stored separately from the report text.
+    Computes uncertainty via MUC token entropy — a single-pass method that
+    analyzes hedging vs confidence language in the generated text.
+    When logits are available (future), switches to proper token-level entropy.
     """
     image_path = state["image_path"]
-    # === MULTI-SAMPLE GENERATION FOR KLE ===
-    # Generate N independent samples for uncertainty estimation
-    n_samples = getattr(settings, 'KLE_NUM_SAMPLES', 5)
-    
-    samples = []
-    primary_report = None
     
     # Verify file exists
     import os
@@ -40,59 +34,42 @@ def radiologist_node(state: VerifaiState) -> dict:
     # Determine view (heuristic or default)
     view = state["view"]
     
-    for i in range(n_samples):
-        print("Generating sample", i+1)
-        # Call model with image path and view
-        raw_output = generate_findings(image_path, view=view)
-        
-        if i == 0:
-            # Use first sample as the primary report
-            primary_report = raw_output
-        
-        # Collect impression text for KLE uncertainty calculation
-        impression_text = raw_output.get("impression", "")
-        if impression_text:
-            samples.append(impression_text)
+    # === SINGLE-PASS GENERATION (MUC replaces multi-sample KLE) ===
+    raw_output = generate_findings(image_path, view=view)
     
-    # Create RadiologistOutput from primary sample
-    # Run disease analysis (classification + heatmaps)
+    # Create RadiologistOutput
     from .model import analyze_disease
     disease_analysis = analyze_disease(image_path)
     
     output = RadiologistOutput(
-        findings=primary_report.get("findings", ""),
-        impression=primary_report.get("impression", ""),
+        findings=raw_output.get("findings", ""),
+        impression=raw_output.get("impression", ""),
         disease_probabilities=disease_analysis.get("probabilities", {}),
         heatmap_paths=disease_analysis.get("heatmap_paths", {})
     )
     
-    # === KLE SEMANTIC UNCERTAINTY ESTIMATION ===
-    kle_uncertainty = None
-    
-    if len(samples) >= 2:
-        kle_uncertainty = compute_semantic_uncertainty(samples)
+    # === MUC TOKEN ENTROPY (single-pass uncertainty) ===
+    # Combine findings + impression for uncertainty analysis
+    full_text = f"{output.findings} {output.impression}"
+    token_uncertainty = compute_token_entropy_from_text(full_text)
     
     # Build trace entry
     findings_preview = output.findings[:100] + "..." if len(output.findings) > 100 else output.findings
     impression_preview = output.impression[:100] + "..." if len(output.impression) > 100 else output.impression
     
     trace_entries = [
-        f"RADIOLOGIST: Generated report from {n_samples} samples",
+        f"RADIOLOGIST: Generated report (single-pass MUC)",
         f"RADIOLOGIST: Findings preview: {findings_preview}",
-        f"RADIOLOGIST: Impression preview: {impression_preview}"
+        f"RADIOLOGIST: Impression preview: {impression_preview}",
+        f"RADIOLOGIST MUC: Token entropy uncertainty={token_uncertainty:.3f}"
     ]
-    
-    if kle_uncertainty is not None:
-        trace_entries.append(f"RADIOLOGIST KLE: Epistemic uncertainty={kle_uncertainty:.3f} (from {n_samples} samples)")
     
     result = {
         "radiologist_output": output,
-        "trace": trace_entries
+        "trace": trace_entries,
+        "current_uncertainty": token_uncertainty,
+        # Legacy key kept for DB logger compatibility (column name unchanged)
+        "radiologist_kle_uncertainty": token_uncertainty,
     }
     
-    # Store KLE score in state for downstream use (Critic, logging)
-    if kle_uncertainty is not None:
-        result["radiologist_kle_uncertainty"] = kle_uncertainty
-    
     return result
-

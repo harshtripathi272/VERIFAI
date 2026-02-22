@@ -41,7 +41,7 @@ state["radiologist_output"] = type("R", (), {
     "impression": "Findings consistent with pneumonia."
 })()
 
-state["radiologist_kle_uncertainty"] = 0.12
+state["current_uncertainty"] = 0.12
 
 # Simulate CheXbert
 state["chexbert_output"] = type("C", (), {

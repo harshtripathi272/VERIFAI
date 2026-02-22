@@ -115,11 +115,12 @@ class AgentLogger:
         """
         Log radiologist agent output.
         
-        Stores: plain-text findings, impression, and KLE uncertainty score.
+        Stores: plain-text findings, impression, and MUC uncertainty score.
         """
         t0 = time.time()
         rad_output = result.get("radiologist_output")
-        kle_uncertainty = result.get("radiologist_kle_uncertainty")
+        # Read from MUC state key; fallback to legacy key for compatibility
+        kle_uncertainty = result.get("current_uncertainty", result.get("radiologist_kle_uncertainty"))
         trace = result.get("trace", [])
 
         with get_db() as conn:
@@ -172,7 +173,7 @@ class AgentLogger:
 
             try:
                 if critic_output:
-                    kle_input = state.get("radiologist_kle_uncertainty")
+                    kle_input = state.get("current_uncertainty", state.get("radiologist_kle_uncertainty"))
                     conn.execute(
                         """INSERT INTO critic_logs 
                            (session_id, invocation_id, is_overconfident,
