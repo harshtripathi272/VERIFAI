@@ -7,6 +7,7 @@ from app.shared_model_loader import load_shared_medgemma, get_inference_lock
 from utils.inference import extract_json
 from langchain_core.output_parsers import PydanticOutputParser
 from graph.state import HistorianOutput, HistorianFact
+from .fhir_client import fhir_client
 
 # Thread-safe singleton pattern - now using shared loader
 processor = None
@@ -96,9 +97,10 @@ def reason_over_fhir(hypothesis: str, evidence: dict, current_fhir: dict = None)
     current_fhir_summary = "No current FHIR report provided."
     if current_fhir:
         try:
+            current_fhir_summary = fhir_client.filter_current_fhir(current_fhir, hypothesis, top_k=5)
+        except Exception as e:
+            print(f"[Historian] Filtering failed, falling back to JSON dump: {e}")
             current_fhir_summary = json.dumps(current_fhir, indent=2)[:2000]
-        except Exception:
-            current_fhir_summary = str(current_fhir)[:2000]
 
     prompt = f"""
 You are a senior clinical historian assisting a radiologist.
