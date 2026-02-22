@@ -1,17 +1,12 @@
 """
 VERIFAI Graph State
-
 Shared TypedDict and Pydantic models for inter-agent communication.
 """
 
 from typing import TypedDict, Optional, Annotated, Any, List
 from pydantic import BaseModel, Field
 
-
-
 # REDUCER FUNCTIONS
-
-
 def append_trace(left: list[str], right: list[str]) -> list[str]:
     """Reducer to accumulate audit trail entries."""
     if not isinstance(left, list):
@@ -23,8 +18,6 @@ def append_trace(left: list[str], right: list[str]) -> list[str]:
 
 
 # DOMAIN MODELS (Pydantic for validation)
-
-
 class VisualFinding(BaseModel):
     """A single visual finding from radiologist."""
     location: str = Field(..., description="Anatomical location (e.g., RLL, LUL, Mediastinum)")
@@ -84,7 +77,6 @@ class CriticOutput(BaseModel):
         )
     )
 
-
 from typing import Literal
 
 class HistorianFact(BaseModel):
@@ -129,11 +121,7 @@ class FinalDiagnosis(BaseModel):
     recommended_next_steps: List[str] = Field(default_factory=list)
     explanation: str = ""
 
-
-
 # DEBATE MODELS
-
-
 class DebateArgument(BaseModel):
     """A single argument in the debate."""
     agent: str  # "critic", "historian", "literature"
@@ -166,8 +154,6 @@ class DebateOutput(BaseModel):
 
 
 # DOCTOR FEEDBACK MODELS
-
-
 class DoctorFeedback(BaseModel):
     """Doctor feedback for diagnosis review and reprocessing.
     
@@ -181,14 +167,7 @@ class DoctorFeedback(BaseModel):
     correct_diagnosis: Optional[str] = Field(None, description="What doctor believes is correct")
     rejection_reasons: List[str] = Field(default_factory=list, description="Categories of issues found")
 
-
-
-
-
-
 # LANGGRAPH STATE
-
-
 class VerifaiState(TypedDict):
     """
     Shared state passed between all nodes in the VERIFAI graph.

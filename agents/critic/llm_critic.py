@@ -69,11 +69,17 @@ You are NOT diagnosing. Your only job is to detect:
 3. Logical gaps between findings and impression
 4. Unjustified certainty given the provided uncertainty score
 
+CRITICAL INSTRUCTION FOR HUMAN-IN-THE-LOOP:
+If you see a "DOCTOR FEEDBACK" block, it means the human radiologist REJECTED the previous reasoning.
+You MUST prioritize this feedback. Use it to aggressively challenge the evidence-gathering agents (Historian/Literature). 
+If the human provided contradictory context, you must output a high semantic_risk_score and point out the failures of the previous AI consensus in the missing_differentials or justification_gap fields.
+
 You will receive:
 - FINDINGS (truncated)
 - IMPRESSION (full)
 - Epistemic uncertainty score (0=certain, 1=very uncertain)
-- A brief context summary (contradicting facts count, study count) — for awareness only
+- A brief context summary (contradicting facts count, study count)
+- DOCTOR FEEDBACK (if available from previous rejection)
 
 Return STRICT JSON only — no markdown fences, no commentary:
 
@@ -140,7 +146,8 @@ class MedGemmaCritic:
         impression: str,
         uncertainty: float,
         historian_output=None,
-        literature_output=None
+        literature_output=None,
+        doctor_feedback=None
     ) -> str:
         """Build a minimal user prompt — only the essentials the model needs.
         
@@ -181,6 +188,14 @@ class MedGemmaCritic:
 
         if context_notes:
             parts.append("Context: " + "; ".join(context_notes) + ".")
+
+        if doctor_feedback:
+            parts.append("\n=========================================")
+            parts.append("🛑 DOCTOR FEEDBACK (PREVIOUSLY REJECTED) 🛑")
+            parts.append(f"Notes: {doctor_feedback.doctor_notes}")
+            if doctor_feedback.correct_diagnosis:
+                parts.append(f"Doctor's Correct Diagnosis: {doctor_feedback.correct_diagnosis}")
+            parts.append("=========================================\n")
 
         return "\n".join(parts)
 
@@ -228,7 +243,8 @@ class MedGemmaCritic:
         impression: str, 
         uncertainty: float,
         historian_output=None,
-        literature_output=None
+        literature_output=None,
+        doctor_feedback=None
     ) -> LLMCriticOutput:
         """Return a deterministic mock for testing without GPU."""
         # Simulate: if uncertainty is high and impression sounds certain, flag it
@@ -244,7 +260,10 @@ class MedGemmaCritic:
             if len(contradicting) > 1:
                 context_issues.append("Clinical history contradictions not addressed")
         
-        if uncertainty > 0.5 and is_assertive:
+        if doctor_feedback:
+             context_issues.append(f"Doctor rejected previous iteration: {doctor_feedback.doctor_notes}")
+        
+        if uncertainty > 0.5 and is_assertive or doctor_feedback:
             return LLMCriticOutput(
                 overconfidence_reason="Report uses definitive language despite high epistemic uncertainty.",
                 missing_differentials=["Atypical infection", "Malignancy"],
@@ -268,7 +287,8 @@ class MedGemmaCritic:
         impression: str,
         kle_uncertainty: float,
         historian_output=None,  # NEW: Clinical history context
-        literature_output=None   # NEW: Literature evidence
+        literature_output=None,  # NEW: Literature evidence
+        doctor_feedback=None     # NEW: Human-in-the-loop context
     ) -> Optional[LLMCriticOutput]:
         """
         Run semantic critique on a radiology report with enriched context.
@@ -290,7 +310,7 @@ class MedGemmaCritic:
         if settings.MOCK_MODELS:
             result = self._mock_inference(
                 findings, impression, kle_uncertainty,
-                historian_output, literature_output
+                historian_output, literature_output, doctor_feedback
             )
             logger.info(
                 "CRITIC-LLM (mock): Semantic risk=%.2f, Missing differentials=%d",
@@ -307,7 +327,7 @@ class MedGemmaCritic:
         try:
             user_prompt = self._build_user_prompt(
                 findings, impression, kle_uncertainty,
-                historian_output, literature_output
+                historian_output, literature_output, doctor_feedback
             )
             raw_output = self._run_inference(user_prompt)
             print(raw_output)
