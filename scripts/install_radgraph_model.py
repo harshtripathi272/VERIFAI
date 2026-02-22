@@ -14,11 +14,7 @@ import sys
 import tarfile
 import argparse
 from pathlib import Path
-
-TARGET_DIR = (
-    Path(os.path.expanduser("~"))
-    / "AppData" / "Local" / "radgraph" / "radgraph" / "Cache" / "0.1.18" / "modern-radgraph-xl"
-)
+TARGET_DIR = Path("~/elephant_detection/med/dataset/med/modern-radgraph-xl").expanduser()
 
 # Look for the file in the project root first, then Downloads
 ROOT_PATH = Path(__file__).parent.parent / "modern-radgraph-xl.tar.gz"

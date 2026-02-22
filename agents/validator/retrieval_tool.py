@@ -176,6 +176,36 @@ class CXRRetrieverTool:
             # Default to PA for frontal views
             return "PA"
     
+    def _infer_label_from_sentence(self, sentence: str) -> str:
+        """
+        Infer a CheXbert-style label from the sentence text when metadata
+        does not contain an explicit primary_label field.
+        
+        Uses simple keyword matching — good enough for consensus heuristics.
+        """
+        s = sentence.lower()
+        if any(k in s for k in ["pleural effusion", "effusion"]):
+            return "Pleural Effusion"
+        if any(k in s for k in ["pneumothorax"]):
+            return "Pneumothorax"
+        if any(k in s for k in ["pneumonia", "consolidat", "airspace opacity", "opacification"]):
+            return "Pneumonia"
+        if any(k in s for k in ["edema", "pulmonary vascular congestion", "interstitial"]):
+            return "Edema"
+        if any(k in s for k in ["atelectasis", "discoid", "linear opacity", "subsegmental"]):
+            return "Atelectasis"
+        if any(k in s for k in ["cardiomegaly", "cardiac silhouette is enlarged", "enlarged heart"]):
+            return "Cardiomegaly"
+        if any(k in s for k in ["fracture"]):
+            return "Fracture"
+        if any(k in s for k in ["mass", "nodule", "lesion"]):
+            return "Lung Lesion"
+        if any(k in s for k in ["support device", "line", "catheter", "tube", "pacemaker", "icd"]):
+            return "Support Devices"
+        if any(k in s for k in ["no acute", "unremarkable", "clear lung", "no evidence", "normal", "no abnormal"]):
+            return "No Finding"
+        return "Unknown"
+
     def execute(self, state: "VerifaiState") -> Dict[str, Any]:
         """
         Search for similar historical cases and return their report sentences.
@@ -244,16 +274,20 @@ class CXRRetrieverTool:
         k = min(10, self.index.ntotal)  # Don't request more than available
         distances, indices = self.index.search(query_embedding.reshape(1, -1), k=k)
         
-        # Collect results
+        # Collect results — handle either schema (with or without primary_label)
         results = []
         for dist, idx in zip(distances[0], indices[0]):
             if idx < 0 or idx >= len(self.metadata):
                 continue
+            entry = self.metadata[idx]
+            sentence = entry["sentence"]
+            # Use stored label if present; otherwise infer from sentence text
+            label = entry.get("primary_label") or entry.get("label") or self._infer_label_from_sentence(sentence)
             results.append({
-                "sentence": self.metadata[idx]["sentence"],
-                "label": self.metadata[idx].get("primary_label", "Unknown"),
+                "sentence": sentence,
+                "label": label,
                 "similarity": float(dist),
-                "study_id": self.metadata[idx].get("study_id", "unknown")
+                "study_id": entry.get("study_id", "unknown")
             })
         
         # Find consensus diagnosis from top 5
@@ -285,3 +319,4 @@ class CXRRetrieverTool:
             "top_similarity": results[0]["similarity"] if results else 0.0,
             "query_views_used": [img["view_position"] for img in query_images]
         }
+

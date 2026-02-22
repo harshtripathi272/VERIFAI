@@ -52,7 +52,6 @@ class RadGraphEntityTool:
         """
         Args:
             model_type: RadGraph model variant to use (default: modern-radgraph-xl)
-                       Model auto-downloads from HuggingFace on first use
         """
         self.radgraph = None
         self.model_type = model_type
@@ -62,12 +61,34 @@ class RadGraphEntityTool:
             return
         
         try:
-            print(f"[RadGraph] Loading {model_type} (auto-downloading from HuggingFace if needed)...")
-            self.radgraph = RadGraph(model_type=model_type)  # type: ignore
+            from app.config import settings
+            import torch
+            cache_dir = getattr(settings, "RADGRAPH_CACHE_DIR", None)
+
+            # Verify the model directory actually exists at that cache path
+            if cache_dir:
+                from pathlib import Path as _Path
+                model_dir = _Path(cache_dir) / model_type
+                if not model_dir.exists():
+                    print(f"[RadGraph] WARNING: Expected model dir not found at {model_dir}")
+                    print(f"[RadGraph]   Run: python scripts/install_radgraph_model.py --tar <path>")
+                    cache_dir = None   # let radgraph use its own CACHE_DIR / download
+
+            cuda = 0 if torch.cuda.is_available() else -1
+
+            kwargs = dict(model_type=model_type, cuda=cuda)
+            if cache_dir:
+                kwargs["model_cache_dir"] = cache_dir
+                print(f"[RadGraph] Loading {model_type} from local cache: {cache_dir}")
+            else:
+                print(f"[RadGraph] Loading {model_type} (auto-downloading from HuggingFace if needed)...")
+
+            self.radgraph = RadGraph(**kwargs)  # type: ignore
             print(f"[RadGraph] Model loaded successfully")
         except Exception as e:
             print(f"[RadGraph] Failed to load model: {e}")
             self.radgraph = None
+
     
     def extract_entities_and_relations(
         self, 

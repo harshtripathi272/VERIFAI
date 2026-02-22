@@ -32,13 +32,16 @@ _rules_engine = None
 _tools_initialized = False
 
 
-def initialize_validator_tools(vision_encoder, image_processor):
+def initialize_validator_tools(vision_encoder=None, image_processor=None):
     """
     Initialize all validator tools. Call this once when building the graph.
     
     Args:
-        vision_encoder: MedSigLIP vision encoder model
-        image_processor: MedSigLIP image processor
+        vision_encoder: MedSigLIP / SiglipVisionModel instance, OR None to auto-load.
+        image_processor: Matching image processor, OR None to auto-load.
+    
+    When both are None the function will automatically load google/medsiglip-448
+    (public HuggingFace model, ~600MB) so the retrieval tool can embed query images.
     """
     global _retriever, _radgraph, _rules_engine, _tools_initialized
     
@@ -48,17 +51,46 @@ def initialize_validator_tools(vision_encoder, image_processor):
     
     print("[Validator] Initializing validator tools...")
     
+    # ── Auto-load MedSigLIP when caller passes None ──────────────────────────
+    if vision_encoder is None or image_processor is None:
+        try:
+            import torch
+            from transformers import SiglipVisionModel, AutoImageProcessor
+            from app.config import settings
+
+            model_name = getattr(settings, 'MEDSIGLIP_BASE_MODEL', 'google/medsiglip-448')
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            print(f"[Validator] Auto-loading MedSigLIP vision encoder from {model_name} on {device}...")
+
+            vision_encoder = SiglipVisionModel.from_pretrained(
+                model_name,
+                torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+            ).to(device)
+            vision_encoder.eval()
+
+            image_processor = AutoImageProcessor.from_pretrained(model_name)
+            print("[Validator] ✓ MedSigLIP auto-loaded")
+        except Exception as e:
+            print(f"[Validator] ✗ Failed to auto-load MedSigLIP: {e}")
+            vision_encoder = None
+            image_processor = None
+    # ─────────────────────────────────────────────────────────────────────────
+
     # Initialize retrieval tool
-    try:
-        _retriever = CXRRetrieverTool(
-            index_path="retrieval_data/retrieval_index.faiss",
-            metadata_path="retrieval_data/retrieval_metadata.json",
-            vision_encoder=vision_encoder,
-            image_processor=image_processor
-        )
-        print("[Validator] ✓ Retrieval tool initialized")
-    except Exception as e:
-        print(f"[Validator] ✗ Failed to initialize retrieval tool: {e}")
+    if vision_encoder is not None and image_processor is not None:
+        try:
+            _retriever = CXRRetrieverTool(
+                index_path="retrieval_data/retrieval_index.faiss",
+                metadata_path="retrieval_data/retrieval_metadata.json",
+                vision_encoder=vision_encoder,
+                image_processor=image_processor
+            )
+            print("[Validator] ✓ Retrieval tool initialized")
+        except Exception as e:
+            print(f"[Validator] ✗ Failed to initialize retrieval tool: {e}")
+            _retriever = None
+    else:
+        print("[Validator] ✗ Retrieval tool skipped — no vision encoder available")
         _retriever = None
     
     # Initialize RadGraph tool

@@ -5,7 +5,9 @@ Environment variables, model paths, and thresholds.
 """
 
 import os
+from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -30,8 +32,8 @@ class Settings(BaseSettings):
     #MEDGEMMA_27B_MODEL: str = "google/medgemma-27b-it"
     
     # === MedGemma 4B Fine-Tuned Paths ===
-    MEDGEMMA_LORA_ROOT: str = os.getenv("MEDGEMMA_LORA_ROOT", "../dataset/med/fine_tuned_model/v1/checkpoint-700/")
-    MEDGEMMA_LORA_ADAPTERS: str = os.getenv("MEDGEMMA_LORA_ADAPTERS", "../dataset/med/fine_tuned_model/v1/checkpoint-700/")
+    MEDGEMMA_LORA_ROOT: str = os.getenv("MEDGEMMA_LORA_ROOT", "../dataset/med/fine_tuned_model/v1/")
+    MEDGEMMA_LORA_ADAPTERS: str = os.getenv("MEDGEMMA_LORA_ADAPTERS", "../dataset/med/fine_tuned_model/v1/")
     
     # === Text Embedding Model (for KLE Uncertainty) ===
     # Switch to any sentence-transformers compatible model
@@ -94,6 +96,15 @@ class Settings(BaseSettings):
     SUPABASE_URL: str | None = os.getenv("SUPABASE_URL")
     SUPABASE_KEY: str | None = os.getenv("SUPABASE_KEY")  # anon key for general logging
     SUPABASE_SERVICE_KEY: str | None = os.getenv("SUPABASE_SERVICE_KEY")  # service-role key (required for past-mistakes)
+
+    # === RadGraph ===
+    # Parent directory that contains the modern-radgraph-xl/ subfolder.
+    # Set this to wherever install_radgraph_model.py extracted the model.
+    # e.g.  RADGRAPH_CACHE_DIR=~/elephant_detection/med/dataset/med
+    RADGRAPH_CACHE_DIR: str = os.getenv(
+        "RADGRAPH_CACHE_DIR",
+        str(Path.home() / "elephant_detection" / "med" / "dataset" / "med")
+    )
     
     # === DOCTOR FEEDBACK LOOP ===
     # Enable doctor feedback-driven reprocessing
