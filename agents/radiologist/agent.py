@@ -21,7 +21,15 @@ def radiologist_node(state: VerifaiState) -> dict:
     diagnosis samples and measuring their semantic dispersion using kernel language entropy.
     Uncertainty is computed externally and stored separately from the report text.
     """
-    image_path = state["image_path"]
+    image_paths = state["image_path"]
+    views = state.get("view", "AP")
+    
+    # Normalize to lists for processing
+    if isinstance(image_paths, str):
+        image_paths = [image_paths]
+    if isinstance(views, str):
+        views = [views] * len(image_paths)
+
     # === MULTI-SAMPLE GENERATION FOR KLE ===
     # Generate N independent samples for uncertainty estimation
     n_samples = getattr(settings, 'KLE_NUM_SAMPLES', 5)
@@ -29,21 +37,22 @@ def radiologist_node(state: VerifaiState) -> dict:
     samples = []
     primary_report = None
     
-    # Verify file exists
+    # Verify files exist
     import os
-    if not os.path.exists(image_path):
-        return {
-            "radiologist_output": None,
-            "trace": [f"RADIOLOGIST: Error - Image not found: {image_path}"]
-        }
-        
-    # Determine view (heuristic or default)
-    view = state["view"]
+    for path in image_paths:
+        if not os.path.exists(path):
+            return {
+                "radiologist_output": None,
+                "trace": [f"RADIOLOGIST: Error - Image not found: {path}"]
+            }
     
     for i in range(n_samples):
         print("Generating sample", i+1)
         # Call model with image path and view
-        raw_output = generate_findings(image_path, view=view)
+        raw_output = generate_findings(
+            image_paths=image_paths,
+            views=views
+        )
         
         if i == 0:
             # Use first sample as the primary report
@@ -55,9 +64,9 @@ def radiologist_node(state: VerifaiState) -> dict:
             samples.append(impression_text)
     
     # Create RadiologistOutput from primary sample
-    # Run disease analysis (classification + heatmaps)
+    # Run disease analysis (classification + heatmaps) on the first image for now
     from .model import analyze_disease
-    disease_analysis = analyze_disease(image_path)
+    disease_analysis = analyze_disease(image_paths[0])
     
     output = RadiologistOutput(
         findings=primary_report.get("findings", ""),

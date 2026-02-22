@@ -26,6 +26,7 @@ from agents.radiologist.classifier import load_medsiglip_classifier
 from agents.radiologist.data import CHEXBERT_CLASSES
 from pytorch_grad_cam import GradCAMPlusPlus
 from pytorch_grad_cam.utils.image import show_cam_on_image
+from .prompts import INSTRUCTION
 
 # Global model cache
 _models_loaded = False
@@ -68,20 +69,17 @@ def _load_models():
         token=settings.HUGGINGFACE_TOKEN
     )
 
-    # 2. Apply LoRA Adapters
-    if settings.MEDGEMMA_LORA_ADAPTERS and "path/to" not in settings.MEDGEMMA_LORA_ADAPTERS:
-        print(f"[Radiologist] Loading LoRA adapters from {settings.MEDGEMMA_LORA_ADAPTERS}")
-        
-        # Add special tokens
-        special_tokens = ["<PA>", "<AP>", "<LATERAL>"]
-        if "<PA>" not in _processor.tokenizer.get_vocab():
-             num_added = _processor.tokenizer.add_special_tokens({"additional_special_tokens": special_tokens})
-             if num_added > 0:
-                _llm.resize_token_embeddings(len(_processor.tokenizer))
+    # 2. Apply LoRA Adapters (DISABLED for testing)
+    print("[Radiologist] LoRA adapters DISABLED per user request. Using base MedGemma model.")
+    
+    # Add special tokens even for base model if using same prompt format
+    special_tokens = ["<PA>", "<AP>", "<LATERAL>"]
+    if "<PA>" not in _processor.tokenizer.get_vocab():
+         num_added = _processor.tokenizer.add_special_tokens({"additional_special_tokens": special_tokens})
+         if num_added > 0:
+            _llm.resize_token_embeddings(len(_processor.tokenizer))
 
-        _llm = PeftModel.from_pretrained(_llm, settings.MEDGEMMA_LORA_ADAPTERS)
-    else:
-        print("[Radiologist] WARNING: LoRA adapter path not set or invalid. Using base model.")
+    # _llm = PeftModel.from_pretrained(_llm, settings.MEDGEMMA_LORA_ADAPTERS)
 
     _llm.eval()
     
@@ -102,9 +100,13 @@ def _load_models():
     _models_loaded = True
     print("[Radiologist] Models loaded.")
 
-def generate_findings(image_path: str, view: str = "AP") -> dict:
+def generate_findings(
+    image_paths,
+    views=None
+) -> dict:
     """
     Production-safe MedGemma JSON generation.
+    Supports 1 or multiple images.
     Stops exactly at closing brace.
     No retraining required.
     """
@@ -114,45 +116,58 @@ def generate_findings(image_path: str, view: str = "AP") -> dict:
 
     _load_models()
 
-    # Load image
-    try:
-        image = Image.open(image_path).convert("RGB")
-    except Exception as e:
-        return {"findings": f"Error loading image: {e}", "impression": "Error."}
+    # --------------------------------------------------
+    # Normalize inputs (backward compatible)
+    # --------------------------------------------------
+    if isinstance(image_paths, str):
+        image_paths = [image_paths]
 
-    # Build message exactly like training
-    view_token = f"<{view}>"
+    if views is None:
+        views = ["AP"] * len(image_paths)
 
-    try:
-        from .prompts import INSTRUCTION
-    except ImportError:
-        INSTRUCTION = """You are an expert radiologist. Analyze the provided chest X-ray and write a careful radiology report.
+    if len(views) != len(image_paths):
+        return {
+            "findings": "Mismatch between number of images and views.",
+            "impression": "Error."
+        }
 
-STRICT RULES:
-- Output ONLY valid JSON.
-- Must start with { and end with }.
+    # --------------------------------------------------
+    # Load images
+    # --------------------------------------------------
+    loaded_images = []
+    for path in image_paths:
+        try:
+            img = Image.open(path).convert("RGB")
+            loaded_images.append(img)
+        except Exception as e:
+            return {"findings": f"Error loading image: {e}", "impression": "Error."}
 
-Required JSON structure:
-{
-  "findings": "...",
-  "impression": "..."
-}
-"""
+    if not loaded_images:
+        return {"findings": "No valid images.", "impression": "Error."}
+
+    # --------------------------------------------------
+    # Build view string EXACTLY like training
+    # --------------------------------------------------
+    view_tokens = " | ".join([f"<{v}>" for v in views])
+
+    user_content = []
+
+    for img in loaded_images:
+        user_content.append({"type": "image", "image": img})
+
+    # Add text prompt
+    user_content.append({
+        "type": "text",
+        "text": f"\nViews: {view_tokens}\n\n{INSTRUCTION}"
+    })
 
     messages = [
         {
             "role": "user",
-            "content": [
-                {"type": "image", "image": image},
-                {
-                    "type": "text",
-                    "text": f"\nViews: {view_token}\n\n{INSTRUCTION}"
-                }
-            ],
+            "content": user_content,
         }
     ]
 
-    # Prepare inputs (official MedGemma pattern)
     dtype = next(_llm.parameters()).dtype
 
     inputs = _processor.apply_chat_template(
@@ -163,7 +178,6 @@ Required JSON structure:
         return_tensors="pt"
     ).to(_llm.device, dtype=dtype)
 
-    # 🔥 STOP when JSON closes
     class StopOnCloseBrace(StoppingCriteria):
         def __init__(self, tokenizer):
             self.tokenizer = tokenizer
@@ -178,7 +192,6 @@ Required JSON structure:
         StopOnCloseBrace(_processor.tokenizer)
     ])
 
-    # Generate
     try:
         with torch.inference_mode():
             output_ids = _llm.generate(
@@ -192,7 +205,6 @@ Required JSON structure:
     except Exception as e:
         return {"findings": f"Generation failed: {e}", "impression": "Error."}
 
-    # Decode only generated portion
     input_len = inputs["input_ids"].shape[-1]
     generated_ids = output_ids[:, input_len:]
 
@@ -201,11 +213,11 @@ Required JSON structure:
         skip_special_tokens=True
     ).strip()
 
-    # 🛡 Safety: truncate everything after last closing brace
+    # Safety: truncate after last closing brace
     if "}" in generated_text:
         generated_text = generated_text[:generated_text.rfind("}") + 1]
 
-    # Try parsing JSON
+
     try:
         data = extract_json(generated_text)
         return {
@@ -213,11 +225,24 @@ Required JSON structure:
             "impression": data.get("impression", "")
         }
     except Exception:
-        # If extraction fails, return raw text for debugging
         return {
             "findings": "Failed to parse JSON.",
             "impression": generated_text[:500]
         }
+
+class ClassifierWrapper(nn.Module):
+    """
+    Wrapper for MedGemmaVisionHead to ensure it returns only logits.
+    Required because pytorch-grad-cam expects a single tensor output.
+    """
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+        # Target layers must be accessible via this wrapper if using string targets,
+        # but we pass the layer object directly, so this is fine.
+        
+    def forward(self, x):
+        return self.model(x, return_dict=False)
 
 def reshape_transform(tensor):
     """
@@ -272,7 +297,7 @@ def analyze_disease(image_path: str) -> dict:
 
     # 2. Setup Grad-CAM
     cam = GradCAMPlusPlus(
-        model=_classifier_model, 
+        model=ClassifierWrapper(_classifier_model), 
         target_layers=[target_layer],
         reshape_transform=reshape_transform # VITAL for ViT
     )
