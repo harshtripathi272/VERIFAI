@@ -35,7 +35,7 @@ class FeedbackReprocessingInput(BaseModel):
     chexbert_output: Any = None
     historian_output: Any = None
     literature_output: Any = None
-    kle_uncertainty: float = 0.5
+    uncertainty: float = 0.5
 
 
 def capture_doctor_feedback(
@@ -115,7 +115,7 @@ def prepare_feedback_for_reprocessing(feedback_id: int) -> FeedbackReprocessingI
     chexbert_output = None
     historian_output = None
     literature_output = None
-    kle_uncertainty = 0.5
+    uncertainty = 0.5
     
     for invocation in context.get('invocations', []):
         agent = invocation['agent_name']
@@ -123,8 +123,8 @@ def prepare_feedback_for_reprocessing(feedback_id: int) -> FeedbackReprocessingI
         
         if agent == 'radiologist':
             radiologist_output = output
-            # Get KLE from state if available
-            kle_uncertainty = invocation.get('kle_uncertainty', 0.5)
+            # Get uncertainty score from DB log (stored under kle_uncertainty column)
+            uncertainty = invocation.get('kle_uncertainty', 0.5)
         elif agent == 'chexbert':
             chexbert_output = output
         elif agent == 'historian':
@@ -142,7 +142,7 @@ def prepare_feedback_for_reprocessing(feedback_id: int) -> FeedbackReprocessingI
         chexbert_output=chexbert_output,
         historian_output=historian_output,
         literature_output=literature_output,
-        kle_uncertainty=kle_uncertainty
+        uncertainty=uncertainty
     )
 
 
@@ -192,7 +192,7 @@ def create_feedback_enhanced_state(
         chexbert_output=feedback_input.chexbert_output,
         historian_output=feedback_input.historian_output,
         literature_output=feedback_input.literature_output,
-        radiologist_kle_uncertainty=feedback_input.kle_uncertainty,
+        radiologist_kle_uncertainty=feedback_input.uncertainty,
         
         # NEW: Doctor feedback context
         doctor_feedback=doctor_feedback,
@@ -200,7 +200,7 @@ def create_feedback_enhanced_state(
         
         # Initialize routing
         routing_decision=None,
-        current_uncertainty=feedback_input.kle_uncertainty,
+        current_uncertainty=feedback_input.uncertainty,
         trace=[
             f"FEEDBACK_REPROCESS: Starting reprocessing for feedback {feedback_input.feedback_id}",
             f"FEEDBACK_REPROCESS: Original session: {feedback_input.original_session_id}",

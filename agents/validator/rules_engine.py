@@ -43,9 +43,9 @@ RULES = [
     Rule(
         name="Overconfident Language",
         severity="FLAG",
-        message="High uncertainty (KLE>0.6) but definitive language used in impression",
+        message="High uncertainty (>0.6) but definitive language used in impression",
         condition=lambda s: (
-            s.get("radiologist_kle_uncertainty", 0) > 0.6 and
+            s.get("current_uncertainty", 0) > 0.6 and
             s.get("radiologist_output") is not None and
             any(w in s["radiologist_output"].impression.lower() 
                 for w in ["definitely", "consistent with", "confirmed", "no evidence of"])
@@ -118,10 +118,10 @@ RULES = [
     ),
     
     Rule(
-        name="High KLE Score",
+        name="High System Uncertainty",
         severity="WARN",
-        message="Very high epistemic uncertainty (KLE>0.7) suggests model disagreement",
-        condition=lambda s: s.get("radiologist_kle_uncertainty", 0) > 0.7
+        message="Very high epistemic uncertainty (>0.7) suggests model disagreement",
+        condition=lambda s: s.get("current_uncertainty", 0) > 0.7
     ),
     
     Rule(

@@ -2,7 +2,7 @@
 Case Embedding Generator
 
 Generates semantic embeddings for diagnostic cases to enable similarity search
-across past mistakes. Reuses the sentence-transformers infrastructure from KLE.
+across past mistakes. Reuses the sentence-transformers embedding infrastructure.
 
 Compact case summaries are created from diagnostic fields and embedded using
 the same model (all-MiniLM-L6-v2) to produce 384-dimensional vectors.
@@ -19,7 +19,7 @@ def generate_case_summary(
     original_diagnosis: str,
     corrected_diagnosis: str,
     error_type: str,
-    kle_uncertainty: Optional[float] = None,
+    uncertainty_score: Optional[float] = None,
     chexbert_labels: Optional[Dict[str, str]] = None,
     clinical_summary: Optional[str] = None,
     debate_summary: Optional[str] = None
@@ -40,7 +40,7 @@ def generate_case_summary(
         original_diagnosis: Incorrect diagnosis that was made
         corrected_diagnosis: Validated correct diagnosis
         error_type: Classification of error
-        kle_uncertainty: KLE score (optional)
+        uncertainty_score: MUC system uncertainty score (optional)
         chexbert_labels: CheXpert labels dict (optional)
         clinical_summary: Clinical context (optional, truncated to 200 chars)
         debate_summary: Debate/reasoning summary (optional, truncated to 200 chars)
@@ -71,8 +71,8 @@ def generate_case_summary(
         parts.append(f"Findings Pattern: {truncated}")
     
     # Uncertainty metrics
-    if kle_uncertainty is not None:
-        parts.append(f"KLE Uncertainty: {kle_uncertainty:.2f}")
+    if uncertainty_score is not None:
+        parts.append(f"Uncertainty Score: {uncertainty_score:.2f}")
     
     # CheXbert labels (only present/uncertain ones)
     if chexbert_labels:
@@ -87,7 +87,7 @@ def generate_case_embedding(case_summary: str) -> np.ndarray:
     """
     Generate a semantic embedding for a case summary.
     
-    Uses the same sentence-transformers model as KLE uncertainty calculation
+    Uses the same sentence-transformers model as the embedding utility
     (configured via settings.TEXT_EMBEDDING_MODEL).
     
     Args:
@@ -102,13 +102,13 @@ def generate_case_embedding(case_summary: str) -> np.ndarray:
         ...     original_diagnosis='Normal chest X-ray',
         ...     corrected_diagnosis='Community-Acquired Pneumonia (RLL)',
         ...     error_type='misdiagnosis',
-        ...     kle_uncertainty=0.35
+        ...     uncertainty_score=0.35
         ... )
         >>> embedding = generate_case_embedding(summary)
         >>> embedding.shape
         (384,)
     """
-    # Use KLE's embedding function (handles model loading, mock mode, etc.)
+    # Use the shared embedding function (handles model loading, mock mode, etc.)
     embeddings = _get_embeddings([case_summary])
     return embeddings[0]  # Return single embedding
 
@@ -118,7 +118,7 @@ def generate_case_embedding_from_fields(
     original_diagnosis: str,
     corrected_diagnosis: str,
     error_type: str,
-    kle_uncertainty: Optional[float] = None,
+    uncertainty_score: Optional[float] = None,
     chexbert_labels: Optional[Dict[str, str]] = None,
     clinical_summary: Optional[str] = None,
     debate_summary: Optional[str] = None
@@ -139,7 +139,7 @@ def generate_case_embedding_from_fields(
         original_diagnosis=original_diagnosis,
         corrected_diagnosis=corrected_diagnosis,
         error_type=error_type,
-        kle_uncertainty=kle_uncertainty,
+        uncertainty_score=uncertainty_score,
         chexbert_labels=chexbert_labels,
         clinical_summary=clinical_summary,
         debate_summary=debate_summary

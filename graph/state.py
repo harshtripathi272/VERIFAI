@@ -224,8 +224,11 @@ class VerifaiState(TypedDict):
     routing_decision: str
     steps_taken: int
     
-    # === KLE Uncertainty (for logging/analysis) ===
-    radiologist_kle_uncertainty: Optional[float]  # Early epistemic instability score
+    # === Uncertainty Tracking ===
+    # current_uncertainty is the authoritative MUC system value (updated at each node)
+    # radiologist_kle_uncertainty is a legacy alias kept solely for DB logger
+    # compatibility (column name in radiologist_logs / critic_logs is unchanged)
+    radiologist_kle_uncertainty: Optional[float]  # Legacy alias — DB compat only
     
     # === Final Result ===
     final_diagnosis: Optional[FinalDiagnosis]

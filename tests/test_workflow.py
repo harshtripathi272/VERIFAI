@@ -62,8 +62,8 @@ rad = result.get("radiologist_output")
 if rad:
     print(f"  Findings  : {rad.findings[:160]}")
     print(f"  Impression: {rad.impression[:160]}")
-    kle = result.get("radiologist_kle_uncertainty")
-    print(f"  KLE Uncert: {kle:.4f}" if kle is not None else "  KLE Uncert: N/A")
+    uncertainty = result.get("current_uncertainty")
+    print(f"  Uncertainty: {uncertainty:.4f}" if uncertainty is not None else "  Uncertainty: N/A")
 else:
     print("  ✗ No radiologist output")
 
