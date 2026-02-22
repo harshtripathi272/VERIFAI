@@ -21,8 +21,8 @@ def radiologist_node(state: VerifaiState) -> dict:
     analyzes hedging vs confidence language in the generated text.
     When logits are available (future), switches to proper token-level entropy.
     """
-    image_paths = state["image_path"]
-    views = state.get("view", "AP")
+    image_paths = state["image_paths"]
+    views = state.get("views", ["AP"])
     
     # Normalize to lists for processing
     if isinstance(image_paths, str):

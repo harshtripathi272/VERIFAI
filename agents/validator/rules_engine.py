@@ -50,27 +50,6 @@ RULES = [
     ),
     
     Rule(
-        name="Spatial Contradiction",
-        severity="FLAG",
-        message="Diagnosis region mismatch with Grad-CAM heatmap location",
-        condition=lambda s: (
-            s.get("chexbert_output") is not None and
-            s.get("radiologist_output") is not None and
-            hasattr(s["radiologist_output"], 'gradcam_anatomical_region') and
-            s["radiologist_output"].gradcam_anatomical_region is not None and
-            (
-                # Cardiomegaly but heatmap not in heart
-                (s["chexbert_output"].labels.get("Cardiomegaly") == "Positive" and
-                 s["radiologist_output"].gradcam_anatomical_region not in 
-                 ["cardiac_silhouette", "mediastinum"]) or
-                # Pneumonia but heatmap in heart
-                (s["chexbert_output"].labels.get("Pneumonia") == "Positive" and
-                 s["radiologist_output"].gradcam_anatomical_region == "cardiac_silhouette")
-            )
-        )
-    ),
-    
-    Rule(
         name="No External Evidence",
         severity="WARN",
         message="Neither FHIR history nor literature provides supporting evidence",
@@ -97,20 +76,6 @@ RULES = [
             any("wbc" in fact.description.lower() and "normal" in fact.description.lower()
                 for fact in s["historian_output"].supporting_facts 
                 if hasattr(fact, 'description'))
-        )
-    ),
-    
-    Rule(
-        name="Diffuse Heatmap Lobar Disease",
-        severity="WARN",
-        message="Lobar pneumonia typically shows focal activation — heatmap is diffuse",
-        condition=lambda s: (
-            s.get("chexbert_output") is not None and
-            s.get("radiologist_output") is not None and
-            s["chexbert_output"].labels.get("Pneumonia") == "Positive" and
-            hasattr(s["radiologist_output"], 'gradcam_activation_mass') and
-            s["radiologist_output"].gradcam_activation_mass is not None and
-            s["radiologist_output"].gradcam_activation_mass > 0.70
         )
     ),
     

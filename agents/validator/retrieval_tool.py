@@ -232,7 +232,7 @@ class CXRRetrieverTool:
                 - query_views_used: Which views were used for query
         """
         # Get all images for current study
-        study_images = self._load_study_images(state["image_path"])
+        study_images = self._load_study_images(state["image_paths"])
         
         if not study_images:
             return {
