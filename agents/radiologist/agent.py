@@ -21,25 +21,52 @@ def radiologist_node(state: VerifaiState) -> dict:
     analyzes hedging vs confidence language in the generated text.
     When logits are available (future), switches to proper token-level entropy.
     """
-    image_path = state["image_path"]
+    image_paths = state["image_path"]
+    views = state.get("view", "AP")
     
-    # Verify file exists
+    # Normalize to lists for processing
+    if isinstance(image_paths, str):
+        image_paths = [image_paths]
+    if isinstance(views, str):
+        views = [views] * len(image_paths)
+
+    # === MULTI-SAMPLE GENERATION FOR KLE ===
+    # Generate N independent samples for uncertainty estimation
+    n_samples = getattr(settings, 'KLE_NUM_SAMPLES', 5)
+    
+    samples = []
+    primary_report = None
+    
+    # Verify files exist
     import os
-    if not os.path.exists(image_path):
-        return {
-            "radiologist_output": None,
-            "trace": [f"RADIOLOGIST: Error - Image not found: {image_path}"]
-        }
+    for path in image_paths:
+        if not os.path.exists(path):
+            return {
+                "radiologist_output": None,
+                "trace": [f"RADIOLOGIST: Error - Image not found: {path}"]
+            }
+    
+    for i in range(n_samples):
+        print("Generating sample", i+1)
+        # Call model with image path and view
+        raw_output = generate_findings(
+            image_paths=image_paths,
+            views=views
+        )
         
-    # Determine view (heuristic or default)
-    view = state["view"]
+        if i == 0:
+            # Use first sample as the primary report
+            primary_report = raw_output
+        
+        # Collect impression text for KLE uncertainty calculation
+        impression_text = raw_output.get("impression", "")
+        if impression_text:
+            samples.append(impression_text)
     
-    # === SINGLE-PASS GENERATION (MUC replaces multi-sample KLE) ===
-    raw_output = generate_findings(image_path, view=view)
-    
-    # Create RadiologistOutput
+    # Create RadiologistOutput from primary sample
+    # Run disease analysis (classification + heatmaps) on the first image for now
     from .model import analyze_disease
-    disease_analysis = analyze_disease(image_path)
+    disease_analysis = analyze_disease(image_paths[0])
     
     output = RadiologistOutput(
         findings=raw_output.get("findings", ""),

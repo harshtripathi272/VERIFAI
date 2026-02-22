@@ -35,10 +35,7 @@ class Rule:
     condition: Callable[[Dict[str, Any]], bool]
 
 
-# ============================================================================
 # RULE DEFINITIONS
-# ============================================================================
-
 RULES = [
     Rule(
         name="Overconfident Language",

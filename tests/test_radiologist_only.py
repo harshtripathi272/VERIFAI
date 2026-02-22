@@ -12,12 +12,10 @@ def test_radiologist():
     print("=" * 70)
     
     # Test input
-    image_path = "./img1.jpg"
-    view = "AP"
+    image_path = ["../dataset/med/official_data_iccv_final/files/p10/p10010440/s56908581/0cadb1ed-80bd62aa-8d4563e1-2289ab1f-5be0b197.jpg","../dataset/med/official_data_iccv_final/files/p10/p10010440/s56908581/e0ceccb1-efe6919f-2b3c8cd2-c087f0b0-3d3adc66.jpg"]
+    view = ["AP","LATERAL"]
     
-    print(f"\nInput:")
-    print(f"  Image: {image_path}")
-    print(f"  View: {view}")
+    
     
     print("\n" + "-" * 70)
     print("Running Radiologist Agent...")
@@ -25,7 +23,7 @@ def test_radiologist():
     
     try:
         # Call the radiologist agent
-        result = generate_findings(image_path, view=view)
+        result = generate_findings(image_paths=image_path, views=view)
         
         print("\n" + "=" * 70)
         print("RADIOLOGIST OUTPUT")

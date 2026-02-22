@@ -43,7 +43,13 @@ class AgentLogger:
         init_db()
 
         self.session_id = session_id or str(uuid.uuid4())
-        self.image_path = image_path
+        
+        # Normalize image_path to string if it's a list
+        if isinstance(image_path, list):
+            self.image_path = ", ".join(image_path)
+        else:
+            self.image_path = image_path
+            
         self.patient_id = patient_id
         self.workflow_type = workflow_type
         self._agent_count = 0
@@ -52,13 +58,13 @@ class AgentLogger:
         with get_db() as db:
             session_data = prepare_insert_data({
                 'session_id': self.session_id,
-                'image_path': image_path,
+                'image_path': self.image_path,
                 'patient_id': patient_id,
                 'workflow_type': workflow_type,
                 'status': 'running',
                 'started_at': datetime.utcnow().isoformat()
             })
-            db.table('workflow_sessions').insert(session_data).execute()
+            db.table('workflow_sessions').insert(session_data).insert().execute()
 
     # =========================================================================
     # INTERNAL HELPERS
@@ -153,11 +159,16 @@ class AgentLogger:
                 if rad_output:
                     from app.config import settings
                     num_samples = getattr(settings, 'KLE_NUM_SAMPLES', 5)
+                    
+                    # Ensure image_path from state is also normalized
+                    image_path_state = state.get("image_path", "")
+                    if isinstance(image_path_state, list):
+                        image_path_state = ", ".join(image_path_state)
 
                     rad_log_data = prepare_insert_data({
                         'session_id': self.session_id,
                         'invocation_id': inv_id,
-                        'image_path': state.get("image_path", ""),
+                        'image_path': image_path_state,
                         'findings_text': rad_output.findings,
                         'impression_text': rad_output.impression,
                         'kle_uncertainty': kle_uncertainty,
