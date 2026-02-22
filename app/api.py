@@ -23,7 +23,7 @@ from db.logger import AgentLogger
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, status, BackgroundTasks
 from pydantic import BaseModel, Field
 
 from db.past_mistakes import (
@@ -34,6 +34,7 @@ from db.past_mistakes import (
     get_statistics
 )
 from uncertainty.case_embedding import generate_case_embedding_from_fields
+from langgraph.types import Command
 
 router = APIRouter()
 
@@ -56,6 +57,25 @@ class DiagnosisResponse(BaseModel):
     uncertainty: float
     trace: list[str]
     evidence_packet: dict[str, Any]
+
+
+class WorkflowStartResponse(BaseModel):
+    session_id: str
+    status: str
+    message: str
+
+
+class WorkflowStatusResponse(BaseModel):
+    session_id: str
+    status: str  # "running", "suspended", "completed", "failed", "not_found"
+    pending_review_data: dict[str, Any] | None = None
+    final_result: dict[str, Any] | None = None
+
+
+class HumanReviewRequest(BaseModel):
+    action: str  # "approve" or "reject"
+    feedback: str = ""
+    correct_diagnosis: str | None = None
 
 
 class ToolsResponse(BaseModel):
@@ -221,6 +241,158 @@ def _build_evidence_packet(state: VerifaiState) -> dict[str, Any]:
         }
     
     return packet
+
+
+# =============================================================================
+# WORKFLOW EXECUTION ENDPOINTS (ASYNC / BACKGROUND)
+# =============================================================================
+
+def _run_workflow_background(file_path: str, patient_id: str, session_id: str):
+    """Background task to execute the graph."""
+    try:
+        initial_state: VerifaiState = {
+            "_session_id": session_id,
+            "image_path": file_path,
+            "patient_id": patient_id,
+            "dicom_metadata": None,
+            "view": None,
+            "radiologist_output": None,
+            "critic_output": None,
+            "historian_output": None,
+            "literature_output": None,
+            "debate_output": None,
+            "current_uncertainty": 1.0,
+            "routing_decision": "",
+            "steps_taken": 0,
+            "radiologist_kle_uncertainty": None,
+            "final_diagnosis": None,
+            "trace": [f"[INIT] Processing async, Patient: {patient_id or 'N/A'}"],
+            "is_feedback_iteration": False
+        }
+        
+        # Thread config for memory checkpointer
+        config = {"configurable": {"thread_id": session_id}}
+        
+        # This will run until it hits the `interrupt()` in `human_review_node`,
+        # at which point it suspends and saves state to MemorySaver
+        graph_app.invoke(initial_state, config=config)
+        
+    except Exception as e:
+        print(f"[BACKGROUND] Workflow {session_id} failed: {e}")
+    # We deliberately DO NOT delete file_path here because the workflow is suspended.
+    # It must be deleted when the graph reaches END.
+
+
+@router.post("/workflows/start", response_model=WorkflowStartResponse)
+async def start_workflow(
+    background_tasks: BackgroundTasks,
+    image: UploadFile = File(...),
+    patient_id: Optional[str] = None
+):
+    """
+    Start the diagnostic workflow asynchronously.
+    Returns immediately with a session_id you can poll.
+    """
+    if not image.filename:
+        raise HTTPException(status_code=400, detail="No filename provided")
+    
+    os.makedirs("uploads", exist_ok=True)
+    file_path = f"uploads/{image.filename}"
+    
+    with open(file_path, "wb") as f:
+        shutil.copyfileobj(image.file, f)
+    
+    session_id = str(uuid.uuid4())
+    
+    # Launch in background
+    background_tasks.add_task(_run_workflow_background, file_path, patient_id, session_id)
+    
+    return WorkflowStartResponse(
+        session_id=session_id,
+        status="running",
+        message="Workflow initialized and running in background."
+    )
+
+
+@router.get("/workflows/{session_id}/status", response_model=WorkflowStatusResponse)
+async def get_workflow_status(session_id: str):
+    """
+    Poll the LangGraph Checkpointer to see the current status of the workflow thread.
+    """
+    config = {"configurable": {"thread_id": session_id}}
+    state_snapshot = graph_app.get_state(config)
+    
+    if not state_snapshot or not state_snapshot.created_at:
+        return WorkflowStatusResponse(session_id=session_id, status="not_found")
+    
+    # If the graph is not running and has next tasks, it's either suspended or interrupted
+    if not state_snapshot.next:
+        # No more nodes to run -> It is COMPLETED
+        final_state = state_snapshot.values
+        final_dx = final_state.get("final_diagnosis")
+        evidence = _build_evidence_packet(final_state)
+        
+        return WorkflowStatusResponse(
+            session_id=session_id,
+            status="completed",
+            final_result={
+                "diagnosis": getattr(final_dx, "diagnosis", None),
+                "confidence": getattr(final_dx, "calibrated_confidence", 0.0),
+                "evidence_packet": evidence,
+                "trace": final_state.get("trace", [])
+            }
+        )
+    
+    # It has next nodes. Check if it's currently interrupted by the `human_review_node`
+    # In LangGraph 0.2+, `tasks` contains the `interrupts`
+    interrupts = []
+    if hasattr(state_snapshot, "tasks") and state_snapshot.tasks:
+        for task in state_snapshot.tasks:
+            if hasattr(task, "interrupts") and task.interrupts:
+                 interrupts.extend(task.interrupts)
+                 
+    if interrupts:
+        # It's waiting on a human!
+        # The interrupt payload is inside `interrupt.value`
+        pending_data = interrupts[0].value
+        return WorkflowStatusResponse(
+            session_id=session_id,
+            status="suspended",
+            pending_review_data=pending_data
+        )
+        
+    # Otherwise, it's just actively running in the background thread
+    return WorkflowStatusResponse(session_id=session_id, status="running")
+
+
+@router.post("/workflows/{session_id}/resume")
+async def resume_workflow(session_id: str, req: HumanReviewRequest):
+    """
+    Provide human feedback to a suspended workflow.
+    """
+    config = {"configurable": {"thread_id": session_id}}
+    state_snapshot = graph_app.get_state(config)
+    
+    if not state_snapshot or not state_snapshot.next:
+        raise HTTPException(status_code=400, detail="Workflow not found or not suspended.")
+        
+    payload = {
+         "action": req.action,
+         "feedback": req.feedback,
+         "correct_diagnosis": req.correct_diagnosis
+    }
+    
+    try:
+        # Resume the workflow using the Command primitive
+        # This streams the remaining execution synchronously. In true production,
+        # you might invoke this in a background task again, but since it's just
+        # returning back to Critic or END, we can run it here
+        for _ in graph_app.stream(Command(resume=payload), config, stream_mode="values"):
+             pass
+             
+        return {"session_id": session_id, "status": "resumed", "action": req.action}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to resume graph: {e}")
 
 
 # =============================================================================
