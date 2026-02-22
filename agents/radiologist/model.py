@@ -1,15 +1,15 @@
 """
 Radiologist Model
 
-Real MedGemma-4B VLM Inference with LoRA and Hook-based Vision Injection.
+Real MedGemma-4B VLM Inference with LoRA using standard Hugging Face pipeline.
+MedSigLIP Classifier for Disease Detection & Grad-CAM++.
 """
 
 import torch
 import torch.nn as nn
-from typing import Any, Tuple
+from typing import Any, Tuple, Optional
 from PIL import Image
 from transformers import (
-    AutoTokenizer, 
     AutoModelForImageTextToText,
     AutoProcessor, 
     BitsAndBytesConfig,
@@ -18,406 +18,331 @@ from transformers import (
 from peft import PeftModel
 from app.config import settings
 import os
+import numpy as np
+import cv2
+
+# Classifier & Grad-CAM
+from agents.radiologist.classifier import load_medsiglip_classifier
+from agents.radiologist.data import CHEXBERT_CLASSES
+from pytorch_grad_cam import GradCAMPlusPlus
+from pytorch_grad_cam.utils.image import show_cam_on_image
 
 # Global model cache
 _models_loaded = False
-_vision_encoder = None
+_classifier_model = None 
 _llm = None
-_tokenizer = None
-_image_processor = None
-_projector = None
-
-# Hook state (persistent across inference calls)
-_vision_hook_handle = None
-_pending_vision_embeds = None
-_pending_image_token_id = None
-
-# Special tokens
-IMAGE_TOKEN = "<image>"
-VIEW_TOKENS = ["<AP>", "<PA>", "<LATERAL>"]
-
-
-
-class VisionProjector(nn.Module):
-    """
-    Projects mean-pooled SigLIP features to MedGemma hidden dim.
-
-    Architecture:  Linear → GELU → LayerNorm
-    Initialisation: Xavier-uniform with gain 0.1 (small scale to avoid
-    disturbing the quantised LLM embeddings at the start of training).
-    """
-
-    def __init__(self, vision_hidden_size: int, lm_hidden_size: int):
-        super().__init__()
-        self.linear = nn.Linear(vision_hidden_size, lm_hidden_size)
-        self.act = nn.GELU()
-        self.ln = nn.LayerNorm(lm_hidden_size)
-
-        nn.init.xavier_uniform_(self.linear.weight, gain=0.1)
-        nn.init.zeros_(self.linear.bias)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.ln(self.act(self.linear(x)))
-
-
-def get_image_embedding(image_path: str) -> torch.Tensor:
-    """
-    Return projected visual embedding (1 vector per image)
-    Shape: [1, hidden_size]
-    """
-    import time
-    
-    print("\n[DEBUG] === get_image_embedding START ===")
-    start_time = time.time()
-    
-    _load_models()
-    print(f"[DEBUG] Models loaded. Time: {time.time() - start_time:.2f}s")
-
-    # Load and preprocess image
-    t0 = time.time()
-    image = Image.open(image_path).convert("RGB")
-    print(f"[DEBUG] Image loaded: {image.size}. Time: {time.time() - t0:.2f}s")
-    
-    t0 = time.time()
-    inputs = _image_processor(images=image, return_tensors="pt")
-    print(f"[DEBUG] Image processed. Pixel values shape: {inputs.pixel_values.shape}. Time: {time.time() - t0:.2f}s")
-
-    # Device transfer
-    t0 = time.time()
-    print(f"[DEBUG] Vision encoder device: {_vision_encoder.device}, dtype: {_vision_encoder.dtype}")
-    pixel_values = inputs.pixel_values.to(
-        _vision_encoder.device,
-        dtype=_vision_encoder.dtype
-    )
-    print(f"[DEBUG] Pixel values transferred to {pixel_values.device}, dtype: {pixel_values.dtype}. Time: {time.time() - t0:.2f}s")
-
-    # Vision encoding
-    print("[DEBUG] Starting vision encoding...")
-    t0 = time.time()
-    with torch.no_grad():
-        print("[DEBUG] Calling vision_encoder.forward()...")
-        vision_outputs = _vision_encoder(pixel_values=pixel_values)
-        print(f"[DEBUG] Vision encoding complete. Time: {time.time() - t0:.2f}s")
-        
-        t0 = time.time()
-        patch_embeddings = vision_outputs.last_hidden_state  # [1, 576, 1152]
-        print(f"[DEBUG] Patch embeddings extracted: {patch_embeddings.shape}. Time: {time.time() - t0:.2f}s")
-
-        t0 = time.time()
-        pooled = patch_embeddings.mean(dim=1)  # [1, 1152]
-        print(f"[DEBUG] Mean pooling done: {pooled.shape}. Time: {time.time() - t0:.2f}s")
-        
-        # Ensure pooled embeddings are on the same device as projector
-        t0 = time.time()
-        print(f"[DEBUG] Projector device: {_projector.linear.weight.device}, dtype: {_projector.linear.weight.dtype}")
-        pooled = pooled.to(device=_projector.linear.weight.device, dtype=_projector.linear.weight.dtype)
-        print(f"[DEBUG] Pooled transferred. Time: {time.time() - t0:.2f}s")
-        
-        t0 = time.time()
-        projected = _projector(pooled)         # [1, hidden_size]
-        print(f"[DEBUG] Projection done: {projected.shape}. Time: {time.time() - t0:.2f}s")
-
-    total_time = time.time() - start_time
-    print(f"[DEBUG] === get_image_embedding END === Total time: {total_time:.2f}s\n")
-    return projected
-
-def _embedding_hook(module, inputs, output):
-    """
-    Persistent embedding hook that injects vision embeddings during forward passes.
-    
-    This hook is compatible with autoregressive generation:
-    - During prompt encoding: swaps <image> tokens with vision embeddings
-    - During decode steps: skips swapping (sequence too short)
-    
-    Matches the training implementation in qlora-medgemma.py.
-    """
-    global _pending_vision_embeds, _pending_image_token_id
-    
-    if _pending_vision_embeds is None or _pending_image_token_id is None:
-        return output
-    
-    # Get input_ids from the forward call
-    if isinstance(inputs, tuple) and len(inputs) > 0:
-        input_ids = inputs[0]
-    else:
-        return output
-    
-    # Ensure input_ids is 2D [batch, seq]
-    if input_ids.dim() == 1:
-        input_ids = input_ids.unsqueeze(0)
-    
-    # Find <image> token positions in CURRENT sequence
-    image_mask = input_ids == _pending_image_token_id
-    b_idx, s_idx = image_mask.nonzero(as_tuple=True)
-    
-    # Only swap if we found <image> tokens and output is long enough
-    if len(s_idx) > 0 and output.shape[1] > s_idx.max():
-        # Verify we have the right number of embeddings
-        if len(b_idx) != _pending_vision_embeds.shape[0]:
-            print(f"[HOOK WARNING] Token count mismatch: {len(b_idx)} tokens != {_pending_vision_embeds.shape[0]} embeddings")
-            return output
-        
-        new_output = output.clone()
-        new_output[b_idx, s_idx] = _pending_vision_embeds.to(
-            device=output.device,
-            dtype=output.dtype
-        )
-        return new_output
-    
-    return output
-
-
-def _ensure_vision_hook():
-    """
-    Ensure the persistent vision hook is registered on the embedding layer.
-    
-    Called during model loading to set up the hook once.
-    """
-    global _vision_hook_handle
-    
-    if _vision_hook_handle is not None:
-        return  # Already registered
-    
-    embed_layer = _llm.get_input_embeddings()
-    _vision_hook_handle = embed_layer.register_forward_hook(_embedding_hook)
-    print("[Radiologist] Vision injection hook registered")
-
-
-def set_pending_vision_embeds(projected, image_token_id):
-    """
-    Set vision embeddings and token ID for the hook to inject.
-    
-    Args:
-        projected: Projected vision embeddings [num_images, hidden_size]
-        image_token_id: Token ID for <image> token
-    """
-    global _pending_vision_embeds, _pending_image_token_id
-    _pending_vision_embeds = projected
-    _pending_image_token_id = image_token_id
-
-
-def clear_pending_vision_embeds():
-    """
-    Clear pending vision embeddings after generation completes.
-    """
-    global _pending_vision_embeds, _pending_image_token_id
-    _pending_vision_embeds = None
-    _pending_image_token_id = None
-
+_processor = None
+_siglip_processor = None
 
 def _load_models():
-    """Load MedSigLIP, MedGemma (4-bit + LoRA), and Projector."""
-    global _models_loaded, _vision_encoder, _llm, _tokenizer, _image_processor, _projector
+    """Load MedSigLIP Classifier and MedGemma VLM."""
+    global _models_loaded, _classifier_model, _llm, _processor, _siglip_processor
     
     if _models_loaded:
         return
 
-    print("[Radiologist] Loading real VLM models...")
-    
+    print("[Radiologist] Loading models...")
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
-    # 1. Vision Encoder (MedSigLIP)
-    print(f"\n[DEBUG] Loading MedSigLIP: {settings.MEDSIGLIP_MODEL}")
-    print(f"[DEBUG] Target device: {device}")
-    
-    _image_processor = AutoImageProcessor.from_pretrained(
-        settings.MEDSIGLIP_MODEL
-    )
-    print(f"[DEBUG] Image processor loaded")
-    
-    # Load vision model
-    from transformers import SiglipVisionModel
-    target_dtype = torch.float16 if device == "cuda" else torch.float32
-    print(f"[DEBUG] Loading vision model with dtype={target_dtype}")
-    
-    # Note: device_map doesn't always work reliably with SiglipVisionModel
-    # Load first, then explicitly move to device
-    _vision_encoder = SiglipVisionModel.from_pretrained(
-        settings.MEDSIGLIP_MODEL,
-        torch_dtype=target_dtype,
-    ).eval()
-    
-    # Explicitly move to target device (device_map is often ignored)
-    _vision_encoder = _vision_encoder.to(device)
-    
-    print(f"[DEBUG] Vision encoder loaded:")
-    print(f"[DEBUG]   - Actual device: {_vision_encoder.device}")
-    print(f"[DEBUG]   - Actual dtype: {_vision_encoder.dtype}")
-    print(f"[DEBUG]   - Eval mode: {not _vision_encoder.training}")
+    # 1. MedGemma VLM (Base)
+    print(f"[Radiologist] Loading MedGemma Base: {settings.MEDGEMMA_4B_MODEL}")
+    compute_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
 
-    # 2. LLM (MedGemma-4B with 4-bit LoRA)
-    print(f"Loading MedGemma: {settings.MEDGEMMA_4B_MODEL}")
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.float16,
+        bnb_4bit_compute_dtype=compute_dtype,
         bnb_4bit_use_double_quant=True
     )
     
-    _tokenizer = AutoTokenizer.from_pretrained(os.path.join(settings.MEDGEMMA_LORA_ROOT, "tokenizers"))
-    print(_tokenizer.convert_tokens_to_ids("<image>"))
-    print(_tokenizer.decode([_tokenizer.convert_tokens_to_ids("<image>")]))
-    _tokenizer.padding_side = "right"
-    
-    # Add special tokens
-    image_token_id = _tokenizer.convert_tokens_to_ids(IMAGE_TOKEN)
-    assert image_token_id != _tokenizer.unk_token_id
-
+    _processor = AutoProcessor.from_pretrained(
+        settings.MEDGEMMA_4B_MODEL,
+        token=settings.HUGGINGFACE_TOKEN
+    )
     
     _llm = AutoModelForImageTextToText.from_pretrained(
         settings.MEDGEMMA_4B_MODEL,
         quantization_config=bnb_config,
-        device_map="auto"
+        device_map="auto",
+        torch_dtype=compute_dtype,
+        token=settings.HUGGINGFACE_TOKEN
     )
-    
-    # Resize embeddings for new tokens
-    if _llm.get_input_embeddings().weight.shape[0] != len(_tokenizer):
-        _llm.resize_token_embeddings(len(_tokenizer))
-    _llm.config.image_token_id = image_token_id  # Set config
-    
-    # Load LoRA adapters
+
+    # 2. Apply LoRA Adapters
     if settings.MEDGEMMA_LORA_ADAPTERS and "path/to" not in settings.MEDGEMMA_LORA_ADAPTERS:
-        print(f"Loading LoRA adapters from {settings.MEDGEMMA_LORA_ADAPTERS}")
+        print(f"[Radiologist] Loading LoRA adapters from {settings.MEDGEMMA_LORA_ADAPTERS}")
+        
+        # Add special tokens
+        special_tokens = ["<PA>", "<AP>", "<LATERAL>"]
+        if "<PA>" not in _processor.tokenizer.get_vocab():
+             num_added = _processor.tokenizer.add_special_tokens({"additional_special_tokens": special_tokens})
+             if num_added > 0:
+                _llm.resize_token_embeddings(len(_processor.tokenizer))
+
         _llm = PeftModel.from_pretrained(_llm, settings.MEDGEMMA_LORA_ADAPTERS)
     else:
-        print("WARNING: LoRA adapter path not set. Using base model.")
+        print("[Radiologist] WARNING: LoRA adapter path not set or invalid. Using base model.")
 
-    # 3. Projector
-    print("Loading Projector...")
+    _llm.eval()
     
-    # Handle different config structures:
-    # - Gemma2: config.hidden_size
-    # - Gemma3: config.hidden_dim
-    # - Vision-language models: config.text_config.hidden_size
-    llm_hidden_size = None
+    # 3. Load Independent MedSigLIP Classifier
+    print(f"[Radiologist] Loading MedSigLIP Classifier...")
+    _siglip_processor = AutoImageProcessor.from_pretrained(settings.MEDSIGLIP_BASE_MODEL)
     
-    # Try direct attributes first
-    llm_hidden_size = getattr(_llm.config, 'hidden_size', None) or getattr(_llm.config, 'hidden_dim', None)
-    
-    # If not found, check text_config (for vision-language models)
-    if llm_hidden_size is None and hasattr(_llm.config, 'text_config'):
-        text_config = _llm.config.text_config
-        llm_hidden_size = getattr(text_config, 'hidden_size', None) or getattr(text_config, 'hidden_dim', None)
-    
-    if llm_hidden_size is None:
-        raise ValueError(f"Cannot find hidden size in model config or text_config")
-    
-    _projector = VisionProjector(
-        _vision_encoder.config.hidden_size,
-        llm_hidden_size
-    )
-    
-    if settings.MEDGEMMA_PROJECTOR_WEIGHTS and "path/to" not in settings.MEDGEMMA_PROJECTOR_WEIGHTS:
-        weights = torch.load(settings.MEDGEMMA_PROJECTOR_WEIGHTS, map_location=device)
-        _projector.load_state_dict(weights)
-    else:
-        print("WARNING: Projector weights not found. Using random init (will output garbage).")
-        
-    embed_device = _llm.get_input_embeddings().weight.device
-    _projector.to(device=embed_device, dtype=torch.float16)
-    _projector.eval()
+    try:
+        _classifier_model = load_medsiglip_classifier(
+            checkpoint_path=settings.MEDSIGLIP_WEIGHTS_PATH,
+            base_model_name=settings.MEDSIGLIP_BASE_MODEL,
+            device=device
+        )
+    except FileNotFoundError:
+        print(f"[Radiologist] ERROR: Classifier weights not found at {settings.MEDSIGLIP_WEIGHTS_PATH}")
+        _classifier_model = None
 
-    # Register persistent vision hook
-    _ensure_vision_hook()
-    
     _models_loaded = True
     print("[Radiologist] Models loaded.")
 
-
-
 def generate_findings(image_path: str, view: str = "AP") -> dict:
-    from .prompts import INSTRUCTION
+    """
+    Production-safe MedGemma JSON generation.
+    Stops exactly at closing brace.
+    No retraining required.
+    """
+
+    from transformers import StoppingCriteria, StoppingCriteriaList
+    from utils.inference import extract_json
 
     _load_models()
 
-    device = _llm.device
-
-    # 1️⃣ Get projected image embedding (1 vector)
-    projected = get_image_embedding(image_path)  # [1, hidden]
-
-    # 2️⃣ Construct prompt
-    view_token = f"<{view}>" if f"<{view}>" in VIEW_TOKENS else "<AP>"
-    prompt = f"{IMAGE_TOKEN} {view_token}\n\n<report>\n\n{INSTRUCTION}"
-
-    inputs = _tokenizer(prompt, return_tensors="pt").to(device)
-    input_ids = inputs.input_ids
-    attention_mask = inputs.attention_mask
-
-    image_token_id = _tokenizer.convert_tokens_to_ids(IMAGE_TOKEN)
-
-    # 3️⃣ Set pending vision embeddings for hook to inject
-    set_pending_vision_embeds(projected, image_token_id)
-
-    # 4️⃣ Generate (hook will inject vision embeddings automatically)
+    # Load image
     try:
-        with torch.no_grad():
-            # Validate projected embeddings before generation
-            if torch.isnan(projected).any() or torch.isinf(projected).any():
-                print("[WARNING] Projected embeddings contain NaN or Inf! Replacing with zeros.")
-                projected = torch.zeros_like(projected)
-                set_pending_vision_embeds(projected, image_token_id)  # Update with fixed embeddings
-            
-            output_ids = _llm.generate(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                max_new_tokens=100,  # Reduced for testing untrained model (restore to 300 after retraining)
-                do_sample=False,  # Use greedy decoding for stability
-                use_cache=True,
-                pad_token_id=_tokenizer.eos_token_id,
-                eos_token_id=_tokenizer.eos_token_id
+        image = Image.open(image_path).convert("RGB")
+    except Exception as e:
+        return {"findings": f"Error loading image: {e}", "impression": "Error."}
+
+    # Build message exactly like training
+    view_token = f"<{view}>"
+
+    try:
+        from .prompts import INSTRUCTION
+    except ImportError:
+        INSTRUCTION = """You are an expert radiologist. Analyze the provided chest X-ray and write a careful radiology report.
+
+STRICT RULES:
+- Output ONLY valid JSON.
+- Must start with { and end with }.
+
+Required JSON structure:
+{
+  "findings": "...",
+  "impression": "..."
+}
+"""
+
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": image},
+                {
+                    "type": "text",
+                    "text": f"\nViews: {view_token}\n\n{INSTRUCTION}"
+                }
+            ],
+        }
+    ]
+
+    # Prepare inputs (official MedGemma pattern)
+    dtype = next(_llm.parameters()).dtype
+
+    inputs = _processor.apply_chat_template(
+        messages,
+        add_generation_prompt=True,
+        tokenize=True,
+        return_dict=True,
+        return_tensors="pt"
+    ).to(_llm.device, dtype=dtype)
+
+    # 🔥 STOP when JSON closes
+    class StopOnCloseBrace(StoppingCriteria):
+        def __init__(self, tokenizer):
+            self.tokenizer = tokenizer
+
+        def __call__(self, input_ids, scores, **kwargs):
+            decoded = self.tokenizer.decode(
+                input_ids[0], skip_special_tokens=True
             )
-    except RuntimeError as e:
-        print(f"[ERROR] Generation failed: {e}")
-        print(f"[DEBUG] Input shape: {input_ids.shape}, projected shape: {projected.shape}")
-        raise
-    finally:
-        # Always clear pending embeddings after generation
-        clear_pending_vision_embeds()
+            return decoded.strip().endswith("}")
 
-    generated_text = _tokenizer.decode(output_ids[0], skip_special_tokens=True)
-    print("parsing the report")
+    stopping_criteria = StoppingCriteriaList([
+        StopOnCloseBrace(_processor.tokenizer)
+    ])
 
-    return _parse_report(generated_text)
+    # Generate
+    try:
+        with torch.inference_mode():
+            output_ids = _llm.generate(
+                **inputs,
+                max_new_tokens=300,
+                do_sample=False,
+                eos_token_id=_processor.tokenizer.eos_token_id,
+                pad_token_id=_processor.tokenizer.eos_token_id,
+                stopping_criteria=stopping_criteria,
+            )
+    except Exception as e:
+        return {"findings": f"Generation failed: {e}", "impression": "Error."}
 
+    # Decode only generated portion
+    input_len = inputs["input_ids"].shape[-1]
+    generated_ids = output_ids[:, input_len:]
 
+    generated_text = _processor.decode(
+        generated_ids[0],
+        skip_special_tokens=True
+    ).strip()
 
-def _parse_report(text: str) -> dict:
-    """Parse raw text into separate findings and impression sections."""
-    text = text.strip()
+    # 🛡 Safety: truncate everything after last closing brace
+    if "}" in generated_text:
+        generated_text = generated_text[:generated_text.rfind("}") + 1]
+
+    # Try parsing JSON
+    try:
+        data = extract_json(generated_text)
+        return {
+            "findings": data.get("findings", ""),
+            "impression": data.get("impression", "")
+        }
+    except Exception:
+        # If extraction fails, return raw text for debugging
+        return {
+            "findings": "Failed to parse JSON.",
+            "impression": generated_text[:500]
+        }
+
+def reshape_transform(tensor):
+    """
+    Reshape SigLIP output for Grad-CAM.
+    SigLIP output: [B, H*W, C] -> [B, C, H, W]
+    Assumes square grid because SigLIP/ViT.
+    """
+    # Tensor shape is [Batch, Tokens, Channels]
+    # No CLS token in SigLIP usually, but verify via config if using different backbone
+    # SigLIP 448x448 / 16 = 28x28 grid = 784 tokens
     
-    # Normalize headers
-    lower_text = text.lower()
+    b, t, c = tensor.shape
+    h = w = int(t ** 0.5) 
     
-    findings_start = lower_text.find("findings:")
-    impression_start = lower_text.find("impression:")
+    result = tensor.reshape(b, h, w, c)
+    result = result.transpose(2, 3).transpose(1, 2) # [B, C, H, W]
+    return result
+
+def analyze_disease(image_path: str) -> dict:
+    """Classify diseases and generate heatmaps using MedSigLIP and Grad-CAM++."""
+    _load_models()
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     
-    findings = ""
-    impression = ""
+    if _classifier_model is None:
+        return {"probabilities": {}, "heatmap_paths": {}}
+
+    try:
+        image = Image.open(image_path).convert("RGB")
+        # Use SigLIP processor
+        inputs = _siglip_processor(images=image, return_tensors="pt")
+        pixel_values = inputs.pixel_values.to(device)
+    except Exception as e:
+        print(f"[ERROR] Classifier image load failed: {e}")
+        return {"probabilities": {}, "heatmap_paths": {}}
+        
+    # 1. Classification
+    # Only need forward pass here, but GradCAM needs gradients enabled on inputs? 
+    # No, usually we do forward pass with grad enabled for CAM but we want probs first.
+    # We can do one pass.
+
+    inputs_param = pixel_values.requires_grad_(True) # Ensure input grad for safety if needed
     
-    if findings_start != -1 and impression_start != -1:
-        if findings_start < impression_start:
-            findings = text[findings_start + 9 : impression_start].strip()
-            impression = text[impression_start + 11:].strip()
-        else:
-            # Impression first? Unusual but possible
-            impression = text[impression_start + 11 : findings_start].strip()
-            findings = text[findings_start + 9:].strip()
-    elif findings_start != -1:
-        findings = text[findings_start + 9:].strip()
-    elif impression_start != -1:
-        impression = text[impression_start + 11:].strip()
-    else:
-        # No headers, treat whole text as findings? or verify user instruction execution failed
-        # Fallback: split by double newline
-        parts = text.split("\n\n")
-        if len(parts) >= 2:
-            findings = parts[0]
-            impression = "\n".join(parts[1:])
-        else:
-            findings = text
-            impression = "No distinct impression section generated."
-            
+    # We need to manually run forward to get logits because the wrapper does pooling internally
+    # _classifier_model is in eval() mode usually.
+    
+    # For GradCAM, we need to wrap the VISION MODEL encoded layers, not the whole wrapper necessarily.
+    # Target Layer: Last Encoder Layer of SigLIP
+    # Target Layer: Last Encoder Layer of SigLIP
+    # Structure: MedGemmaVisionHead -> SiglipVisionModel -> SiglipVisionTransformer (vision_model) -> SiglipEncoder (encoder) -> layers
+    target_layer = _classifier_model.vision_model.vision_model.encoder.layers[-1]
+
+
+    # 2. Setup Grad-CAM
+    cam = GradCAMPlusPlus(
+        model=_classifier_model, 
+        target_layers=[target_layer],
+        reshape_transform=reshape_transform # VITAL for ViT
+    )
+
+    # We need a custom forward func for the wrapper if standard CAM doesn't work out of box
+    # The wrapper's forward returns dict or logits. CAM expects logits.
+    # Wrapper returns dict by default if return_dict=True?
+    # Let's check wrapper. It calls self.vision_model and then classifier.
+    # We need to ensure wrapper returns Logits for CAM to work.
+    
+    # Let's compute Probs first
+    with torch.no_grad():
+        logits = _classifier_model(pixel_values, return_dict=False)
+        probs = torch.sigmoid(logits).squeeze(0)
+
+    prob_dict = {
+        cls: float(prob.item()) 
+        for cls, prob in zip(CHEXBERT_CLASSES, probs)
+    }
+    
+    # 3. Generate Heatmaps
+    heatmap_paths = {}
+    output_dir = "output/heatmaps"
+    os.makedirs(output_dir, exist_ok=True)
+    base_name = os.path.basename(image_path).rsplit(".", 1)[0]
+    
+    # Prepare image for visualization (float32, 0-1)
+    rgb_img = np.array(image.resize((448, 448))) / 255.0
+    
+    for i, (cls_name, prob) in enumerate(zip(CHEXBERT_CLASSES, probs)):
+        if prob > 0.5:
+            try:
+                from pytorch_grad_cam.utils.model_targets import ClassifierOutputTarget
+                targets = [ClassifierOutputTarget(i)]
+                
+                # We must ensure the model returns TENSOR logits
+                # Our wrapper needs to handle 'return_dict' check based on usage?
+                # Actually, standard usage of library might fail if model signature is non-standard.
+                # Monkey-patch or ensure wrapper handles it.
+                # Wrapper signature: forward(pixel_values, return_dict=True)
+                # CAM calls: model(input_tensor, ...)
+                # So it passes 'pixel_values' as positional arg 0? No, it passes it as 'input_tensor' usually?
+                # CAM usage: model(input_tensor)
+                # SigLIP arg is 'pixel_values'.
+                # We might need a wrapper lambda or modify call.
+                
+                # Correct way: Passing kwarg via enable_caching? No.
+                # Actually, pytorch-grad-cam handles this via forward hooks.
+                # But the forward call needs to match.
+                
+                # Let's rely on pixel_values being the first argument in our wrapper.
+                
+                grayscale_cam = cam(
+                   input_tensor=pixel_values, 
+                   targets=targets
+                ) # This enables grad context internally
+
+                grayscale_cam = grayscale_cam[0, :]
+                visualization = show_cam_on_image(rgb_img, grayscale_cam, use_rgb=True)
+                
+                # Save
+                save_path = os.path.join(output_dir, f"{base_name}_{cls_name.replace(' ', '_')}_heatmap.jpg")
+                img_pil = Image.fromarray(visualization)
+                img_pil.save(save_path)
+                heatmap_paths[cls_name] = save_path
+                
+            except Exception as e:
+                print(f"[ERROR] Heatmap generation failed for {cls_name}: {e}")
+                
     return {
-        "findings": findings or "No findings generated.",
-        "impression": impression or "No impression generated."
+        "probabilities": prob_dict,
+        "heatmap_paths": heatmap_paths
     }

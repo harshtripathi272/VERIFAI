@@ -9,32 +9,34 @@ START → Radiologist → CheXbert → Evidence Gathering (Hist + Lit parallel) 
 """
 
 import uuid
+from typing import Any
 from langgraph.graph import StateGraph, START, END
 from concurrent.futures import ThreadPoolExecutor, wait
 
 from graph.state import VerifaiState, FinalDiagnosis
 from app.config import settings
-from db.logger import AgentLogger
+from db.adapter import get_logger  # Unified database adapter (SQLite or Supabase)
+
 
 # Import agent nodes
 from agents.radiologist.agent import radiologist_node
-from agents.chexbert.agent import chexbert_node  # NEW: Structured pathology labeling
+from agents.chexbert.agent import chexbert_node
 from agents.critic.agent import critic_node
 from agents.historian.agent import historian_node
 from agents.literature.agent import literature_agent_node as literature_node
 from agents.debate.agent import debate_node
-from agents.chief.agent import chief_node
+from agents.validator import validator_node, initialize_validator_tools  # Validator: runs after debate always
+from agents.feedback.agent import feedback_node  # Doctor feedback processing
 
 
-# =============================================================================
 # THREAD-LOCAL LOGGER REGISTRY (one logger per session)
-# =============================================================================
+
 import threading
-_logger_registry: dict[str, AgentLogger] = {}
+_logger_registry: dict[str, Any] = {}
 _registry_lock = threading.Lock()
 
 
-def _get_or_create_logger(state: VerifaiState) -> AgentLogger:
+def _get_or_create_logger(state: VerifaiState):
     """Get or create a logger for the current workflow session."""
     session_id = state.get("_session_id")
     
@@ -43,7 +45,7 @@ def _get_or_create_logger(state: VerifaiState) -> AgentLogger:
     
     # Create new session
     session_id = session_id or str(uuid.uuid4())
-    logger = AgentLogger(
+    logger = get_logger(  # NEW: Uses adapter to select SQLite or Supabase
         session_id=session_id,
         image_path=state.get("image_path", ""),
         patient_id=state.get("patient_id"),
@@ -90,7 +92,23 @@ def logged_critic_node(state: VerifaiState) -> dict:
     result = critic_node(state)
     critic_output = result.get('critic_output')
     if critic_output:
-        print(f"[WORKFLOW] Critic completed - Risk Score: {critic_output.final_risk_score:.2f}")
+        print(f"[WORKFLOW] Critic completed")
+        print(f"  Safety Score   : {critic_output.safety_score:.3f}")
+        print(f"  Overconfident  : {critic_output.is_overconfident}")
+        print(f"  Historical Risk: {critic_output.historical_risk_level.upper()}")
+        print(f"  Similar Mistakes: {critic_output.similar_mistakes_count}")
+        if critic_output.concern_flags:
+            print(f"  Concern Flags  :")
+            for flag in critic_output.concern_flags[:5]:  # Top 5
+                print(f"    - {flag}")
+        if critic_output.recommended_hedging:
+            print(f"  Hedging        : {critic_output.recommended_hedging[:120]}")
+        if critic_output.historical_context:
+            print(f"  Historical Context ({len(critic_output.historical_context)} matched cases):")
+            for ctx in critic_output.historical_context[:3]:
+                print(f"    [{ctx.get('disease_type','?')}] err={ctx.get('error_type','?')} sim={ctx.get('similarity',0):.3f}")
+    else:
+        print("[WORKFLOW] Critic completed - No output")
     try:
         logger.log_critic(state, result)
     except Exception as e:
@@ -106,8 +124,36 @@ def logged_evidence_gathering_node(state: VerifaiState) -> dict:
     logger = _get_or_create_logger(state)
     result = evidence_gathering_node(state)
     print(f"[WORKFLOW] Evidence gathering completed")
-    print(f"  - Historian output: {'✓' if result.get('historian_output') else '✗'}")
-    print(f"  - Literature output: {'✓' if result.get('literature_output') else '✗'}")
+
+    # --- Historian ---
+    hist = result.get('historian_output')
+    if hist:
+        print(f"  ✓ Historian:")
+        print(f"    Confidence Adjustment : {hist.confidence_adjustment:+.3f}")
+        print(f"    Supporting Facts      : {len(hist.supporting_facts)}")
+        print(f"    Contradicting Facts   : {len(hist.contradicting_facts)}")
+        print(f"    Clinical Summary      : {hist.clinical_summary[:120]}")
+        if hist.supporting_facts:
+            print(f"    Top Support:")
+            for f in hist.supporting_facts[:3]:
+                print(f"      [{f.fhir_resource_type}] {f.description[:100]}")
+        if hist.contradicting_facts:
+            print(f"    Top Contradictions:")
+            for f in hist.contradicting_facts[:2]:
+                print(f"      [{f.fhir_resource_type}] {f.description[:100]}")
+    else:
+        print(f"  ✗ Historian: No output (patient_id may be missing or no FHIR data)")
+
+    # --- Literature ---
+    lit = result.get('literature_output')
+    if lit:
+        if isinstance(lit, str):
+            print(f"  ✓ Literature: {lit[:200]}")
+        else:
+            print(f"  ✓ Literature: Evidence strength={getattr(lit,'overall_evidence_strength','?')}, Citations={len(getattr(lit,'citations',[]))}")
+    else:
+        print(f"  ✗ Literature: No output")
+
     try:
         logger.log_evidence_gathering(state, result)
     except Exception as e:
@@ -132,23 +178,53 @@ def logged_debate_node(state: VerifaiState) -> dict:
     return result
 
 
-def logged_chief_node(state: VerifaiState) -> dict:
-    """Chief node with automatic DB logging + session completion."""
+def logged_validator_node(state: VerifaiState) -> dict:
+    """Validator node — runs after debate in BOTH scenarios (consensus + max-rounds exceeded)."""
     print("\n" + "="*60)
-    print("[WORKFLOW] Starting Chief Node")
+    print("[WORKFLOW] Starting Validator Node")
+    debate = state.get("debate_output")
+    if debate and debate.final_consensus:
+        print("[WORKFLOW] Validator mode: CONSENSUS VALIDATION")
+    else:
+        print("[WORKFLOW] Validator mode: ESCALATION (max rounds exceeded)")
     print("="*60)
-    logger = _get_or_create_logger(state)
-    result = chief_node(state)
-    final_dx = result.get("final_diagnosis")
-    if final_dx:
-        print(f"[WORKFLOW] Chief completed - Diagnosis: {final_dx.diagnosis[:50]}... Confidence: {final_dx.calibrated_confidence:.2%}")
-    try:
-        logger.log_chief(state, result)
-        if final_dx:
-            logger.complete_session(final_diagnosis=final_dx)
-        _cleanup_logger(logger.session_id)
-    except Exception as e:
-        print(f"[DB LOG] Failed to log chief: {e}")
+    result = validator_node(state)
+    vout = result.get("validator_output") or {}
+    recommendation = vout.get("recommendation", "FINALIZE")
+    print(f"[WORKFLOW] Validator completed")
+    print(f"  Recommendation : {recommendation}")
+    print(f"  Confidence     : {vout.get('confidence_level', '?')}")
+    print(f"  Explanation    : {vout.get('explanation', '')[:120]}")
+
+    # Retrieval tool results
+    retrieval = vout.get('retrieval', {})
+    if retrieval and not retrieval.get('error'):
+        print(f"  Retrieval      : {len(retrieval.get('retrieved_sentences',[]))} similar cases"
+              f" | consensus={retrieval.get('consensus_diagnosis','?')}"
+              f" | agrees_with_chexbert={retrieval.get('agrees_with_chexbert','?')}")
+    else:
+        print(f"  Retrieval      : {'Not available' if not retrieval else retrieval.get('error','?')}")
+
+    # Entity matching
+    entity = vout.get('entity_matching', {})
+    print(f"  Entity F1      : {entity.get('entity_f1', 'N/A')} | verdict={entity.get('verdict','?')}")
+
+    # Rules engine
+    rules = vout.get('rules', {})
+    print(f"  Rules          : flags={rules.get('flag_count',0)}, warnings={rules.get('warn_count',0)}"
+          f", critical={rules.get('has_critical_flag',False)}")
+    if rules.get('triggered_rule_names'):
+        print(f"  Triggered Rules: {rules['triggered_rule_names']}")
+
+    # Agent agreement summary
+    agent_sum = vout.get('agent_summary', {})
+    if agent_sum:
+        critic_sum = agent_sum.get('critic', {})
+        hist_sum = agent_sum.get('historian', {})
+        lit_sum = agent_sum.get('literature', {})
+        print(f"  Agent Summary  : critic_safety={critic_sum.get('safety_score','?')}"
+              f" | hist_support={hist_sum.get('supporting_facts_count',0)}"
+              f" | lit_strength={lit_sum.get('evidence_strength','?')}")
     return result
 
 
@@ -194,19 +270,21 @@ def evidence_gathering_node(state: VerifaiState) -> dict:
             literature_future = executor.submit(literature_node, state)
             
             # Wait for both to complete
+            # NOTE: 300s timeout because both agents share the GPU inference lock
+            # and must execute sequentially - literature can take 60-120s alone.
             try:
-                historian_result = historian_future.result(timeout=30)
+                historian_result = historian_future.result(timeout=300)
                 results["historian_output"] = historian_result.get("historian_output")
                 trace_entries.extend(historian_result.get("trace", []))
             except Exception as e:
-                trace_entries.append(f"EVIDENCE_GATHER: Historian failed - {str(e)[:50]}")
+                trace_entries.append(f"EVIDENCE_GATHER: Historian failed - {str(e)[:100]}")
             
             try:
-                literature_result = literature_future.result(timeout=30)
+                literature_result = literature_future.result(timeout=300)
                 results["literature_output"] = literature_result.get("literature_output")
                 trace_entries.extend(literature_result.get("trace", []))
             except Exception as e:
-                trace_entries.append(f"EVIDENCE_GATHER: Literature failed - {str(e)[:50]}")
+                trace_entries.append(f"EVIDENCE_GATHER: Literature failed - {str(e)[:100]}")
     else:
         # Sequential execution (fallback)
         try:
@@ -232,18 +310,22 @@ def evidence_gathering_node(state: VerifaiState) -> dict:
 
 def finalize_node(state: VerifaiState) -> dict:
     """
-    Finalize node: creates final diagnosis from debate consensus.
-    
-    Uses debate output for calibrated confidence.
-    RadiologistOutput is now plain text (findings + impression),
-    so we rely on debate consensus or impression text for diagnosis.
+    Finalize node: builds the FinalDiagnosis from debate + validator signals.
+
+    Validator recommendation effects:
+    - FINALIZE              → full confidence, no changes
+    - FINALIZE_LOW_CONFIDENCE → confidence capped at 0.65, note added
+    - FLAG_FOR_HUMAN        → deferred=True, deferral_reason set
     """
     rad = state.get("radiologist_output")
     debate = state.get("debate_output")
     hist = state.get("historian_output")
     lit = state.get("literature_output")
     kle_uncertainty = state.get("radiologist_kle_uncertainty", 0.5)
-    
+    validator_out = state.get("validator_output") or {}
+    recommendation = validator_out.get("recommendation", "FINALIZE")
+    validator_explanation = validator_out.get("explanation", "")
+
     if not rad or not rad.impression:
         return {
             "final_diagnosis": FinalDiagnosis(
@@ -254,46 +336,58 @@ def finalize_node(state: VerifaiState) -> dict:
             ),
             "trace": ["FINALIZE: No findings to finalize"]
         }
-    
-    # Use debate consensus if available
+
+    # ── FLAG_FOR_HUMAN: validator says evidence is weak / critical rule violated ──
+    if recommendation == "FLAG_FOR_HUMAN":
+        return {
+            "final_diagnosis": FinalDiagnosis(
+                diagnosis=debate.consensus_diagnosis if (debate and debate.final_consensus) else rad.impression[:200],
+                calibrated_confidence=0.0,
+                deferred=True,
+                deferral_reason=f"Validator flagged for human review: {validator_explanation}",
+                recommended_next_steps=[
+                    "Manual radiologist review required",
+                    "Check validator flags: " + str(validator_out.get("rules", {}).get("triggered_rule_names", [])),
+                    "Review retrieved historical cases in validator_output"
+                ]
+            ),
+            "trace": [f"FINALIZE: DEFERRED — Validator flagged for human review ({validator_explanation})"]
+        }
+
+    # ── Build base confidence ─────────────────────────────────────────────────
     if debate and debate.final_consensus:
-        final = FinalDiagnosis(
-            diagnosis=debate.consensus_diagnosis,
-            calibrated_confidence=debate.consensus_confidence,
-            deferred=False,
-            explanation=f"Consensus reached through {len(debate.rounds)}-round debate. {debate.debate_summary}",
-            recommended_next_steps=["Confirm with clinical correlation", "Consider follow-up imaging if symptoms persist"]
-        )
-        trace_entry = f"FINALIZE: {final.diagnosis} (confidence={final.calibrated_confidence:.2%}) via debate consensus"
+        diagnosis_text = debate.consensus_diagnosis
+        confidence = debate.consensus_confidence
+        base_explanation = f"Consensus reached through {len(debate.rounds)}-round debate. {debate.debate_summary}"
     else:
-        # Fallback: use impression text as diagnosis, KLE-based confidence
-        # Base confidence = 1.0 - KLE uncertainty (higher uncertainty = lower confidence)
+        diagnosis_text = rad.impression[:200]
         confidence = max(0.1, 1.0 - kle_uncertainty)
-        
         if hist:
             confidence += hist.confidence_adjustment
-        
-        if lit and hasattr(lit, 'overall_evidence_strength') and lit.overall_evidence_strength in ["medium", "high"]:
+        if lit and hasattr(lit, "overall_evidence_strength") and lit.overall_evidence_strength in ["medium", "high"]:
             confidence += 0.05 if lit.overall_evidence_strength == "medium" else 0.10
-        
-        # Apply debate adjustment if available
         if debate:
             confidence += debate.total_confidence_adjustment
-        
         confidence = max(0.0, min(0.99, confidence))
-        
-        # Use impression as the diagnosis text
-        impression_preview = rad.impression[:200] if len(rad.impression) > 200 else rad.impression
-        
-        final = FinalDiagnosis(
-            diagnosis=impression_preview,
-            calibrated_confidence=confidence,
-            deferred=False,
-            explanation=f"Based on radiologist findings with KLE uncertainty={kle_uncertainty:.3f}. {rad.findings[:100]}...",
-            recommended_next_steps=["Confirm with clinical correlation", "Consider follow-up imaging if symptoms persist"]
-        )
-        trace_entry = f"FINALIZE: {impression_preview[:80]}... (confidence={confidence:.2%})"
-    
+        base_explanation = f"No debate consensus after {len(debate.rounds) if debate else 0} rounds. Based on radiologist impression with KLE={kle_uncertainty:.3f}."
+
+    # ── FINALIZE_LOW_CONFIDENCE: cap at 0.65 ─────────────────────────────────
+    if recommendation == "FINALIZE_LOW_CONFIDENCE":
+        confidence = min(confidence, 0.65)
+        base_explanation += f" Validator confidence reduced: {validator_explanation}"
+
+    final = FinalDiagnosis(
+        diagnosis=diagnosis_text,
+        calibrated_confidence=confidence,
+        deferred=False,
+        explanation=base_explanation,
+        recommended_next_steps=[
+            "Confirm with clinical correlation",
+            "Consider follow-up imaging if symptoms persist"
+        ]
+    )
+
+    trace_entry = f"FINALIZE: {diagnosis_text[:80] if diagnosis_text else 'None'}... (confidence={confidence:.2%}, validator={recommendation})"
     return {
         "final_diagnosis": final,
         "trace": [trace_entry]
@@ -302,82 +396,112 @@ def finalize_node(state: VerifaiState) -> dict:
 
 def route_after_debate(state: VerifaiState) -> str:
     """
-    Route based on debate outcome.
-    
-    - Consensus reached → finalize
-    - No consensus → chief
+    After debate, ALWAYS go to validator — regardless of whether
+    consensus was reached or max rounds exceeded.
+
+    Scenario 1: Debate reached consensus → Validator validates it.
+    Scenario 2: Debate hit max rounds without consensus → Validator escalates with evidence.
     """
-    debate = state.get("debate_output")
+    return "validator"
+
+
+def route_after_validator(state: VerifaiState) -> str:
+    """
+    After validator, always proceed to finalize.
+    The validator_output.recommendation field (FINALIZE / FINALIZE_LOW_CONFIDENCE /
+    FLAG_FOR_HUMAN) is stored in state and consumed by finalize_node.
+    """
+    return "finalize"
+
+
+def should_start_from_critic(state: VerifaiState) -> str:
+    """
+    Route decision for feedback-driven reprocessing.
     
-    if debate and debate.final_consensus:
-        return "finalize"
-    elif debate and debate.escalate_to_chief:
-        return "chief"
+    - If is_feedback_iteration=True → go directly to critic (skip radiologist/chexbert/evidence)
+    - Otherwise → normal flow starting from radiologist
+    
+    This allows doctor feedback to restart the workflow from critic
+    with all the original context preserved.
+    """
+    is_feedback = state.get("is_feedback_iteration", False)
+    
+    if is_feedback:
+        return "critic_feedback"  # Special path for feedback iteration
     else:
-        # Default to finalize if no debate output
-        return "finalize"
+        return "radiologist"  # Normal path
 
 
 def build_workflow() -> StateGraph:
     """
-    Constructs the VERIFAI LangGraph DAG with debate mechanism.
+    Constructs the VERIFAI LangGraph DAG with debate + validator mechanism.
     All nodes are wrapped with automatic SQL logging.
-    
-    UPDATED Flow (Sequential Reasoning Depth):
-    START → Radiologist → Evidence Gathering (Hist + Lit parallel) → Critic → Debate →┬→ Finalize → END
-                                                                                        └→ Chief → END
-    
-    CRITICAL: Evidence gathering MUST complete before Critic evaluation.
-    This ensures Critic evaluates fully enriched diagnostic context:
-    - Imaging findings (Radiologist)
-    - Clinical history (Historian FHIR data)
-    - Literature evidence (Literature citations)
-    - Epistemic uncertainty (KLE score)
+
+    NORMAL Flow:
+    START → Radiologist → CheXbert → Evidence Gathering (Hist+Lit parallel)
+          → Critic → Debate → Validator → Finalize → END
+
+    Validator runs in BOTH debate outcomes:
+      ✅ Consensus reached   → Validator validates the consensus
+      ⚠️ Max rounds exceeded → Validator escalates with evidence
+
+    FEEDBACK Flow (doctor rejects diagnosis):
+    START → [routing] → Critic (with feedback context) → Debate → Validator → Finalize → END
+
+    No Chief node — Validator is the final arbitration layer.
     """
     graph = StateGraph(VerifaiState)
-    
-    # === Add Logged Nodes ===
+
+    # === Nodes ===
     graph.add_node("radiologist", logged_radiologist_node)
-    graph.add_node("evidence_gathering", logged_evidence_gathering_node)  # Parallel Hist + Lit
     graph.add_node("chexbert", chexbert_node)
+    graph.add_node("evidence_gathering", logged_evidence_gathering_node)
     graph.add_node("critic", logged_critic_node)
+    graph.add_node("critic_feedback", logged_critic_node)  # Same logic, different entry point
     graph.add_node("debate", logged_debate_node)
-    graph.add_node("chief", logged_chief_node)
+    graph.add_node("validator", logged_validator_node)     # NEW: always runs after debate
     graph.add_node("finalize", logged_finalize_node)
-    
-    # === Define Edges ==
-    
-    # Entry: START → Radiologist
-    graph.add_edge(START, "radiologist")
-    
-    # NEW: Radiologist → CheXbert (label findings immediately)
+
+    # === Edges ===
+
+    # START → Conditional: normal flow vs feedback iteration
+    graph.add_conditional_edges(
+        START,
+        should_start_from_critic,
+        {
+            "radiologist": "radiologist",
+            "critic_feedback": "critic_feedback"
+        }
+    )
+
+    # NORMAL FLOW
     graph.add_edge("radiologist", "chexbert")
-    
-    # NEW: CheXbert → Evidence Gathering (gather context with structured labels)
     graph.add_edge("chexbert", "evidence_gathering")
-    
-    # NEW: Evidence Gathering → Critic (evaluate WITH full context)
     graph.add_edge("evidence_gathering", "critic")
-    
-    # Critic → Debate (adversarial reconciliation with enriched context)
+
+    # FEEDBACK FLOW (skips evidence gathering, uses preserved context)
+    graph.add_edge("critic_feedback", "debate")
+
+    # Critic → Debate
     graph.add_edge("critic", "debate")
-    
-    # Debate → Conditional: Finalize or Chief
+
+    # Debate → Validator (ALWAYS — both consensus and no-consensus paths)
     graph.add_conditional_edges(
         "debate",
         route_after_debate,
-        {
-            "finalize": "finalize",
-            "chief": "chief"
-        }
+        {"validator": "validator"}
     )
-    
-    # Chief → END (final arbitration complete)
-    graph.add_edge("chief", END)
-    
+
+    # Validator → Finalize (recommendation stored in state, consumed by finalize_node)
+    graph.add_conditional_edges(
+        "validator",
+        route_after_validator,
+        {"finalize": "finalize"}
+    )
+
     # Finalize → END
     graph.add_edge("finalize", END)
-    
+
     return graph
 
 

@@ -5,7 +5,9 @@ Environment variables, model paths, and thresholds.
 """
 
 import os
+from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -24,14 +26,14 @@ class Settings(BaseSettings):
     SEMANTIC_SCHOLAR_API_KEYS: list | None = None
     
     # === Model Paths (HAI-DEF Models) ===
-    MEDSIGLIP_MODEL: str = "google/medsiglip-448"
+    MEDSIGLIP_BASE_MODEL: str = "google/medsiglip-448" 
+    MEDSIGLIP_WEIGHTS_PATH : str = "../output/medsiglip_full_model.pt" 
     MEDGEMMA_4B_MODEL: str = "google/medgemma-1.5-4b-it"
     #MEDGEMMA_27B_MODEL: str = "google/medgemma-27b-it"
     
     # === MedGemma 4B Fine-Tuned Paths ===
-    MEDGEMMA_LORA_ROOT: str = os.getenv("MEDGEMMA_LORA_ROOT", "../v2/")
-    MEDGEMMA_LORA_ADAPTERS: str = os.getenv("MEDGEMMA_LORA_ADAPTERS", "../v2/lora_adapters")
-    MEDGEMMA_PROJECTOR_WEIGHTS: str = os.getenv("MEDGEMMA_PROJECTOR_WEIGHTS", "../v2/projector.pt")
+    MEDGEMMA_LORA_ROOT: str = os.getenv("MEDGEMMA_LORA_ROOT", "../dataset/med/fine_tuned_model/v1/")
+    MEDGEMMA_LORA_ADAPTERS: str = os.getenv("MEDGEMMA_LORA_ADAPTERS", "../dataset/med/fine_tuned_model/v1/")
     
     # === Text Embedding Model (for KLE Uncertainty) ===
     # Switch to any sentence-transformers compatible model
@@ -45,11 +47,7 @@ class Settings(BaseSettings):
     FHIR_BASE_URL: str = "https://fhir.mimic-iv-demo.physionet.org/fhir"  # Public test server
     FHIR_AUTH_TOKEN: str | None = None
     
-    # === Uncertainty Thresholds ===
-    THRESHOLD_HISTORIAN: float = 0.30  # U >= 0.30 -> invoke Historian
-    THRESHOLD_LITERATURE: float = 0.40  # U >= 0.40 -> invoke Literature
-    THRESHOLD_CHIEF: float = 0.50  # U >= 0.50 -> escalate to Chief
-    
+
     # === Execution Limits ===
     MAX_ROUTING_STEPS: int = 5  # Prevent infinite loops
     
@@ -85,17 +83,35 @@ class Settings(BaseSettings):
     # Enable historical mistake retrieval in critic
     ENABLE_PAST_MISTAKES_MEMORY: bool = bool(os.getenv("ENABLE_PAST_MISTAKES_MEMORY", "True"))
     
-    # Past mistakes database path (DuckDB with VSS extension)
-    PAST_MISTAKES_DB_PATH: str = os.path.join(
-        os.path.dirname(os.path.dirname(__file__)), 
-        "verifai_past_mistakes.duckdb"
-    )
-    
-    # Retrieval settings
+    # Past mistakes retrieval settings
     PAST_MISTAKES_TOP_K: int = 5  # Maximum similar cases to retrieve
-    PAST_MISTAKES_SIMILARITY_THRESHOLD: float = 0.75  # Minimum cosine similarity
+    PAST_MISTAKES_SIMILARITY_THRESHOLD: float = 0.4   # Minimum cosine similarity (lowered for small seed sets)
     PAST_MISTAKES_KLE_TOLERANCE: float = 0.2  # +/- range for KLE filtering
     ENABLE_PAST_MISTAKES_RERANKING: bool = bool(os.getenv("ENABLE_PAST_MISTAKES_RERANKING", "True"))  # Neural re-ranking
+
+    
+    # === SUPABASE (Cloud Database) ===
+    # Supabase connection — required for past-mistakes memory and cloud-based logging.
+    # SUPABASE_URL and SUPABASE_SERVICE_KEY must be set; app will fail fast otherwise.
+    SUPABASE_URL: str | None = os.getenv("SUPABASE_URL")
+    SUPABASE_KEY: str | None = os.getenv("SUPABASE_KEY")  # anon key for general logging
+    SUPABASE_SERVICE_KEY: str | None = os.getenv("SUPABASE_SERVICE_KEY")  # service-role key (required for past-mistakes)
+
+    # === RadGraph ===
+    # Parent directory that contains the modern-radgraph-xl/ subfolder.
+    # Set this to wherever install_radgraph_model.py extracted the model.
+    # e.g.  RADGRAPH_CACHE_DIR=~/elephant_detection/med/dataset/med
+    RADGRAPH_CACHE_DIR: str = os.getenv(
+        "RADGRAPH_CACHE_DIR",
+        str(Path.home() / "elephant_detection" / "med" / "dataset" / "med")
+    )
+    
+    # === DOCTOR FEEDBACK LOOP ===
+    # Enable doctor feedback-driven reprocessing
+    ENABLE_DOCTOR_FEEDBACK: bool = bool(os.getenv("ENABLE_DOCTOR_FEEDBACK", "True"))
+    
+    # Automatically restart from critic when feedback is provided
+    FEEDBACK_RESTART_FROM_CRITIC: bool = bool(os.getenv("FEEDBACK_RESTART_FROM_CRITIC", "True"))
     
     # === Mock Mode ===
     # Enable to run without downloading large models (~50GB+)

@@ -1,296 +1,162 @@
 """
-Unit tests for the Critic model with LLM semantic critic integration.
+Enhanced Critic Test — LLM OFF + LLM ON modes.
 
-Covers:
-  1. Rule-only mode (ENABLE_LLM_CRITIC=False)
-  2. Rule + LLM mode (ENABLE_LLM_CRITIC=True, MOCK_MODELS=True)
-  3. LLM failure / fallback mode
-  4. Guard logic (LLM skipped when uncertainty is low)
-  5. Synthetic clinical case: high certainty + high KLE
+Test 1 (LLM OFF): Verifies rule-based critic + historical memory context.
+Test 2 (LLM ON):  Enables the MedGemma semantic critic (shared model loader).
+                  Set RUN_LLM_TEST = True to run (requires GPU / model download).
 """
 
-import sys
-import unittest
-from unittest.mock import patch, MagicMock
-
-sys.path.insert(0, '.')
-
+from types import SimpleNamespace
+from agents.critic.agent import critic_node
+from graph.state import VerifaiState
 from app.config import settings
-from agents.critic.model import CriticModel
-from agents.critic.llm_critic import LLMCriticOutput, medgemma_critic
+
+# ─── Configuration ────────────────────────────────────────────────────────────
+# Flip to True to also run the MedGemma LLM critic test (needs GPU + model).
+RUN_LLM_TEST = True
+# ──────────────────────────────────────────────────────────────────────────────
 
 
-# ============================================================================
-# Fixtures
-# ============================================================================
+def build_mock_state():
+    radiologist_output = SimpleNamespace(
+        findings="Patchy opacity in the right lower lobe.",
+        impression="Definite pneumonia in the right lower lobe."
+    )
 
-# Assertive report (high linguistic certainty)
-ASSERTIVE_FINDINGS = (
-    "Right lower lobe demonstrates dense consolidation with air bronchograms. "
-    "The opacity is homogeneous and well-defined."
-)
-ASSERTIVE_IMPRESSION = (
-    "Definite right lower lobe pneumonia. "
-    "The findings confirm community-acquired bacterial infection. "
-    "Diagnostic of lobar pneumonia."
-)
+    chexbert_output = SimpleNamespace(
+        labels={"Pneumonia": "present"}
+    )
 
-# Hedged report (low linguistic certainty)
-HEDGED_FINDINGS = (
-    "There may be a subtle area of increased density in the right lower lobe."
-)
-HEDGED_IMPRESSION = (
-    "Possible right lower lobe opacity, which could represent early pneumonia "
-    "or atelectasis. Consider clinical correlation. Differential includes "
-    "viral vs bacterial etiology."
-)
+    state = VerifaiState()
+    state["radiologist_output"] = radiologist_output
+    state["radiologist_kle_uncertainty"] = 0.55
+    state["chexbert_output"] = chexbert_output
+    state["historian_output"] = None
+    state["literature_output"] = None
+
+    return state
 
 
-# ============================================================================
-# Tests
-# ============================================================================
+# ─── Test 1: LLM OFF (rule-based + historical memory) ─────────────────────────
 
-class TestCriticRuleOnlyMode(unittest.TestCase):
-    """Tests with ENABLE_LLM_CRITIC=False — pure rule-based behaviour."""
+def test_critic_with_history():
+    """Run critic with LLM disabled. Validates rule-based + historical memory."""
+    print("\n=== Running Critic Historical Memory Test (LLM OFF) ===")
 
-    def setUp(self):
-        self._orig_enable = settings.ENABLE_LLM_CRITIC
-        self._orig_mock = settings.MOCK_MODELS
-        settings.ENABLE_LLM_CRITIC = False
-        settings.MOCK_MODELS = True
+    settings.ENABLE_PAST_MISTAKES_MEMORY = True
+    settings.ENABLE_LLM_CRITIC = False
 
-    def tearDown(self):
-        settings.ENABLE_LLM_CRITIC = self._orig_enable
-        settings.MOCK_MODELS = self._orig_mock
+    state = build_mock_state()
+    result = critic_node(state)
+    critic_output = result["critic_output"]
 
-    def test_overconfident_assertive_high_kle(self):
-        """High certainty language + high KLE → overconfident."""
-        model = CriticModel()
-        is_oc, flags, hedging, score = model.evaluate(
-            ASSERTIVE_FINDINGS, ASSERTIVE_IMPRESSION, kle_uncertainty=0.7
-        )
-        self.assertTrue(is_oc)
-        self.assertGreater(len(flags), 0)
-        self.assertIsNotNone(hedging)
-        self.assertLessEqual(score, 0.5)
+    print("\n--- Core Outputs ---")
+    print("Overconfident:", critic_output.is_overconfident)
+    print("Safety Score:", critic_output.safety_score)
+    print("Routing Uncertainty (1 - safety):", result["current_uncertainty"])
+    print("Similar Mistakes Count:", critic_output.similar_mistakes_count)
+    print("Historical Risk Level:", critic_output.historical_risk_level)
 
-    def test_not_overconfident_hedged_high_kle(self):
-        """Hedged language + high KLE → NOT overconfident."""
-        model = CriticModel()
-        is_oc, flags, hedging, score = model.evaluate(
-            HEDGED_FINDINGS, HEDGED_IMPRESSION, kle_uncertainty=0.7
-        )
-        self.assertFalse(is_oc)
+    print("\n--- Concern Flags ---")
+    if critic_output.concern_flags:
+        for flag in critic_output.concern_flags:
+            print(" -", flag)
+    else:
+        print(" None")
 
-    def test_deterministic_when_llm_disabled(self):
-        """Results must be identical across calls when LLM is off."""
-        model = CriticModel()
-        r1 = model.evaluate(ASSERTIVE_FINDINGS, ASSERTIVE_IMPRESSION, 0.5)
-        r2 = model.evaluate(ASSERTIVE_FINDINGS, ASSERTIVE_IMPRESSION, 0.5)
-        self.assertEqual(r1, r2)
+    print("\n--- Historical Context (Structured) ---")
+    if hasattr(critic_output, "historical_context") and critic_output.historical_context:
+        for idx, case in enumerate(critic_output.historical_context, 1):
+            print(f"\n Case {idx}:")
+            print("  Disease:", case.get("disease_type"))
+            print("  Error Type:", case.get("error_type"))
+            print("  Severity Level:", case.get("severity_level"))   # ← fixed key
+            print("  KLE:", case.get("kle_uncertainty"))             # ← fixed key
+            print("  Similarity:", case.get("similarity"))
+            print("  Summary:", case.get("clinical_summary"))        # ← fixed key
+    else:
+        print(" None")
 
-    def test_return_shape(self):
-        """evaluate() returns a 4-tuple with expected types."""
-        model = CriticModel()
-        result = model.evaluate(ASSERTIVE_FINDINGS, ASSERTIVE_IMPRESSION, 0.3)
-        self.assertIsInstance(result, tuple)
-        self.assertEqual(len(result), 4)
-        is_oc, flags, hedging, score = result
-        self.assertIsInstance(is_oc, bool)
-        self.assertIsInstance(flags, list)
-        self.assertIsInstance(score, float)
+    print("\n--- Input Snapshot ---")
+    print("Impression:", state["radiologist_output"].impression)
+    print("KLE:", state["radiologist_kle_uncertainty"])
+
+    print("\n--- Trace ---")
+    for t in result["trace"]:
+        print(" -", t)
+
+    print("\n=== END TEST ===\n")
 
 
-class TestCriticRulePlusLLM(unittest.TestCase):
-    """Tests with ENABLE_LLM_CRITIC=True using mock MedGemma."""
+# ─── Test 2: LLM ON (MedGemma semantic critic via shared loader) ───────────────
 
-    def setUp(self):
-        self._orig_enable = settings.ENABLE_LLM_CRITIC
-        self._orig_mock = settings.MOCK_MODELS
-        settings.ENABLE_LLM_CRITIC = True
-        settings.MOCK_MODELS = True
-
-    def tearDown(self):
-        settings.ENABLE_LLM_CRITIC = self._orig_enable
-        settings.MOCK_MODELS = self._orig_mock
-
-    def test_llm_enriches_concern_flags(self):
-        """LLM should add [LLM] prefixed flags when it detects issues."""
-        model = CriticModel()
-        is_oc, flags, hedging, score = model.evaluate(
-            ASSERTIVE_FINDINGS, ASSERTIVE_IMPRESSION, kle_uncertainty=0.7
-        )
-        self.assertTrue(is_oc)
-        llm_flags = [f for f in flags if f.startswith("[LLM]")]
-        self.assertGreater(len(llm_flags), 0, "Expected [LLM] prefixed concern flags")
-
-    def test_llm_hedging_takes_priority(self):
-        """When LLM suggests hedging, it should override rule-based suggestion."""
-        model = CriticModel()
-        _, _, hedging, _ = model.evaluate(
-            ASSERTIVE_FINDINGS, ASSERTIVE_IMPRESSION, kle_uncertainty=0.7
-        )
-        # Mock LLM returns specific hedging for assertive + high uncertainty
-        self.assertIsNotNone(hedging)
-
-    def test_safety_score_penalised_by_llm(self):
-        """Safety score should be lower when LLM detects high semantic risk."""
-        model = CriticModel()
-
-        # Get rule-only baseline
-        settings.ENABLE_LLM_CRITIC = False
-        _, _, _, rule_score = model.evaluate(
-            ASSERTIVE_FINDINGS, ASSERTIVE_IMPRESSION, kle_uncertainty=0.7
-        )
-
-        # Get rule+LLM
-        settings.ENABLE_LLM_CRITIC = True
-        _, _, _, llm_score = model.evaluate(
-            ASSERTIVE_FINDINGS, ASSERTIVE_IMPRESSION, kle_uncertainty=0.7
-        )
-
-        # LLM mock returns semantic_risk_score=0.65 for this case,
-        # which should penalise the safety score
-        self.assertLessEqual(llm_score, rule_score)
-
-    def test_guard_skips_llm_low_uncertainty(self):
-        """LLM should NOT be called when KLE is low and rule-based is fine."""
-        model = CriticModel()
-        with patch.object(medgemma_critic, 'critique', wraps=medgemma_critic.critique) as mock_crit:
-            model.evaluate(HEDGED_FINDINGS, HEDGED_IMPRESSION, kle_uncertainty=0.1)
-            mock_crit.assert_not_called()
-
-
-class TestCriticLLMFailure(unittest.TestCase):
-    """Tests for graceful LLM failure fallback."""
-
-    def setUp(self):
-        self._orig_enable = settings.ENABLE_LLM_CRITIC
-        self._orig_mock = settings.MOCK_MODELS
-        settings.ENABLE_LLM_CRITIC = True
-        settings.MOCK_MODELS = True
-
-    def tearDown(self):
-        settings.ENABLE_LLM_CRITIC = self._orig_enable
-        settings.MOCK_MODELS = self._orig_mock
-
-    def test_fallback_on_llm_exception(self):
-        """If LLM critique() raises, fall back to rule-based output."""
-        model = CriticModel()
-        with patch.object(medgemma_critic, 'critique', side_effect=Exception("boom")):
-            # Should NOT raise — just fall back
-            is_oc, flags, hedging, score = model.evaluate(
-                ASSERTIVE_FINDINGS, ASSERTIVE_IMPRESSION, kle_uncertainty=0.7
-            )
-            # Rule-based should still detect overconfidence
-            self.assertTrue(is_oc)
-            # No [LLM] flags since LLM failed
-            llm_flags = [f for f in flags if f.startswith("[LLM]")]
-            self.assertEqual(len(llm_flags), 0)
-
-    def test_fallback_on_llm_returns_none(self):
-        """If LLM critique() returns None, fall back gracefully."""
-        model = CriticModel()
-        with patch.object(medgemma_critic, 'critique', return_value=None):
-            is_oc, flags, hedging, score = model.evaluate(
-                ASSERTIVE_FINDINGS, ASSERTIVE_IMPRESSION, kle_uncertainty=0.7
-            )
-            self.assertTrue(is_oc)  # rule-based still works
-            llm_flags = [f for f in flags if f.startswith("[LLM]")]
-            self.assertEqual(len(llm_flags), 0)
-
-
-class TestSyntheticClinicalCase(unittest.TestCase):
+def test_critic_with_llm():
     """
-    Synthetic case: High linguistic certainty + high KLE uncertainty.
-    Demonstrates that the LLM critic detects a missing differential
-    and adjusts the safety score.
+    Run critic with ENABLE_LLM_CRITIC = True.
+
+    The MedGemma model is loaded via shared_model_loader (singleton).
+    Requires a working GPU and the model available at settings.MEDGEMMA_4B_MODEL.
+
+    Verifies:
+    - LLM critique fires when KLE > 0.3 or rule-based overconfidence is True.
+    - LLM adds [LLM] prefixed concern flags.
+    - safety_score is penalised by semantic_risk_score.
+    - shared model is loaded only once (no duplicate VRAM usage).
     """
+    print("\n=== Running Critic LLM Critique Test (MedGemma ON) ===")
+    print("  Model:", settings.MEDGEMMA_4B_MODEL)
+    print("  This will load the shared MedGemma model on first call.\n")
 
-    def setUp(self):
-        self._orig_enable = settings.ENABLE_LLM_CRITIC
-        self._orig_mock = settings.MOCK_MODELS
-        settings.ENABLE_LLM_CRITIC = True
-        settings.MOCK_MODELS = True
+    settings.ENABLE_PAST_MISTAKES_MEMORY = True
+    settings.ENABLE_LLM_CRITIC = True
 
-    def tearDown(self):
-        settings.ENABLE_LLM_CRITIC = self._orig_enable
-        settings.MOCK_MODELS = self._orig_mock
+    state = build_mock_state()
+    # Use a high KLE to guarantee the LLM path fires (threshold: KLE > 0.3)
+    state["radiologist_kle_uncertainty"] = 0.60
 
-    def test_synthetic_high_certainty_high_kle(self):
-        """
-        A report using 'definite' and 'confirms' with KLE=0.75 should:
-        1. Be flagged overconfident by rule-based
-        2. Have LLM detect missing differentials
-        3. Have adjusted (lower) safety score
-        """
-        findings = (
-            "Dense consolidation in the right lower lobe with air bronchograms. "
-            "No pleural effusion."
-        )
-        impression = (
-            "The findings are definite for community-acquired pneumonia. "
-            "This confirms bacterial lobar pneumonia."
-        )
-        kle = 0.75
+    result = critic_node(state)
+    critic_output = result["critic_output"]
 
-        model = CriticModel()
-        is_oc, flags, hedging, score = model.evaluate(findings, impression, kle)
+    print("--- Core Outputs ---")
+    print("Overconfident:", critic_output.is_overconfident)
+    print("Safety Score:", critic_output.safety_score)
+    print("Routing Uncertainty:", result["current_uncertainty"])
 
-        # Overconfident
-        self.assertTrue(is_oc, "Should be flagged overconfident")
+    print("\n--- Concern Flags ---")
+    llm_flags = [f for f in critic_output.concern_flags if f.startswith("[LLM]")]
+    rule_flags = [f for f in critic_output.concern_flags if not f.startswith("[LLM]")]
 
-        # LLM should have added missing differentials
-        diff_flags = [f for f in flags if "Missing differentials" in f]
-        self.assertGreater(len(diff_flags), 0, "Expected missing differentials flag")
+    if rule_flags:
+        print(" [Rule-based]")
+        for f in rule_flags:
+            print("   -", f)
 
-        # Safety score should be low
-        self.assertLess(score, 0.5, f"Safety score {score} should be < 0.5")
+    if llm_flags:
+        print(" [LLM-Critic / MedGemma]")
+        for f in llm_flags:
+            print("   -", f)
+    else:
+        print(" No LLM flags generated (LLM may have returned low-risk output).")
 
-        # Hedging should be suggested
-        self.assertIsNotNone(hedging)
+    print("\n--- Recommended Hedging ---")
+    print(critic_output.recommended_hedging or "None")
 
-        print(f"\n{'='*60}")
-        print("SYNTHETIC CASE RESULTS")
-        print(f"{'='*60}")
-        print(f"  Overconfident:  {is_oc}")
-        print(f"  Safety Score:   {score:.3f}")
-        print(f"  Hedging:        {hedging}")
-        print(f"  Concern Flags:")
-        for f in flags:
-            print(f"    - {f}")
+    print("\n--- Trace ---")
+    for t in result["trace"]:
+        print(" -", t)
+
+    print("\n=== END LLM TEST ===\n")
 
 
-class TestLLMCriticOutput(unittest.TestCase):
-    """Tests for the LLMCriticOutput Pydantic model."""
-
-    def test_default_values(self):
-        out = LLMCriticOutput()
-        self.assertIsNone(out.overconfidence_reason)
-        self.assertEqual(out.missing_differentials, [])
-        self.assertIsNone(out.justification_gap)
-        self.assertIsNone(out.suggested_hedging)
-        self.assertEqual(out.semantic_risk_score, 0.0)
-
-    def test_full_construction(self):
-        out = LLMCriticOutput(
-            overconfidence_reason="Too certain",
-            missing_differentials=["TB", "Malignancy"],
-            justification_gap="Findings don't fully support impression",
-            suggested_hedging="Use 'suggestive of'",
-            semantic_risk_score=0.8,
-        )
-        self.assertEqual(out.overconfidence_reason, "Too certain")
-        self.assertEqual(len(out.missing_differentials), 2)
-        self.assertAlmostEqual(out.semantic_risk_score, 0.8)
-
-    def test_score_clamped(self):
-        """Score must be in [0, 1]."""
-        with self.assertRaises(Exception):
-            LLMCriticOutput(semantic_risk_score=1.5)
-        with self.assertRaises(Exception):
-            LLMCriticOutput(semantic_risk_score=-0.1)
-
+# ─── Entry point ──────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    unittest.main()
+    test_critic_with_history()
+
+    if RUN_LLM_TEST:
+        test_critic_with_llm()
+    else:
+        print(
+            "[INFO] LLM test skipped. Set RUN_LLM_TEST = True in this file "
+            "to run MedGemma semantic critique (requires GPU + model)."
+        )

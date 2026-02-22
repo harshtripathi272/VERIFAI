@@ -4,7 +4,7 @@ VERIFAI Graph State
 Shared TypedDict and Pydantic models for inter-agent communication.
 """
 
-from typing import TypedDict, Optional, Annotated, Any
+from typing import TypedDict, Optional, Annotated, Any, List
 from pydantic import BaseModel, Field
 
 
@@ -30,18 +30,27 @@ class VisualFinding(BaseModel):
     location: str = Field(..., description="Anatomical location (e.g., RLL, LUL, Mediastinum)")
     observation: str = Field(..., description="What is observed (e.g., opacity, nodule, effusion)")
     severity: float = Field(..., ge=0.0, le=1.0, description="Severity score 0-1")
-    bounding_box: list[float] | None = Field(None, description="Optional [x, y, w, h] normalized coords")
+    bounding_box: Optional[List[float]] = Field(None, description="Optional [x, y, w, h] normalized coords")
 
 
 class RadiologistOutput(BaseModel):
     """Plain-text output from Radiologist Agent.
     
-    Contains only narrative FINDINGS and IMPRESSION sections.
-    No confidence scores, probabilities, or structured outputs.
+    Contains narrative FINDINGS and IMPRESSION sections.
+    Also includes disease probabilities and paths to interpretability heatmaps.
     Epistemic uncertainty is computed externally via KLE.
     """
     findings: str = Field(..., description="Textual FINDINGS section based on visual evidence")
     impression: str = Field(..., description="Textual IMPRESSION section with diagnostic interpretation")
+    
+    # New fields for Disease Classification & Interpretability
+    disease_probabilities: dict[str, float] = Field(default_factory=dict, description="Probabilities for 14 CheXbert diseases")
+    heatmap_paths: dict[str, str] = Field(default_factory=dict, description="Paths to saved heatmap images for positive detections")
+    # Grad-CAM visualization fields (optional, for validation)
+    gradcam_heatmap_b64: Optional[str] = Field(None, description="Base64-encoded Grad-CAM heatmap overlay")
+    gradcam_peak_bbox: Optional[List[int]] = Field(None, description="Bounding box [x1, y1, x2, y2] of activation peak")
+    gradcam_activation_mass: Optional[float] = Field(None, description="Diffuseness score 0.0-1.0 (higher = more diffuse)")
+    gradcam_anatomical_region: Optional[str] = Field(None, description="Anatomical region of peak activation (e.g., 'right_lower_lobe')")
 
 
 class CheXbertOutput(BaseModel):
@@ -62,18 +71,29 @@ class CriticOutput(BaseModel):
     Also checks for similarity to past validated mistakes.
     """
     is_overconfident: bool = Field(..., description="True if text is overly assertive given uncertainty")
-    concern_flags: list[str] = Field(default_factory=list, description="Specific consistency issues detected")
-    recommended_hedging: str | None = Field(None, description="Suggested rephrasing to match uncertainty")
+    concern_flags: List[str] = Field(default_factory=list, description="Specific consistency issues detected")
+    recommended_hedging: Optional[str] = Field(None, description="Suggested rephrasing to match uncertainty")
     safety_score: float = Field(..., ge=0.0, le=1.0, description="Overall safety/appropriateness score")
     
     # Historical mistake signals
     similar_mistakes_count: int = Field(default=0, description="Number of similar past errors found")
     historical_risk_level: str = Field(default="none", description="Risk level based on past mistakes: none/low/medium/high")
+    
+    # Structured contextual information about top matched past mistakes
+    historical_context: List[dict] = Field(
+        default_factory=list,
+        description=(
+            "Top matched past mistakes (up to 3), each containing: "
+            "disease_type, error_type, severity_level, kle_uncertainty, "
+            "clinical_summary, similarity"
+        )
+    )
 
+
+from typing import Literal
 
 class HistorianFact(BaseModel):
-    """A fact retrieved from FHIR."""
-    fact_type: str  # "supporting" or "contradicting"
+    fact_type: Literal["supporting", "contradicting"]
     description: str
     fhir_resource_id: str
     fhir_resource_type: str
@@ -81,8 +101,8 @@ class HistorianFact(BaseModel):
 
 class HistorianOutput(BaseModel):
     """Output from Historian Agent (FHIR context)."""
-    supporting_facts: list[HistorianFact] = Field(default_factory=list)
-    contradicting_facts: list[HistorianFact] = Field(default_factory=list)
+    supporting_facts: List[HistorianFact] = Field(default_factory=list)
+    contradicting_facts: List[HistorianFact] = Field(default_factory=list)
     confidence_adjustment: float = Field(0.0, description="Numeric adjustment to radiologist confidence")
     clinical_summary: str = ""
 
@@ -91,9 +111,9 @@ class LiteratureCitation(BaseModel):
     """A literature citation."""
     pmid: str
     title: str
-    authors: list[str] = Field(default_factory=list)
+    authors: List[str] = Field(default_factory=list)
     journal: str = ""
-    year: int | None = None
+    year: Optional[int] = None
     relevance_summary: str = ""
     evidence_strength: str = Field("low", description="low/medium/high")
     source: str = "pubmed"  # pubmed, europepmc, semanticscholar
@@ -101,17 +121,17 @@ class LiteratureCitation(BaseModel):
 
 class LiteratureOutput(BaseModel):
     """Output from Literature Agent (RAG over PubMed/PMC)."""
-    citations: list[LiteratureCitation] = Field(default_factory=list)
+    citations: List[LiteratureCitation] = Field(default_factory=list)
     overall_evidence_strength: str = "low"
 
 
 class FinalDiagnosis(BaseModel):
     """Final calibrated diagnosis or deferral."""
-    diagnosis: str | None = None
+    diagnosis: Optional[str] = None
     calibrated_confidence: float = Field(..., ge=0.0, le=1.0)
     deferred: bool = False
-    deferral_reason: str | None = None
-    recommended_next_steps: list[str] = Field(default_factory=list)
+    deferral_reason: Optional[str] = None
+    recommended_next_steps: List[str] = Field(default_factory=list)
     explanation: str = ""
 
 
@@ -125,7 +145,7 @@ class DebateArgument(BaseModel):
     position: str  # "challenge", "support", "refine"
     argument: str
     confidence_impact: float = Field(0.0, description="How this affects confidence (-1 to +1)")
-    evidence_refs: list[str] = Field(default_factory=list)
+    evidence_refs: List[str] = Field(default_factory=list)
 
 
 class DebateRound(BaseModel):
@@ -140,7 +160,7 @@ class DebateRound(BaseModel):
 
 class DebateOutput(BaseModel):
     """Final output from debate process."""
-    rounds: list[DebateRound] = Field(default_factory=list)
+    rounds: List[DebateRound] = Field(default_factory=list)
     final_consensus: bool = False
     consensus_diagnosis: Optional[str] = None
     consensus_confidence: float = 0.0
@@ -148,6 +168,23 @@ class DebateOutput(BaseModel):
     escalation_reason: Optional[str] = None
     debate_summary: str = ""
     total_confidence_adjustment: float = 0.0
+
+
+# DOCTOR FEEDBACK MODELS
+
+
+class DoctorFeedback(BaseModel):
+    """Doctor feedback for diagnosis review and reprocessing.
+    
+    Captured when a doctor rejects/corrects a diagnosis.
+    Used to restart workflow from critic with doctor's context.
+    """
+    feedback_id: int = Field(..., description="Database ID of feedback record")
+    original_session_id: str = Field(..., description="Session ID of original workflow that was rejected")
+    feedback_type: str = Field(..., description="Type: 'rejection', 'correction', or 'approval'")
+    doctor_notes: str = Field(..., description="Doctor's explanation of what's wrong")
+    correct_diagnosis: Optional[str] = Field(None, description="What doctor believes is correct")
+    rejection_reasons: List[str] = Field(default_factory=list, description="Categories of issues found")
 
 
 
@@ -165,21 +202,22 @@ class VerifaiState(TypedDict):
     building a complete audit trail.
     """
     # === Session Tracking ===
-    _session_id: str | None  # DB logging session ID (auto-generated if not provided)
+    _session_id: Optional[str]  # DB logging session ID (auto-generated if not provided)
     
     # === Input ===
     image_path: str
-    patient_id: str | None
-    dicom_metadata: dict[str, Any] | None
-    view : str | None
+    patient_id: Optional[str]
+    dicom_metadata: Optional[dict[str, Any]]
+    view : Optional[str]
     
     # === Agent Outputs ===
-    radiologist_output: RadiologistOutput | None
-    chexbert_output: CheXbertOutput | None  # NEW: Structured pathology labels
-    critic_output: CriticOutput | None
-    historian_output: HistorianOutput | None
-    literature_output: LiteratureOutput | None
-    debate_output: DebateOutput | None  # NEW: Debate results
+    radiologist_output: Optional[RadiologistOutput]
+    chexbert_output: Optional[CheXbertOutput]  # NEW: Structured pathology labels
+    critic_output: Optional[CriticOutput]
+    historian_output: Optional[HistorianOutput]
+    literature_output: Optional[LiteratureOutput]
+    debate_output: Optional[DebateOutput]  # NEW: Debate results
+    validator_output: Optional[dict]  # NEW: Validator tools output (when debate fails)
     
     # === Routing Control ===
     current_uncertainty: float
@@ -187,10 +225,14 @@ class VerifaiState(TypedDict):
     steps_taken: int
     
     # === KLE Uncertainty (for logging/analysis) ===
-    radiologist_kle_uncertainty: float | None  # Early epistemic instability score
+    radiologist_kle_uncertainty: Optional[float]  # Early epistemic instability score
     
     # === Final Result ===
-    final_diagnosis: FinalDiagnosis | None
+    final_diagnosis: Optional[FinalDiagnosis]
+    
+    # === Doctor Feedback (NEW) ===
+    doctor_feedback: Optional[DoctorFeedback]  # Present when reprocessing with doctor input
+    is_feedback_iteration: bool  # True if this is a reprocessing run after feedback
     
     # === Audit Trail ===
-    trace: Annotated[list[str], append_trace]
+    trace: Annotated[List[str], append_trace]

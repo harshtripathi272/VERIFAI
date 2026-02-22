@@ -1,35 +1,85 @@
-# Core
+# ============================================================
+# VERIFAI - Stable Requirements (CUDA 12.6 Compatible)
+# Python 3.10
+# ============================================================
+
+# ----------------------------
+# Core ML
+# ----------------------------
+torch==2.10.0+cu126
+torchvision==0.25.0+cu126
+torchaudio==2.10.0+cu126
+transformers==4.57.1
+accelerate==1.11.0
+trl==0.28.0
+peft==0.17.1
+bitsandbytes==0.49.2
+tokenizers==0.22.2
+
+# ----------------------------
+# HF Ecosystem
+# ----------------------------
+huggingface-hub==0.36.2
+datasets==3.4.1
+safetensors==0.7.0
+
+# ----------------------------
+# Numerical
+# ----------------------------
+numpy==1.26.4
+scikit-learn==1.4.2
+sentence-transformers==2.7.0
+scipy==1.15.3
+
+# ----------------------------
+# API / Web
+# ----------------------------
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
 streamlit==1.41.1
 pydantic==2.10.4
+pydantic-settings==2.2.1
 python-multipart==0.0.18
 pillow==11.0.0
-numpy==1.26.4
 python-dotenv==1.0.1
 
-# LangGraph
+# ----------------------------
+# LangChain
+# ----------------------------
 langchain==0.3.14
 langgraph==0.2.60
+langsmith==0.1.147
 
-# ML
-
-transformers==4.52.0
-accelerate==0.27.2
-peft==0.10.0
-bitsandbytes==0.43.3
-scikit-learn==1.4.2
-sentence-transformers==2.7.0
-
-# Bio / APIs
+# ----------------------------
+# Medical / Retrieval
+# ----------------------------
 biopython==1.83
-requests==2.31.0
 fhir.resources==7.1.0
 lxml==5.1.0
 beautifulsoup4==4.12.3
 duckdb==0.10.0
-pydantic_settings==2.2.1
+faiss-gpu==1.7.2
 
+# ----------------------------
+# Supabase
+# ----------------------------
+supabase==2.28.0
+postgrest==2.28.0
+
+# ----------------------------
+# NLP / Validation
+# ----------------------------
+nltk==3.8.1
+radgraph
+
+# ----------------------------
+# Stability Pins
+# ----------------------------
+packaging>=23,<25
+async-timeout>=4,<5
+requests>=2.32.2,<3
+
+# ----------------------------
 # Dev
+# ----------------------------
 pytest==8.2.0
-f1chexbert

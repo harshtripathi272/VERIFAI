@@ -50,7 +50,7 @@ def load_shared_medgemma() -> Tuple[AutoModelForImageTextToText, AutoProcessor]:
             dtype = torch.float32
         else:
             device = torch.device("cuda:0")  # Explicitly use GPU 0
-            dtype = torch.float16  # Use float16 for RTX 8000 (no native bfloat16)
+            dtype = torch.bfloat16  # MedGemma 1.5 prefers bfloat16
             print(f"[SharedModelLoader] CUDA available: {torch.cuda.get_device_name(0)}")
             print(f"[SharedModelLoader] CUDA memory before loading: {torch.cuda.memory_allocated(0) / 1024**3:.2f} GB")
         

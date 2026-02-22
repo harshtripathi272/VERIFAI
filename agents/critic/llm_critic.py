@@ -24,7 +24,9 @@ import torch
 from pydantic import BaseModel, Field
 
 from app.config import settings
+from app.config import settings
 from app.shared_model_loader import load_shared_medgemma, get_inference_lock
+from utils.inference import extract_json
 
 logger = logging.getLogger(__name__)
 
@@ -61,26 +63,19 @@ class LLMCriticOutput(BaseModel):
 _SYSTEM_PROMPT = """\
 You are a clinical safety critic reviewing a radiology report.
 
-You are NOT diagnosing.
-
-Your job is to detect:
-1. Overconfidence relative to uncertainty
+You are NOT diagnosing. Your only job is to detect:
+1. Overconfidence relative to uncertainty (KLE score)
 2. Missing reasonable differential diagnoses
-3. Unjustified certainty in the impression
-4. Logical gaps between findings and impression
-5. Inconsistencies with clinical history (if available)
-6. Failure to consider literature evidence (if available)
+3. Logical gaps between findings and impression
+4. Unjustified certainty given the provided uncertainty score
 
-Given:
-- FINDINGS text
-- IMPRESSION text
-- Epistemic uncertainty score (0–1)
-- Clinical history from FHIR (optional)
-- Literature evidence (optional)
+You will receive:
+- FINDINGS (truncated)
+- IMPRESSION (full)
+- Epistemic uncertainty score (0=certain, 1=very uncertain)
+- A brief context summary (contradicting facts count, study count) — for awareness only
 
-Consider the broader diagnostic context when evaluating.
-
-Return STRICT JSON with:
+Return STRICT JSON only — no markdown fences, no commentary:
 
 {
   "overconfidence_reason": string | null,
@@ -89,8 +84,6 @@ Return STRICT JSON with:
   "suggested_hedging": string | null,
   "semantic_risk_score": float (0–1)
 }
-
-Return valid JSON only. No markdown fences, no commentary.
 """
 
 
@@ -143,48 +136,53 @@ class MedGemmaCritic:
 
     @staticmethod
     def _build_user_prompt(
-        findings: str, 
-        impression: str, 
+        findings: str,
+        impression: str,
         uncertainty: float,
         historian_output=None,
         literature_output=None
     ) -> str:
-        """Build user prompt with enriched context."""
-        prompt_parts = [
-            f"FINDINGS:\n{findings}\n",
-            f"IMPRESSION:\n{impression}\n",
-            f"Epistemic uncertainty score: {uncertainty:.4f}"
+        """Build a minimal user prompt — only the essentials the model needs.
+        
+        Context (historian, literature) is evaluated deterministically in model.py;
+        here we only pass brief count summaries so the LLM has awareness without
+        receiving verbose, token-heavy fact lists.
+        """
+        # Core report sections — truncate FINDINGS to keep prompt tight
+        parts = [
+            f"FINDINGS (summary):\n{findings[:400]}",
+            f"IMPRESSION:\n{impression}",
+            f"Epistemic uncertainty score: {uncertainty:.3f}",
         ]
-        
-        # Add clinical history context if available
+
+        # Minimal context summary line
+        context_notes = []
         if historian_output:
-            supporting = historian_output.supporting_facts if hasattr(historian_output, 'supporting_facts') else []
-            contradicting = historian_output.contradicting_facts if hasattr(historian_output, 'contradicting_facts') else []
-            
-            if supporting or contradicting:
-                prompt_parts.append("\nCLINICAL HISTORY (FHIR):")
-                if supporting:
-                    prompt_parts.append(f"Supporting facts: {len(supporting)} evidence points")
-                    for fact in supporting[:3]:  # Top 3
-                        prompt_parts.append(f"  - {fact.description}")
-                if contradicting:
-                    prompt_parts.append(f"Contradicting facts: {len(contradicting)} evidence points")
-                    for fact in contradicting[:3]:  # Top 3
-                        prompt_parts.append(f"  - {fact.description}")
-        
-        # Add literature context if available
+            contradicting = (
+                historian_output.contradicting_facts
+                if hasattr(historian_output, "contradicting_facts") else []
+            )
+            if contradicting:
+                context_notes.append(
+                    f"{len(contradicting)} contradicting clinical fact(s) already flagged"
+                )
+
         if literature_output:
             if isinstance(literature_output, str):
-                # String summary
-                if len(literature_output) > 50:  # Has meaningful content
-                    prompt_parts.append(f"\nLITERATURE EVIDENCE:\n{literature_output[:500]}")
+                if len(literature_output) > 20:
+                    context_notes.append("literature evidence available")
             else:
-                # Structured output
-                citations = literature_output.citations if hasattr(literature_output, 'citations') else []
+                citations = (
+                    literature_output.citations
+                    if hasattr(literature_output, "citations") else []
+                )
                 if citations:
-                    prompt_parts.append(f"\nLITERATURE EVIDENCE: {len(citations)} relevant studies found")
-        
-        return "\n".join(prompt_parts)
+                    context_notes.append(f"{len(citations)} relevant study(ies) found")
+
+        if context_notes:
+            parts.append("Context: " + "; ".join(context_notes) + ".")
+
+        return "\n".join(parts)
 
     # ---- inference ---------------------------------------------------------
 
@@ -312,16 +310,14 @@ class MedGemmaCritic:
                 historian_output, literature_output
             )
             raw_output = self._run_inference(user_prompt)
+            print(raw_output)
 
-            # Strip potential markdown fences
-            cleaned = raw_output.strip()
-            if cleaned.startswith("```"):
-                cleaned = cleaned.split("\n", 1)[-1]
-            if cleaned.endswith("```"):
-                cleaned = cleaned.rsplit("```", 1)[0]
-            cleaned = cleaned.strip()
+            try:
+                parsed = extract_json(raw_output)
+            except ValueError as e:
+                 logger.warning("[LLM-Critic] JSON extraction failed: %s", e)
+                 return None
 
-            parsed = json.loads(cleaned)
             result = LLMCriticOutput(**parsed)
 
             # Clamp semantic_risk_score to [0, 1]

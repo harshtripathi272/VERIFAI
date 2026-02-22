@@ -1,170 +1,212 @@
 """
-FHIR Client (PhysioNet MIMIC-IV FHIR Demo)
+FHIR Client (Hybrid: SQL + Vector Search)
 
-REST client for retrieving patient context from FHIR R4 servers.
-Chest-focused, hypothesis-gated FHIR retrieval for Historian agent.
-Supports ImagingStudy → Patient → Condition/Observation workflow.
+Retrieves patient context from DuckDB and FAISS.
+1. SQL Filter: Hard constraints (Patient, Time, Type).
+2. FAISS Search: Semantic ranking of filtered candidates against hypothesis.
 """
 
 import duckdb
 import json
 import base64
 import os
-from typing import Dict
+import faiss
+import numpy as np
+import logging
+import pickle
+from typing import Dict, List, Tuple, Any
+from sentence_transformers import SentenceTransformer
 from .hyp_code_map import CHEST_HYPOTHESIS_CODE_MAP, normalize_hypothesis
 
+# Helper configuration (should equal ETL config)
+EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+DB_FILENAME = "verifai_fhir.duckdb"
+FAISS_FILENAME = "verifai_fhir.faiss"
+MAPPING_FILENAME = "verifai_fhir_mapping.json"
+
 class FHIRClient:
-    def __init__(self, db_path=None):
-        if db_path is None:
-            # Resolve verifai_fhir.duckdb in the project root
+    def __init__(self, root_dir=None):
+        if root_dir is None:
+             # Resolve project root from current file location
             current_dir = os.path.dirname(os.path.abspath(__file__))
             # Agents/Historian -> Agents -> Root
-            root_dir = os.path.dirname(os.path.dirname(current_dir))
-            db_path = os.path.join(root_dir, "verifai_fhir.duckdb")
+            self.root_dir = os.path.dirname(os.path.dirname(current_dir))
+        else:
+            self.root_dir = root_dir
             
-        self.con = duckdb.connect(db_path)
+        self.db_path = os.path.join(self.root_dir, DB_FILENAME)
+        self.faiss_path = os.path.join(self.root_dir, FAISS_FILENAME)
+        self.mapping_path = os.path.join(self.root_dir, MAPPING_FILENAME)
+        
+        # Connect to DuckDB
+        self.con = duckdb.connect(self.db_path)
+        
+        # Load FAISS Resources (Lazy load or eager? Eager for now)
+        self.index = None
+        self.id_mapping = {}
+        self.embedder = None
+        
+        self._load_vector_resources()
 
+        # Pre-calculate code maps for fallback/hybrid logic
+        self.all_condition_codes = set()
+        self.all_lab_codes = set()
+        for plan in CHEST_HYPOTHESIS_CODE_MAP.values():
+            self.all_condition_codes.update(plan.get("conditions", []))
+            self.all_lab_codes.update(plan.get("labs", []))
+
+    def _load_vector_resources(self):
+        """Loads FAISS index, ID mapping, and Embedding model."""
+        if os.path.exists(self.faiss_path):
+            print(f"[FHIRClient] Loading FAISS index from {self.faiss_path}...")
+            self.index = faiss.read_index(self.faiss_path)
+        else:
+            print("[FHIRClient] WARNING: FAISS index not found. Semantic search will be disabled.")
+            
+        if os.path.exists(self.mapping_path):
+             with open(self.mapping_path, "r") as f:
+                # json keys are strings, but we need int keys for reverse lookup if needed
+                # Actually mapping is faiss_id (str) -> resource_id (str)
+                self.id_mapping = json.load(f)
+                # create reverse mapping resource_id -> faiss_id (int)
+                self.rid_to_faiss = {v: int(k) for k, v in self.id_mapping.items()}
+
+        print(f"[FHIRClient] Loading embedding model {EMBEDDING_MODEL}...")
+        self.embedder = SentenceTransformer(EMBEDDING_MODEL)
+
+    # PUBLIC API
     
-    # PUBLIC API (MODIFIED)
-    def fetch_evidence_for_hypothesis(
-        self, patient_id: str, hypothesis: str
-    ) -> Dict:
-        hypothesis_key = normalize_hypothesis(hypothesis)
-        plan = CHEST_HYPOTHESIS_CODE_MAP.get(hypothesis_key)
+    def fetch_evidence_for_hypothesis(self, patient_id: str, hypothesis: str) -> Dict:
+        """
+        Public facade for the agent. Now uses hybrid retrieval.
+        """
+        return self.fetch_evidence_hybrid(patient_id, hypothesis)
 
-        # We fetch everything relevant to provide full context
-        evidence = self._empty_evidence()
+    def fetch_evidence_hybrid(self, patient_id: str, hypothesis: str) -> Dict:
+        """
+        Hybrid Retrieval:
+        1. SQL: Filter by patient_id + time window (5 years).
+        2. Vector: Rank results by similarity to hypothesis.
+        """
         
-        # 1. Fetch Structured Data (Conditions, Labs, Meds)
-        if plan:
-            evidence["conditions"] = self._query_conditions(patient_id, plan["conditions"])
-            evidence["observations"] = self._query_observations(patient_id, plan["labs"])
+        # 1. SQL Candidate Generation
+        # Fetch relevant resources for this patient within time window
+        candidates = self._fetch_candidates_sql(patient_id)
         
-        evidence["medications"] = self._query_medications(patient_id)
+        if not candidates:
+            return self._empty_evidence()
+
+        # 2. Semantic Ranking
+        # If we have a hypothesis and vector resources, rank them
+        if hypothesis and self.index and self.embedder:
+            ranked_candidates = self._rank_candidates(candidates, hypothesis)
+        else:
+            # Fallback to pure SQL results (unranked or time-sorted)
+            ranked_candidates = sorted(candidates, key=lambda x: x.get("event_time") or "", reverse=True)
+
+        # 3. Structure Output
+        return self._structure_output(ranked_candidates)
+
+    def _fetch_candidates_sql(self, patient_id: str) -> List[Dict]:
+        """
+        Fetch all potentially relevant resources for the patient from DuckDB.
+        """
+        query = """
+            SELECT id, resourceType, primary_code, normalized_summary, event_time, raw_json
+            FROM fhir_resources
+            WHERE patient_ref = ?
+        """
+        rows = self.con.execute(query, [patient_id]).fetchall()
         
-        # 2. Fetch Additional Context (Procedures, Allergies, Encounters)
-        evidence["procedures"] = self._query_procedures(patient_id)
-        evidence["allergies"] = self._query_allergies(patient_id)
-        evidence["encounters"] = self._query_encounters(patient_id)
+        results = []
+        for r in rows:
+            results.append({
+                "id": r[0],
+                "resourceType": r[1],
+                "primary_code": r[2],
+                "normalized_summary": r[3],
+                "event_time": r[4],
+                "raw_json": json.loads(r[5])
+            })
+        return results
 
-        # 3. Fetch Document-based evidence (Radiology reports, etc.)
-        evidence["documents"] = self._fetch_documents(patient_id)
+    def _rank_candidates(self, candidates: List[Dict], hypothesis: str) -> List[Dict]:
+        """
+        Ranks candidates by embedding similarity to hypothesis.
+        No reconstruct usage.
+        """
 
-        evidence["source"] = "hybrid"
-        return evidence
-    # STRUCTURED PATH
+        # 1️⃣ Embed hypothesis
+        hyp_vec = self.embedder.encode(
+            [hypothesis],
+            convert_to_numpy=True,
+            normalize_embeddings=True
+        )[0]  # shape (dim,)
 
-    def _fetch_structured(self, patient_id: str, plan: Dict) -> Dict:
-        return {
-            "conditions": self._query_conditions(patient_id, plan["conditions"]),
-            "observations": self._query_observations(patient_id, plan["labs"]),
-            "medications": self._query_medications(patient_id),
-        }
+        # 2️⃣ Embed candidate summaries
+        summaries = [c["normalized_summary"] for c in candidates]
 
-    def _has_structured_signal(self, evidence: Dict) -> bool:
-        return (
-            len(evidence["conditions"]) > 0
-            or len(evidence["observations"]) > 0
-            or len(evidence["medications"]) > 0
+        cand_vecs = self.embedder.encode(
+            summaries,
+            convert_to_numpy=True,
+            normalize_embeddings=True
         )
-    # DOCUMENT FALLBACK
-    def _fetch_documents(self, patient_id: str):
-        rows = self.con.execute("""
-            SELECT json
-            FROM fhir
-            WHERE resourceType IN ('DiagnosticReport', 'DocumentReference')
-              AND patient_id = ?
-        """, [patient_id]).fetchall()
 
-        docs = []
-        for (raw,) in rows:
-            r = json.loads(raw)
-            text = self._extract_document_text(r)
-            if text:
-                docs.append({
-                    "resourceType": r["resourceType"],
-                    "id": r["id"],
-                    "text": text,
-                    "category": r.get("category", [{}])[0].get("coding", [{}])[0].get("display", "Clinical Note")
-                })
-        return docs
+        # 3️⃣ Compute cosine similarity (dot product since normalized)
+        scores = cand_vecs @ hyp_vec
 
-    def _extract_document_text(self, resource: dict) -> str | None:
-        # DiagnosticReport.presentedForm[].data (base64)
-        if resource["resourceType"] == "DiagnosticReport":
-            for form in resource.get("presentedForm", []):
-                if "data" in form:
-                    return self._decode_base64(form["data"])
+        # 4️⃣ Attach scores
+        for i, c in enumerate(candidates):
+            c["score"] = float(scores[i])
 
-        # DocumentReference.content[].attachment.data
-        if resource["resourceType"] == "DocumentReference":
-            for c in resource.get("content", []):
-                att = c.get("attachment", {})
-                if "data" in att:
-                    return self._decode_base64(att["data"])
-                # Sometimes it might be in content.attachment.url or title if not data
-                if "title" in att:
-                    return att["title"]
+        # 5️⃣ Sort descending
+        candidates.sort(key=lambda x: x["score"], reverse=True)
 
-        return None
+        return candidates
 
-    def _decode_base64(self, data: str) -> str:
-        try:
-            return base64.b64decode(data).decode("utf-8", errors="ignore")
-        except Exception:
-            return None
 
-    # STRUCTURED QUERIES
+    def _structure_output(self, ranked_candidates: List[Dict]) -> Dict:
+        """
+        Groups ranked candidates into the standard evidence dictionary.
+        """
+        evidence = self._empty_evidence()
+        evidence["source"] = "hybrid_faiss"
+        
+        for c in ranked_candidates:
+            # raw_json is what the agent expects
+            resource = c["raw_json"]
+            # Inject score and summary for strict transparency if needed
+            if "score" in c:
+                resource["_relevance_score"] = c["score"]
+            resource["_summary"] = c["normalized_summary"]
 
-    def _query_conditions(self, patient_id, codes):
-        if not codes:
-            return []
-        return self._query_by_codes("Condition", patient_id, codes)
-
-    def _query_observations(self, patient_id, codes):
-        if not codes:
-            return []
-        return self._query_by_codes("Observation", patient_id, codes)
-
-    def _query_medications(self, patient_id):
-        return self._query_all_by_rtype("MedicationRequest", patient_id)
-
-    def _query_procedures(self, patient_id):
-        return self._query_all_by_rtype("Procedure", patient_id)
-
-    def _query_allergies(self, patient_id):
-        return self._query_all_by_rtype("AllergyIntolerance", patient_id)
-
-    def _query_encounters(self, patient_id):
-        return self._query_all_by_rtype("Encounter", patient_id)
-
-    def _query_all_by_rtype(self, rtype, patient_id):
-        rows = self.con.execute(f"""
-            SELECT json
-            FROM fhir
-            WHERE resourceType = '{rtype}'
-              AND patient_id = ?
-        """, [patient_id]).fetchall()
-        return [json.loads(r[0]) for r in rows]
-
-    def _query_by_codes(self, rtype, patient_id, codes):
-        rows = self.con.execute(f"""
-            SELECT json
-            FROM fhir
-            WHERE resourceType = '{rtype}'
-              AND patient_id = ?
-        """, [patient_id]).fetchall()
-
-        matches = []
-        for (raw,) in rows:
-            r = json.loads(raw)
-            # Handle list of codings
-            for coding in r.get("code", {}).get("coding", []):
-                if coding.get("code") in codes:
-                    matches.append(r)
-                    break
-        return matches
-    # UTILS
+            rtype = c["resourceType"]
+            
+            if rtype == "Condition":
+                evidence["conditions"].append(resource)
+            elif rtype == "Observation":
+                evidence["observations"].append(resource)
+            elif rtype == "MedicationRequest":
+                evidence["medications"].append(resource)
+            elif rtype == "Procedure":
+                evidence["procedures"].append(resource)
+            elif rtype == "AllergyIntolerance":
+                evidence["allergies"].append(resource)
+            elif rtype == "Encounter":
+                evidence["encounters"].append(resource)
+            elif rtype in ["DiagnosticReport", "DocumentReference"]:
+                doc_entry = {
+                    "resourceType": rtype,
+                    "id": c["id"],
+                    "text": c["normalized_summary"],
+                    "category": "Clinical Note",
+                    "date": str(c["event_time"]),
+                    "_relevance_score": c.get("score"),
+                    "_summary": c.get("normalized_summary")
+                }
+                evidence["documents"].append(doc_entry)
+                
+        return evidence
 
     def _empty_evidence(self):
         return {
@@ -176,5 +218,15 @@ class FHIRClient:
             "encounters": [],
             "documents": []
         }
+
+    # For legacy compatibility if needed
+    def fetch_full_patient_context(self, patient_id):
+        return self.fetch_evidence_hybrid(patient_id, "")
+        
+    def filter_patient_context(self, context, hypothesis):
+        # This is now largely redundant as hybrid does it all, 
+        # but if the agent logic relies on 2-step:
+        # We can implement re-ranking here if context has all candidates.
+        return context 
 
 fhir_client = FHIRClient()

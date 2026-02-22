@@ -15,13 +15,12 @@ import re
 from app.config import settings
 from .llm_critic import medgemma_critic  # >>> LLM-CRITIC
 
-# Historical mistake memory
+# Historical mistake memory — via repository abstraction (Supabase HNSW or DuckDB fallback)
 try:
-    from db.past_mistakes import retrieve_similar_mistakes
+    from db.past_mistakes_repository import get_past_mistakes_repository
     from uncertainty.case_embedding import generate_case_summary, generate_case_embedding
     PAST_MISTAKES_AVAILABLE = True
 except ImportError as e:
-    logger.warning(f"Past mistakes module not available: {e}")
     PAST_MISTAKES_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
@@ -93,9 +92,11 @@ class CriticModel:
         findings: str,
         impression: str,
         kle_uncertainty: float,
-        historian_output=None,  # NEW: FHIR clinical context
-        literature_output=None   # NEW: Literature evidence
-    ) -> tuple[bool, list[str], str | None, float]:
+        chexbert_output=None,   # ✅ NEW
+        historian_output=None,
+        literature_output=None
+        ) -> tuple[bool, list[str], str | None, float]:
+
         """
         Evaluate whether the linguistic certainty is appropriate given the epistemic uncertainty
         AND enriched clinical context.
@@ -160,71 +161,103 @@ class CriticModel:
             safety_score = min(safety_score, 0.5)  # Cap safety if overconfident
 
         
-        # NEW: Stage 1.5: Context-enriched evaluation
-        
-        # Evaluate consistency with clinical history and literature
-        context_penalty = 0.0
-        
-        # Check FHIR clinical history
+        # ── Stage 2: Deterministic Historian Challenge ──────────────────────────
+        #
+        # Always runs when historian_output is present, regardless of ENABLE_LLM_CRITIC.
+        # Checks whether contradicting clinical facts are unaddressed in the impression.
+
         if historian_output:
-            contradicting = historian_output.contradicting_facts if hasattr(historian_output, 'contradicting_facts') else []
-            supporting = historian_output.supporting_facts if hasattr(historian_output, 'supporting_facts') else []
-            
-            # Flag if many contradictions not addressed in impression
-            if len(contradicting) > 2:
-                concern_flags.append(
-                    f"Clinical history contains {len(contradicting)} contradicting facts not addressed in impression"
+            contradicting = (
+                historian_output.contradicting_facts
+                if hasattr(historian_output, "contradicting_facts") else []
+            )
+            supporting = (
+                historian_output.supporting_facts
+                if hasattr(historian_output, "supporting_facts") else []
+            )
+
+            if contradicting:
+                # Build a brief description from top contradictions (max 3)
+                top_desc = "; ".join(
+                    f.description[:80] for f in contradicting[:3]
                 )
-                context_penalty += 0.10
-            
-            # Flag if strong clinical support exists but impression is overly cautious
+                concern_flags.append(
+                    f"[HISTORIAN CHALLENGE] {len(contradicting)} contradicting clinical "
+                    f"fact(s) not addressed in impression. Top: {top_desc}"
+                )
+                # Proportional penalty: 5% per contradiction, capped at 20%
+                hist_penalty = min(0.05 * len(contradicting), 0.20)
+                safety_score = max(0.0, safety_score - hist_penalty)
+                logger.info(
+                    "[CRITIC] Historian challenge: %d contradictions, penalty=%.2f",
+                    len(contradicting), hist_penalty,
+                )
+
             if len(supporting) > 3 and linguistic_certainty < 0.4:
+                # Strong clinical support exists but impression is overly cautious
+                # (not a problem — deliberately NOT penalised)
                 concern_flags.append(
-                    "Strong clinical support exists but impression remains overly cautious"
+                    f"[HISTORIAN NOTE] {len(supporting)} supporting clinical facts available; "
+                    "impression is appropriately cautious."
                 )
-                # This is actually GOOD (appropriate caution), so reduce penalty slightly
-                context_penalty -= 0.05
-        
-        # Check literature evidence
+
+        # ── Stage 3: Deterministic Literature Challenge ──────────────────────────
+        #
+        # Always runs when literature_output is present.
+        # Flags when published evidence suggests differentials the impression omits.
+
         if literature_output:
-            # Handle both structured and string outputs
+            impression_mentions_differentials = self._mentions_differentials(impression)
+
             if isinstance(literature_output, str):
-                # String summary - check if it mentions differentials
-                if "differential" in literature_output.lower() or "alternative" in literature_output.lower():
-                    if not self._mentions_differentials(impression):
-                        concern_flags.append(
-                            "Literature suggests alternative diagnoses not mentioned in impression"
-                        )
-                        context_penalty += 0.08
+                # String summary path
+                lit_lower = literature_output.lower()
+                if (
+                    ("differential" in lit_lower or "alternative" in lit_lower)
+                    and not impression_mentions_differentials
+                ):
+                    concern_flags.append(
+                        "[LITERATURE CHALLENGE] Literature evidence suggests alternative "
+                        "diagnoses; impression does not mention differentials."
+                    )
+                    safety_score = max(0.0, safety_score - 0.05)
+                    logger.info("[CRITIC] Literature challenge (string): differentials omitted")
             else:
-                # Structured output
-                citations = literature_output.citations if hasattr(literature_output, 'citations') else []
-                if len(citations) > 0:
-                    # Literature found relevant studies
-                    if not self._mentions_differentials(impression):
-                        concern_flags.append(
-                            f"Literature found {len(citations)} relevant studies but impression does not mention differentials"
-                        )
-                        context_penalty += 0.08
-        
-        # Apply context penalty to safety score
-        safety_score = max(0.0, min(1.0, safety_score - context_penalty))
+                # Structured LiteratureOutput path
+                citations = (
+                    literature_output.citations
+                    if hasattr(literature_output, "citations") else []
+                )
+                if citations and not impression_mentions_differentials:
+                    top_title = citations[0].title[:80] if citations else ""
+                    concern_flags.append(
+                        f"[LITERATURE CHALLENGE] {len(citations)} relevant study(ies) found; "
+                        f"impression omits differentials. Top study: \"{top_title}\""
+                    )
+                    safety_score = max(0.0, safety_score - 0.08)
+                    logger.info(
+                        "[CRITIC] Literature challenge: %d citations, differentials omitted",
+                        len(citations),
+                    )
 
 
-        # Stage 1.75: Historical Mistake Memory Retrieval  >>> PAST-MISTAKES
+        # ── Stage 4: Historical Mistake Memory Retrieval ─────────────────────────
+        # >>> PAST-MISTAKES
         
         similar_mistakes_count = 0
         historical_risk_level = "none"
+        historical_context: list[dict] = []
         
         if settings.ENABLE_PAST_MISTAKES_MEMORY and PAST_MISTAKES_AVAILABLE:
             try:
                 # Extract disease type from chexbert labels or impression
                 chexbert_labels_dict = {}
-                if hasattr(self, '_current_chexbert_output') and self._current_chexbert_output:
-                    chexbert_labels_dict = self._current_chexbert_output.labels
+                if chexbert_output and hasattr(chexbert_output, "labels"):
+                    chexbert_labels_dict = chexbert_output.labels
                 
                 disease_type = self._extract_disease_type(impression, chexbert_labels_dict)
-                
+                print("HISTORY DEBUG — disease_type:", disease_type)
+
                 # Generate current case summary and embedding
                 current_summary = generate_case_summary(
                     disease_type=disease_type,
@@ -238,18 +271,29 @@ class CriticModel:
                 )
                 current_embedding = generate_case_embedding(current_summary)
                 
-                # Retrieve historically similar mistakes
-                kle_min = max(0.0, kle_uncertainty - settings.PAST_MISTAKES_KLE_TOLERANCE)
-                kle_max = min(1.0, kle_uncertainty + settings.PAST_MISTAKES_KLE_TOLERANCE)
-                
-                similar_mistakes = retrieve_similar_mistakes(
-                    disease_type=disease_type,
-                    embedding=current_embedding,
-                    kle_uncertainty_range=(kle_min, kle_max),
-                    severity_min=1,
-                    top_k=settings.PAST_MISTAKES_TOP_K,
-                    similarity_threshold=settings.PAST_MISTAKES_SIMILARITY_THRESHOLD
+                # Retrieve historically similar mistakes via hybrid repository
+                kle_min = 0.0
+                kle_max = 1.0
+                _repo = get_past_mistakes_repository()
+                logger.info(
+                    f"[CRITIC] Past-mistakes backend: {_repo.backend_name}"
                 )
+
+                try:
+                    similar_mistakes = _repo.retrieve_similar_mistakes(
+                        disease_type=disease_type,
+                        embedding=current_embedding,
+                        kle_uncertainty_range=(kle_min, kle_max),
+                        severity_min=1,
+                        top_k=settings.PAST_MISTAKES_TOP_K,
+                        similarity_threshold=settings.PAST_MISTAKES_SIMILARITY_THRESHOLD,
+                    )
+                except Exception as _repo_err:
+                    logger.warning(
+                        f"[CRITIC] Past-mistakes retrieval via {_repo.backend_name} failed: "
+                        f"{_repo_err}. Skipping historical context for this evaluation."
+                    )
+                    similar_mistakes = []
                 
                 # Apply neural re-ranking if enabled
                 if similar_mistakes and getattr(settings, 'ENABLE_PAST_MISTAKES_RERANKING', False):
@@ -271,6 +315,20 @@ class CriticModel:
                 
                 similar_mistakes_count = len(similar_mistakes)
                 
+                # --- Build structured top-3 context list -------------------------
+                historical_context: list[dict] = []
+                for m in similar_mistakes[:3]:
+                    historical_context.append({
+                        "disease_type":    m.get("disease_type", ""),
+                        "error_type":      m.get("error_type", ""),
+                        "severity_level":  m.get("severity_level"),
+                        "kle_uncertainty": m.get("kle_uncertainty"),
+                        "clinical_summary": (
+                            (m.get("clinical_summary") or "")[:300]
+                        ),
+                        "similarity": round(float(m.get("similarity", 0.0)), 4),
+                    })
+                
                 if similar_mistakes:
                     # Analyze severity of similar mistakes
                     high_severity_count = sum(1 for m in similar_mistakes if m['severity_level'] >= 4)
@@ -286,9 +344,9 @@ class CriticModel:
                         )
                         
                         # Show specific past error types
-                        error_types = [m['error_type'] for m in similar_mistakes[:3]]
+                        error_types_hist = [m['error_type'] for m in similar_mistakes[:3]]
                         concern_flags.append(
-                            f"[HISTORY] Past error patterns: {', '.join(set(error_types))}"
+                            f"[HISTORY] Past error patterns: {', '.join(set(error_types_hist))}"
                         )
                         
                         # Increase risk weighting significantly
@@ -312,6 +370,37 @@ class CriticModel:
                         # Small penalty
                         safety_score = max(0.0, safety_score - 0.05)
                     
+                    # --- Generate human-readable narrative paragraph -----------
+                    n = len(similar_mistakes)
+                    count_word = {1: "One", 2: "Two", 3: "Three"}.get(n, str(n))
+                    primary_errors = list({
+                        m["error_type"].replace("_", " ") for m in similar_mistakes[:3]
+                    })
+                    error_phrase = (
+                        primary_errors[0] if len(primary_errors) == 1
+                        else ", ".join(primary_errors[:-1]) + f" and {primary_errors[-1]}"
+                    )
+                    avg_sim = sum(m.get("similarity", 0.0) for m in similar_mistakes[:3]) / min(n, 3)
+                    avg_kle = [
+                        m["kle_uncertainty"] for m in similar_mistakes[:3]
+                        if m.get("kle_uncertainty") is not None
+                    ]
+                    kle_phrase = (
+                        f" under similar uncertainty conditions (avg KLE ≈ {sum(avg_kle)/len(avg_kle):.2f})"
+                        if avg_kle else ""
+                    )
+                    top_summary = historical_context[0]["clinical_summary"] if historical_context else ""
+                    summary_snippet = (
+                        f' The most relevant case notes: "{top_summary[:120]}…"'
+                        if top_summary else ""
+                    )
+                    narrative = (
+                        f"{count_word} similar {disease_type} case(s) were previously matched "
+                        f"(avg cosine similarity {avg_sim:.2f}), primarily involving {error_phrase}{kle_phrase}."
+                        f"{summary_snippet}"
+                    )
+                    concern_flags.append(f"[HISTORY CONTEXT] {narrative}")
+                    
                     # Log for debugging
                     logger.info(
                         f"CRITIC-HISTORY: Found {similar_mistakes_count} similar mistakes "
@@ -319,6 +408,7 @@ class CriticModel:
                     )
                     
             except Exception as exc:
+                historical_context = []
                 logger.warning(f"[CRITIC] Past mistakes retrieval failed: {exc}")
                 # Don't fail the entire evaluation if history lookup fails
 
@@ -388,10 +478,16 @@ class CriticModel:
                     "CRITIC-LLM: Semantic critic unavailable — using rule-based output only"
                 )
 
-        # Return with historical signals
-        # Note: We need to return as tuple for backward compatibility
-        # The graph state will extract these from critic_output object
-        return is_overconfident, concern_flags, recommended_hedging, safety_score, similar_mistakes_count, historical_risk_level
+        # Return with historical signals (7-tuple)
+        return (
+            is_overconfident,
+            concern_flags,
+            recommended_hedging,
+            safety_score,
+            similar_mistakes_count,
+            historical_risk_level,
+            historical_context,
+        )
     
     def _mentions_differentials(self, impression: str) -> bool:
         """Check if impression mentions differential diagnoses."""
@@ -424,8 +520,8 @@ class CriticModel:
                     'infiltration': 'pneumonia',
                     'pneumonia': 'pneumonia',
                     'edema': 'edema',
-                    'effusion': 'effusion',
-                    'pleural effusion': 'effusion',
+                    'effusion': 'pleural_effusion',
+                    'pleural effusion': 'pleural_effusion',
                     'atelectasis': 'atelectasis',
                     'cardiomegaly': 'cardiomegaly',
                     'enlarged cardiomediastinum': 'cardiomegaly',

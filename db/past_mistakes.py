@@ -117,20 +117,16 @@ def get_connection(db_path: str = None) -> duckdb.DuckDBPyConnection:
 
 @contextmanager
 def get_db(db_path: str = None):
-    """
-    Context manager for database operations with automatic commit/rollback.
-    
-    Usage:
-        with get_db() as conn:
-            conn.execute("INSERT INTO ...")
-    """
     conn = get_connection(db_path)
     try:
         yield conn
-        conn.commit()
     except Exception:
-        conn.rollback()
+        try:
+            conn.rollback()
+        except:
+            pass
         raise
+
 
 
 def init_past_mistakes_db(db_path: str = None):
