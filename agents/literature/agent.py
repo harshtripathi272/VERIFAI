@@ -186,49 +186,52 @@ class MedGemmaAgent:
         """
         Run literature search with optimizations.
         
-        Strategy:
-        1. Try smart tool selection first (no LLM overhead)
-        2. If that fails or for complex queries, use parallel multi-search
-        3. Only fall back to full ReAct if needed
+        Strategy (Refactored):
+        1. Run parallel search across all 3 APIs (PubMed, Europe PMC, Semantic Scholar) to retrieve the raw documents.
+        2. Format those documents into a context block.
+        3. Perform a single pass through MedGemma to evaluate the evidence against the clinical findings.
         """
-        # === OPTIMIZATION 4: Fast path for simple queries ===
-        if settings.USE_FAST_LITERATURE_MODE:
-            print("[LiteratureAgent] Using fast parallel mode")
-            return self.run_parallel_search(user_query)
+        print("[LiteratureAgent] Fetching raw literature from APIs...")
+        # Get the formatted string of the top papers directly from the APIs
+        literature_context = self.run_parallel_search(user_query)
         
-        # === Original ReAct loop (fallback) ===
-        prompt = (
-            f"{SYSTEM_PROMPT}\n\n"
-            f"USER QUERY:\n{user_query}\n"
-            f"IMPORTANT: Choose ONE tool and provide final answer in 1-2 steps.\n"
-        )
+        if "No relevant literature found." in literature_context:
+            return "No relevant literature found. Unable to synthesize a conclusion."
 
-        for step in range(self.max_steps):
-            raw_output = self._generate(prompt)
-            parsed = self._extract_json(raw_output)
+        print("[LiteratureAgent] Synthesizing findings with MedGemma...")
+        
+        # Build a single-shot synthesis prompt
+        synthesis_prompt = f"""
+        You are MedGemma, an expert clinical researcher.
+        
+        CLINICAL QUERY AND RADIOLOGIST FINDINGS:
+        {user_query}
+        
+        RETRIEVED BIOMEDICAL LITERATURE:
+        {literature_context}
+        
+        TASK:
+        Write a concise, 1-2 paragraph clinical summary that evaluates whether the retrieved literature SUPPORTS or CONTRADICTS the radiologist's findings and diagnosis.
+        Note any alternative diagnoses suggested by the literature.
+        
+        REQUIREMENTS:
+        - Do NOT output JSON.
+        - Write only the natural language summary.
+        - Be objective and clinical.
+        """
 
-            if "final" in parsed:
-                return parsed["final"]
-
-            if "action" not in parsed:
-                # Fallback to parallel search
-                return self.run_parallel_search(user_query)
-
-            observation = self._run_tool_parallel(parsed["action"]["tool"], parsed["action"]["input"])
-
-            # === OPTIMIZATION 5: Early stopping if good results ===
-            if len(observation.get('results', [])) >= 3:
-                return self._format_literature_summary(observation['results'])
-
-            prompt += (
-                "\nASSISTANT_ACTION:\n"
-                f"{json.dumps(parsed['action'], indent=2)}\n"
-                "\nOBSERVATION:\n"
-                f"{json.dumps(observation, indent=2)}\n"
-            )
-
-        # If exceeded steps, return what we have
-        return self.run_parallel_search(user_query)
+        try:
+            # Single pass generation
+            summary = self._generate(synthesis_prompt)
+            
+            # Combine the raw citations with the AI's thoughts
+            final_output = f"LITERATURE SYNTHESIS:\n{summary.strip()}\n\nSOURCES USED:\n{literature_context}"
+            return final_output
+            
+        except Exception as e:
+            print(f"[LiteratureAgent] Synthesis failed: {e}")
+            print("[LiteratureAgent] Falling back to returning raw API citations...")
+            return literature_context
 
 
 # === OPTIMIZATION 6: Query result caching ===

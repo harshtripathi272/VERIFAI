@@ -40,8 +40,12 @@ def search_pubmed(query: str, max_results: int = 5) -> list[LiteratureCitation]:
     Returns:
         List of LiteratureCitation objects
     """
-    if settings.MOCK_MODELS or not ENTREZ_AVAILABLE:
+    if settings.MOCK_MODELS:
         return _mock_search(query)
+    
+    if not ENTREZ_AVAILABLE:
+        print("[PubMed] Biopython not installed. Returning empty results.")
+        return []
     
     _configure_entrez()
     
