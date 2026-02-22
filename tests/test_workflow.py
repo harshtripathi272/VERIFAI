@@ -34,9 +34,24 @@ from graph.workflow import app as verifai_graph
 TEST_PATIENT_ID = "6265ea60-b031-40da-95bb-0ef6178a5a45"
 
 initial_state = {
-    "image_path": "./img1.jpg",
-    "view": "AP",
+    "image_paths": ["../dataset/med/official_data_iccv_final/files/p10/p10010440/s56908581/0cadb1ed-80bd62aa-8d4563e1-2289ab1f-5be0b197.jpg","../dataset/med/official_data_iccv_final/files/p10/p10010440/s56908581/e0ceccb1-efe6919f-2b3c8cd2-c087f0b0-3d3adc66.jpg"],
+    "views": ["AP","LATERAL"],
     "patient_id": TEST_PATIENT_ID,
+    "current_fhir": {
+        "resourceType": "DiagnosticReport",
+        "id": "dummy-report-123",
+        "status": "final",
+        "code": {
+            "coding": [
+                {
+                    "system": "http://loinc.org",
+                    "code": "11528-7",
+                    "display": "Radiology Report"
+                }
+            ]
+        },
+        "conclusion": "Mild bilateral opacities. Cannot exclude early pneumonia."
+    },
     "radiologist_output": None,
     "critic_output": None,
     "historian_output": None,
@@ -62,8 +77,8 @@ rad = result.get("radiologist_output")
 if rad:
     print(f"  Findings  : {rad.findings[:160]}")
     print(f"  Impression: {rad.impression[:160]}")
-    kle = result.get("radiologist_kle_uncertainty")
-    print(f"  KLE Uncert: {kle:.4f}" if kle is not None else "  KLE Uncert: N/A")
+    uncertainty = result.get("current_uncertainty")
+    print(f"  Uncertainty: {uncertainty:.4f}" if uncertainty is not None else "  Uncertainty: N/A")
 else:
     print("  ✗ No radiologist output")
 

@@ -35,41 +35,17 @@ class Rule:
     condition: Callable[[Dict[str, Any]], bool]
 
 
-# ============================================================================
 # RULE DEFINITIONS
-# ============================================================================
-
 RULES = [
     Rule(
         name="Overconfident Language",
         severity="FLAG",
-        message="High uncertainty (KLE>0.6) but definitive language used in impression",
+        message="High uncertainty (>0.6) but definitive language used in impression",
         condition=lambda s: (
-            s.get("radiologist_kle_uncertainty", 0) > 0.6 and
+            s.get("current_uncertainty", 0) > 0.6 and
             s.get("radiologist_output") is not None and
             any(w in s["radiologist_output"].impression.lower() 
                 for w in ["definitely", "consistent with", "confirmed", "no evidence of"])
-        )
-    ),
-    
-    Rule(
-        name="Spatial Contradiction",
-        severity="FLAG",
-        message="Diagnosis region mismatch with Grad-CAM heatmap location",
-        condition=lambda s: (
-            s.get("chexbert_output") is not None and
-            s.get("radiologist_output") is not None and
-            hasattr(s["radiologist_output"], 'gradcam_anatomical_region') and
-            s["radiologist_output"].gradcam_anatomical_region is not None and
-            (
-                # Cardiomegaly but heatmap not in heart
-                (s["chexbert_output"].labels.get("Cardiomegaly") == "Positive" and
-                 s["radiologist_output"].gradcam_anatomical_region not in 
-                 ["cardiac_silhouette", "mediastinum"]) or
-                # Pneumonia but heatmap in heart
-                (s["chexbert_output"].labels.get("Pneumonia") == "Positive" and
-                 s["radiologist_output"].gradcam_anatomical_region == "cardiac_silhouette")
-            )
         )
     ),
     
@@ -104,24 +80,10 @@ RULES = [
     ),
     
     Rule(
-        name="Diffuse Heatmap Lobar Disease",
+        name="High System Uncertainty",
         severity="WARN",
-        message="Lobar pneumonia typically shows focal activation — heatmap is diffuse",
-        condition=lambda s: (
-            s.get("chexbert_output") is not None and
-            s.get("radiologist_output") is not None and
-            s["chexbert_output"].labels.get("Pneumonia") == "Positive" and
-            hasattr(s["radiologist_output"], 'gradcam_activation_mass') and
-            s["radiologist_output"].gradcam_activation_mass is not None and
-            s["radiologist_output"].gradcam_activation_mass > 0.70
-        )
-    ),
-    
-    Rule(
-        name="High KLE Score",
-        severity="WARN",
-        message="Very high epistemic uncertainty (KLE>0.7) suggests model disagreement",
-        condition=lambda s: s.get("radiologist_kle_uncertainty", 0) > 0.7
+        message="Very high epistemic uncertainty (>0.7) suggests model disagreement",
+        condition=lambda s: s.get("current_uncertainty", 0) > 0.7
     ),
     
     Rule(

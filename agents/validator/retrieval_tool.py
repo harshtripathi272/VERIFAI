@@ -126,19 +126,28 @@ class CXRRetrieverTool:
         
         return []
     
-    def _load_study_images(self, image_path_or_dir: str) -> List[Dict[str, Any]]:
+    def _load_study_images(self, image_path_or_dir: Any) -> List[Dict[str, Any]]:
         """
         Load all images for the study.
         
-        For current VERIFAI implementation, we typically have a single image path.
-        This method provides flexibility for multi-view studies.
+        Supports:
+        - Single string path to image file
+        - List of string paths to image files
+        - Path to directory
         
         Args:
-            image_path_or_dir: Path to image file or directory
+            image_path_or_dir: Path(s) to image file(s) or directory
         
         Returns:
             List of dicts: [{"path": str, "view_position": str}, ...]
         """
+        # Handle list of paths
+        if isinstance(image_path_or_dir, list):
+            results = []
+            for p in image_path_or_dir:
+                results.extend(self._load_study_images(p))
+            return results
+            
         path = Path(image_path_or_dir)
         
         if path.is_file():
@@ -223,7 +232,7 @@ class CXRRetrieverTool:
                 - query_views_used: Which views were used for query
         """
         # Get all images for current study
-        study_images = self._load_study_images(state["image_path"])
+        study_images = self._load_study_images(state["image_paths"])
         
         if not study_images:
             return {

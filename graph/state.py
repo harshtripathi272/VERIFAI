@@ -46,11 +46,6 @@ class RadiologistOutput(BaseModel):
     # New fields for Disease Classification & Interpretability
     disease_probabilities: dict[str, float] = Field(default_factory=dict, description="Probabilities for 14 CheXbert diseases")
     heatmap_paths: dict[str, str] = Field(default_factory=dict, description="Paths to saved heatmap images for positive detections")
-    # Grad-CAM visualization fields (optional, for validation)
-    gradcam_heatmap_b64: Optional[str] = Field(None, description="Base64-encoded Grad-CAM heatmap overlay")
-    gradcam_peak_bbox: Optional[List[int]] = Field(None, description="Bounding box [x1, y1, x2, y2] of activation peak")
-    gradcam_activation_mass: Optional[float] = Field(None, description="Diffuseness score 0.0-1.0 (higher = more diffuse)")
-    gradcam_anatomical_region: Optional[str] = Field(None, description="Anatomical region of peak activation (e.g., 'right_lower_lobe')")
 
 
 class CheXbertOutput(BaseModel):
@@ -205,10 +200,11 @@ class VerifaiState(TypedDict):
     _session_id: Optional[str]  # DB logging session ID (auto-generated if not provided)
     
     # === Input ===
-    image_path: str
+    image_paths: List[str]
     patient_id: Optional[str]
     dicom_metadata: Optional[dict[str, Any]]
-    view : Optional[str]
+    views: List[str]
+    current_fhir: Optional[dict[str, Any]]
     
     # === Agent Outputs ===
     radiologist_output: Optional[RadiologistOutput]
@@ -224,8 +220,11 @@ class VerifaiState(TypedDict):
     routing_decision: str
     steps_taken: int
     
-    # === KLE Uncertainty (for logging/analysis) ===
-    radiologist_kle_uncertainty: Optional[float]  # Early epistemic instability score
+    # === Uncertainty Tracking ===
+    # current_uncertainty is the authoritative MUC system value (updated at each node)
+    # radiologist_kle_uncertainty is a legacy alias kept solely for DB logger
+    # compatibility (column name in radiologist_logs / critic_logs is unchanged)
+    radiologist_kle_uncertainty: Optional[float]  # Legacy alias — DB compat only
     
     # === Final Result ===
     final_diagnosis: Optional[FinalDiagnosis]

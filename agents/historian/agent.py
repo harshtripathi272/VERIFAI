@@ -107,6 +107,7 @@ def historian_node(state: VerifaiState) -> dict:
     patient_id = state.get("patient_id")
     rad_output = state.get("radiologist_output")
     chexbert_output = state.get("chexbert_output")
+    current_fhir = state.get("current_fhir")
 
     # -------------------------------------------------------
     # Validate Inputs
@@ -192,7 +193,8 @@ def historian_node(state: VerifaiState) -> dict:
         # 🔥 Single MedGemma reasoning call
         reasoning_output = reason_over_fhir(
             hypothesis=hypothesis_name,
-            evidence=evidence
+            evidence=evidence,
+            current_fhir=current_fhir
         )
 
         # ---------------------------------------------------

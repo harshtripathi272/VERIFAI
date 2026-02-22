@@ -276,7 +276,7 @@ def validator_node(state: VerifaiState) -> Dict[str, Any]:
             "radiologist": {
                 "findings": state.get("radiologist_output").findings[:200] if state.get("radiologist_output") else None,
                 "impression": state.get("radiologist_output").impression[:200] if state.get("radiologist_output") else None,
-                "kle_uncertainty": state.get("radiologist_kle_uncertainty")
+                "current_uncertainty": state.get("current_uncertainty")
             },
             "chexbert": {
                 "positive_labels": [

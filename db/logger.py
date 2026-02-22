@@ -43,7 +43,13 @@ class AgentLogger:
         init_db()
 
         self.session_id = session_id or str(uuid.uuid4())
-        self.image_path = image_path
+        
+        # Normalize image_path to string if it's a list
+        if isinstance(image_path, list):
+            self.image_path = ", ".join(image_path)
+        else:
+            self.image_path = image_path
+            
         self.patient_id = patient_id
         self.workflow_type = workflow_type
         self._agent_count = 0
@@ -54,7 +60,7 @@ class AgentLogger:
                 """INSERT INTO workflow_sessions 
                    (session_id, image_path, patient_id, workflow_type, status, started_at)
                    VALUES (?, ?, ?, ?, 'running', ?)""",
-                (self.session_id, image_path, patient_id, workflow_type, datetime.utcnow().isoformat())
+                (self.session_id, self.image_path, patient_id, workflow_type, datetime.utcnow().isoformat())
             )
 
     # =========================================================================
@@ -115,11 +121,12 @@ class AgentLogger:
         """
         Log radiologist agent output.
         
-        Stores: plain-text findings, impression, and KLE uncertainty score.
+        Stores: plain-text findings, impression, and MUC uncertainty score.
         """
         t0 = time.time()
         rad_output = result.get("radiologist_output")
-        kle_uncertainty = result.get("radiologist_kle_uncertainty")
+        # Read from MUC state key; fallback to legacy key for compatibility
+        kle_uncertainty = result.get("current_uncertainty", result.get("radiologist_kle_uncertainty"))
         trace = result.get("trace", [])
 
         with get_db() as conn:
@@ -132,13 +139,18 @@ class AgentLogger:
                 if rad_output:
                     from app.config import settings
                     num_samples = getattr(settings, 'KLE_NUM_SAMPLES', 5)
+                    
+                    # Ensure image_path from state is also normalized
+                    image_path_state = state.get("image_path", "")
+                    if isinstance(image_path_state, list):
+                        image_path_state = ", ".join(image_path_state)
 
                     conn.execute(
                         """INSERT INTO radiologist_logs 
                            (session_id, invocation_id, image_path, findings_text,
                             impression_text, kle_uncertainty, num_samples)
                            VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                        (self.session_id, inv_id, state.get("image_path", ""),
+                        (self.session_id, inv_id, image_path_state,
                          rad_output.findings, rad_output.impression,
                          kle_uncertainty, num_samples)
                     )
@@ -172,7 +184,7 @@ class AgentLogger:
 
             try:
                 if critic_output:
-                    kle_input = state.get("radiologist_kle_uncertainty")
+                    kle_input = state.get("current_uncertainty", state.get("radiologist_kle_uncertainty"))
                     conn.execute(
                         """INSERT INTO critic_logs 
                            (session_id, invocation_id, is_overconfident,

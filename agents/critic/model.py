@@ -91,7 +91,7 @@ class CriticModel:
         self,
         findings: str,
         impression: str,
-        kle_uncertainty: float,
+        current_uncertainty: float,
         chexbert_output=None,   # ✅ NEW
         historian_output=None,
         literature_output=None
@@ -104,7 +104,7 @@ class CriticModel:
         Args:
             findings: FINDINGS text section
             impression: IMPRESSION text section
-            kle_uncertainty: Epistemic uncertainty score from KLE (0.0-1.0, higher = more uncertain)
+            current_uncertainty: MUC system uncertainty score (0.0-1.0, higher = more uncertain)
             historian_output: HistorianOutput with FHIR facts (optional)
             literature_output: LiteratureOutput with citations (optional) or string summary
             
@@ -128,20 +128,20 @@ class CriticModel:
         HIGH_CERTAINTY_THRESHOLD = 0.65
         HIGH_UNCERTAINTY_THRESHOLD = 0.45
         
-        if linguistic_certainty > HIGH_CERTAINTY_THRESHOLD and kle_uncertainty > HIGH_UNCERTAINTY_THRESHOLD:
+        if linguistic_certainty > HIGH_CERTAINTY_THRESHOLD and current_uncertainty > HIGH_UNCERTAINTY_THRESHOLD:
             is_overconfident = True
             concern_flags.append(
-                f"High linguistic certainty ({linguistic_certainty:.2f}) despite high epistemic uncertainty ({kle_uncertainty:.2f})"
+                f"High linguistic certainty ({linguistic_certainty:.2f}) despite high epistemic uncertainty ({current_uncertainty:.2f})"
             )
             concern_flags.extend(markers)
             recommended_hedging = (
                 "Consider using more hedging language (e.g., 'suggestive of', 'most consistent with', "
                 "'differential includes') to reflect the semantic instability observed across samples."
             )
-        elif linguistic_certainty > 0.8 and kle_uncertainty > 0.3:
+        elif linguistic_certainty > 0.8 and current_uncertainty > 0.3:
             # Moderate concern
             concern_flags.append(
-                f"Relatively assertive language ({linguistic_certainty:.2f}) with moderate uncertainty ({kle_uncertainty:.2f})"
+                f"Relatively assertive language ({linguistic_certainty:.2f}) with moderate uncertainty ({current_uncertainty:.2f})"
             )
             concern_flags.extend(markers)
         
@@ -153,7 +153,7 @@ class CriticModel:
         # Safety is high when:
         # - Low certainty + high uncertainty (appropriately cautious)
         # - High certainty + low uncertainty (appropriately confident)
-        certainty_uncertainty_gap = abs(linguistic_certainty - (1.0 - kle_uncertainty))
+        certainty_uncertainty_gap = abs(linguistic_certainty - (1.0 - current_uncertainty))
         safety_score = 1.0 - certainty_uncertainty_gap
         safety_score = max(0.0, min(1.0, safety_score))
         
@@ -264,7 +264,7 @@ class CriticModel:
                     original_diagnosis=impression[:200],  # Use impression as proxy
                     corrected_diagnosis="[Current Case - Not Yet Validated]",
                     error_type="unknown",
-                    kle_uncertainty=kle_uncertainty,
+                    uncertainty_score=current_uncertainty,
                     chexbert_labels=chexbert_labels_dict,
                     clinical_summary=historian_output.clinical_summary if historian_output else None,
                     debate_summary=None
@@ -272,8 +272,8 @@ class CriticModel:
                 current_embedding = generate_case_embedding(current_summary)
                 
                 # Retrieve historically similar mistakes via hybrid repository
-                kle_min = 0.0
-                kle_max = 1.0
+                uncertainty_min = 0.0
+                uncertainty_max = 1.0
                 _repo = get_past_mistakes_repository()
                 logger.info(
                     f"[CRITIC] Past-mistakes backend: {_repo.backend_name}"
@@ -283,7 +283,7 @@ class CriticModel:
                     similar_mistakes = _repo.retrieve_similar_mistakes(
                         disease_type=disease_type,
                         embedding=current_embedding,
-                        kle_uncertainty_range=(kle_min, kle_max),
+                        kle_uncertainty_range=(uncertainty_min, uncertainty_max),
                         severity_min=1,
                         top_k=settings.PAST_MISTAKES_TOP_K,
                         similarity_threshold=settings.PAST_MISTAKES_SIMILARITY_THRESHOLD,
@@ -301,7 +301,7 @@ class CriticModel:
                         from db.rerank_mistakes import rerank_mistakes
                         similar_mistakes = rerank_mistakes(
                             current_impression=impression,
-                            current_kle=kle_uncertainty,
+                            current_kle=current_uncertainty,
                             current_chexbert=chexbert_labels_dict,
                             retrieved_mistakes=similar_mistakes,
                             use_medgemma=False,  # Fast mode (embeddings already used)
@@ -322,7 +322,7 @@ class CriticModel:
                         "disease_type":    m.get("disease_type", ""),
                         "error_type":      m.get("error_type", ""),
                         "severity_level":  m.get("severity_level"),
-                        "kle_uncertainty": m.get("kle_uncertainty"),
+                        "uncertainty_score": m.get("uncertainty_score", m.get("kle_uncertainty")),
                         "clinical_summary": (
                             (m.get("clinical_summary") or "")[:300]
                         ),
@@ -340,7 +340,7 @@ class CriticModel:
                         is_overconfident = True
                         concern_flags.append(
                             f"[HISTORY] {high_severity_count} high-severity similar errors detected "
-                            f"in {disease_type} with KLE={kle_uncertainty:.2f}"
+                            f"in {disease_type} with uncertainty={current_uncertainty:.2f}"
                         )
                         
                         # Show specific past error types
@@ -381,13 +381,13 @@ class CriticModel:
                         else ", ".join(primary_errors[:-1]) + f" and {primary_errors[-1]}"
                     )
                     avg_sim = sum(m.get("similarity", 0.0) for m in similar_mistakes[:3]) / min(n, 3)
-                    avg_kle = [
-                        m["kle_uncertainty"] for m in similar_mistakes[:3]
-                        if m.get("kle_uncertainty") is not None
+                    avg_uncertainty = [
+                        m.get("uncertainty_score", m.get("kle_uncertainty")) for m in similar_mistakes[:3]
+                        if m.get("uncertainty_score", m.get("kle_uncertainty")) is not None
                     ]
-                    kle_phrase = (
-                        f" under similar uncertainty conditions (avg KLE ≈ {sum(avg_kle)/len(avg_kle):.2f})"
-                        if avg_kle else ""
+                    uncertainty_phrase = (
+                        f" under similar uncertainty conditions (avg ≈ {sum(avg_uncertainty)/len(avg_uncertainty):.2f})"
+                        if avg_uncertainty else ""
                     )
                     top_summary = historical_context[0]["clinical_summary"] if historical_context else ""
                     summary_snippet = (
@@ -396,7 +396,7 @@ class CriticModel:
                     )
                     narrative = (
                         f"{count_word} similar {disease_type} case(s) were previously matched "
-                        f"(avg cosine similarity {avg_sim:.2f}), primarily involving {error_phrase}{kle_phrase}."
+                        f"(avg cosine similarity {avg_sim:.2f}), primarily involving {error_phrase}{uncertainty_phrase}."
                         f"{summary_snippet}"
                     )
                     concern_flags.append(f"[HISTORY CONTEXT] {narrative}")
@@ -417,17 +417,17 @@ class CriticModel:
         
         # Only invoked when:
         #   1. ENABLE_LLM_CRITIC is True
-        #   2. KLE uncertainty is high OR rule-based already flagged overconfidence
+        #   2. Uncertainty is high OR rule-based already flagged overconfidence
         # This prevents unnecessary latency on low-risk cases.
 
-        if settings.ENABLE_LLM_CRITIC and (kle_uncertainty > 0.3 or is_overconfident):
+        if settings.ENABLE_LLM_CRITIC and (current_uncertainty > 0.3 or is_overconfident):
             try:
                 llm_output = medgemma_critic.critique(
                     findings=findings,
                     impression=impression,
-                    kle_uncertainty=kle_uncertainty,
-                    historian_output=historian_output,  # NEW: Pass enriched context
-                    literature_output=literature_output  # NEW: Pass enriched context
+                    kle_uncertainty=current_uncertainty,  # param name kept for LLM critic compat
+                    historian_output=historian_output,
+                    literature_output=literature_output
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(

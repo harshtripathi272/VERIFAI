@@ -80,7 +80,7 @@ def summarize_fhir_evidence(evidence: dict) -> str:
     return "\n".join(lines) if lines else "No relevant historical records found."
 
 
-def reason_over_fhir(hypothesis: str, evidence: dict) -> HistorianOutput:
+def reason_over_fhir(hypothesis: str, evidence: dict, current_fhir: dict = None) -> HistorianOutput:
 
     if settings.MOCK_MODELS:
         return HistorianOutput(
@@ -92,6 +92,13 @@ def reason_over_fhir(hypothesis: str, evidence: dict) -> HistorianOutput:
 
     load_medgemma()
     summary = summarize_fhir_evidence(evidence)
+    
+    current_fhir_summary = "No current FHIR report provided."
+    if current_fhir:
+        try:
+            current_fhir_summary = json.dumps(current_fhir, indent=2)[:2000]
+        except Exception:
+            current_fhir_summary = str(current_fhir)[:2000]
 
     prompt = f"""
 You are a senior clinical historian assisting a radiologist.
@@ -99,11 +106,14 @@ You are a senior clinical historian assisting a radiologist.
 Hypothesis:
 {hypothesis}
 
-FHIR Clinical History:
+Historical FHIR Context (Patient's past patterns for this hypothesis):
 {summary}
 
+Current Patient FHIR Report (Latest data):
+{current_fhir_summary}
+
 Task:
-Determine whether the history SUPPORTS or CONTRADICTS the hypothesis.
+Determine whether the combination of historical patterns and the current report SUPPORTS or CONTRADICTS the hypothesis. Use the historical context to interpret the current report.
 
 CRITICAL OUTPUT REQUIREMENTS:
 

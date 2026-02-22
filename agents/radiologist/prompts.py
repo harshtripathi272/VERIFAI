@@ -2,7 +2,7 @@
 Radiologist Agent Prompts
 """
 
-IINSTRUCTION = """
+INSTRUCTION = """
 You are an expert radiologist. Analyze the provided chest X-ray and write a careful radiology report.
 
 STRICT RULES:
