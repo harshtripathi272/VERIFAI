@@ -6,6 +6,7 @@ Evaluates consistency between linguistic certainty and epistemic uncertainty.
 
 from graph.state import VerifaiState, CriticOutput
 from .model import critic_model
+from uncertainty.muc import compute_ig, compute_critic_uncertainty, compute_critic_alignment
 
 
 def critic_node(state: VerifaiState) -> dict:
@@ -14,7 +15,7 @@ def critic_node(state: VerifaiState) -> dict:
     
     Consumes:
     - Radiologist FINDINGS and IMPRESSION text
-    - KLE-based epistemic uncertainty score
+    - MUC system uncertainty score
     - Historian FHIR clinical context
     - Literature evidence
     - Doctor feedback (NEW: if is_feedback_iteration=True)
@@ -26,7 +27,7 @@ def critic_node(state: VerifaiState) -> dict:
     - Safety score for routing (adjusted for context and feedback)
     """
     rad_output = state.get("radiologist_output")
-    kle_uncertainty = state.get("radiologist_kle_uncertainty", 0.5)
+    current_uncertainty = state.get("current_uncertainty", 0.5)
     
     # Get enriched context
     hist_output = state.get("historian_output")
@@ -62,7 +63,7 @@ def critic_node(state: VerifaiState) -> dict:
     result = critic_model.evaluate(
         findings=findings,
         impression=impression,
-        kle_uncertainty=kle_uncertainty,
+        current_uncertainty=current_uncertainty,
         chexbert_output=chexbert_output,   # ✅ NEW
         historian_output=hist_output,
         literature_output=lit_output
@@ -106,22 +107,34 @@ def critic_node(state: VerifaiState) -> dict:
         historical_context=historical_context,
     )
     
-    # Map safety score to uncertainty for routing
-    # Lower safety = higher uncertainty
-    uncertainty = 1.0 - safety_score
-    
-    # No additional adjustment needed - context is already factored into safety_score
+    # === MUC: Compute Information Gain ===
+    critic_unc = compute_critic_uncertainty(safety_score)
+    critic_align = compute_critic_alignment(
+        safety_score=safety_score,
+        is_overconfident=is_overconfident,
+        concern_flag_count=len(concern_flags),
+    )
+    ig_result = compute_ig(
+        agent_name="critic",
+        agent_uncertainty=critic_unc,
+        alignment_score=critic_align,
+        system_uncertainty=current_uncertainty,
+    )
     
     trace_entry = (
         f"CRITIC: Safety={safety_score:.2%}, Overconfident={'YES' if is_overconfident else 'NO'}, "
-        f"KLE={kle_uncertainty:.3f}, Concerns={len(concern_flags)}"
+        f"Concerns={len(concern_flags)}"
+    )
+    trace_muc = (
+        f"CRITIC MUC: uncertainty={critic_unc:.3f}, alignment={critic_align:.3f}, "
+        f"IG={ig_result.information_gain:.4f}"
     )
     
     # Add historical risk indicator if present
     if historical_risk_level != "none":
         trace_entry += f", HistRisk={historical_risk_level.upper()}"
     
-    # NEW: Add context trace if available
+    # Add context trace if available
     if hist_output or lit_output:
         context_info = []
         if hist_output:
@@ -130,12 +143,12 @@ def critic_node(state: VerifaiState) -> dict:
             context_info.append("Literature")
         trace_entry += f" [Context: {'+'.join(context_info)}]"
     
-    # NEW: Add feedback trace if this is a reprocessing iteration
+    # Add feedback trace if this is a reprocessing iteration
     if is_feedback_iteration and doctor_feedback:
         trace_entry += f" [FEEDBACK ITERATION - Original: {doctor_feedback.original_session_id}]"
     
     return {
         "critic_output": output,
-        "current_uncertainty": round(uncertainty, 3),
-        "trace": [trace_entry]
+        "current_uncertainty": ig_result.system_uncertainty_after,
+        "trace": [trace_entry, trace_muc]
     }

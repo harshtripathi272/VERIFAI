@@ -201,9 +201,9 @@ class DebateOrchestrator:
                 confidence_impact=0.0
             )
         
-        # Handle string output (from optimized agent)
+        # Handle string output (from refactored parallel-API + MedGemma synthesis agent)
         if isinstance(literature_output, str):
-            # Parse the summary
+            # No results at all
             if "No relevant literature" in literature_output:
                 return DebateArgument(
                     agent="literature",
@@ -211,15 +211,31 @@ class DebateOrchestrator:
                     argument="Literature search found no directly relevant studies.",
                     confidence_impact=0.0
                 )
+            
+            # Parse the synthesis text for evidence-strength signals
+            output_lower = literature_output.lower()
+            
+            if any(kw in output_lower for kw in ["strongly support", "high evidence", "robust evidence", "consistent with the literature"]):
+                confidence_impact = 0.12
+                position = "support"
+            elif any(kw in output_lower for kw in ["contradicts", "does not support", "inconsistent with", "argues against"]):
+                confidence_impact = -0.05
+                position = "refine"
+            elif any(kw in output_lower for kw in ["limited evidence", "weak evidence", "insufficient", "no directly relevant"]):
+                confidence_impact = 0.02
+                position = "refine"
             else:
-                # Assume positive evidence
-                return DebateArgument(
-                    agent="literature",
-                    position="support",
-                    argument=f"Literature evidence: {literature_output[:300]}",
-                    confidence_impact=0.08,
-                    evidence_refs=["literature_search"]
-                )
+                # Default: moderate support
+                confidence_impact = 0.08
+                position = "support"
+            
+            return DebateArgument(
+                agent="literature",
+                position=position,
+                argument=f"Literature evidence: {literature_output[:300]}",
+                confidence_impact=confidence_impact,
+                evidence_refs=["literature_synthesis"]
+            )
         
         # Handle structured output
         citations = literature_output.citations if hasattr(literature_output, 'citations') else []
@@ -317,13 +333,10 @@ class DebateOrchestrator:
         rounds: List[DebateRound] = []
         total_adjustment = 0.0
         
-        # Initial confidence: Use inverse of KLE uncertainty as proxy
-        # or extract from text if possible
+        # Initial confidence: use critic's safety score as proxy
         initial_confidence = 0.5
         
         if radiologist_output:
-            # Try to get KLE uncertainty from somewhere (would be passed in state)
-            # For now, use a default or try to infer from critic
             if critic_output and hasattr(critic_output, 'safety_score'):
                 # Use safety score as proxy for confidence
                 initial_confidence = critic_output.safety_score
@@ -332,6 +345,7 @@ class DebateOrchestrator:
                 initial_confidence = 0.6
         
         current_confidence = initial_confidence
+        print(f"\n[DEBATE] Starting debate — initial confidence: {initial_confidence:.2%}")
         
         for round_num in range(1, self.max_rounds + 1):
             # 1. Critic challenge
@@ -359,6 +373,17 @@ class DebateOrchestrator:
             
             total_adjustment += round_delta
             current_confidence = max(0.0, min(0.99, initial_confidence + total_adjustment))
+            
+            # --- Per-round uncertainty tracking ---
+            system_uncertainty = max(0.01, 1.0 - current_confidence)
+            print(f"\n[DEBATE] ─── Round {round_num} ───")
+            print(f"  Critic       : Δ = {critic_challenge.confidence_impact:+.3f}  ({critic_challenge.position})")
+            print(f"  Historian    : Δ = {historian_response.confidence_impact:+.3f}  ({historian_response.position})")
+            print(f"  Literature   : Δ = {literature_response.confidence_impact:+.3f}  ({literature_response.position})")
+            print(f"  Round net    : Δ = {round_delta:+.3f}")
+            print(f"  Confidence   : {current_confidence:.2%}  (cumulative Δ = {total_adjustment:+.3f})")
+            print(f"  Uncertainty  : {system_uncertainty:.2%}")
+            print(f"  Consensus    : {'YES ✓' if consensus_reached else 'NO — continuing'}")
             
             # Record round
             debate_round = DebateRound(
@@ -410,8 +435,11 @@ def debate_node(state) -> dict:
     Debate node for LangGraph workflow.
     
     Runs adversarial debate between Critic and Evidence Team (Historian + Literature).
-    Consensus is determined solely by DebateOrchestrator's confidence impact heuristics.
+    Uses Dempster-Shafer evidence fusion to combine agent beliefs and compute
+    the debate's Information Gain via the MUC framework.
     """
+    from uncertainty.muc import compute_ig, compute_debate_ds_fusion
+
     orchestrator = DebateOrchestrator(
         max_rounds=settings.DEBATE_MAX_ROUNDS if hasattr(settings, 'DEBATE_MAX_ROUNDS') else 3,
         consensus_threshold=settings.DEBATE_CONSENSUS_THRESHOLD if hasattr(settings, 'DEBATE_CONSENSUS_THRESHOLD') else 0.15
@@ -424,11 +452,59 @@ def debate_node(state) -> dict:
         literature_output=state.get("literature_output")
     )
     
+    # === MUC: Dempster-Shafer Fusion for Debate IG ===
+    # Build per-agent confidence/alignment from debate rounds
+    critic_conf, hist_conf, lit_conf = 0.5, 0.5, 0.5
+    critic_align, hist_align, lit_align = 0.5, 0.5, 0.5
+    
+    if debate_output.rounds:
+        # Aggregate across all rounds
+        total_critic_impact = 0.0
+        total_hist_impact = 0.0
+        total_lit_impact = 0.0
+        
+        for rnd in debate_output.rounds:
+            total_critic_impact += rnd.critic_challenge.confidence_impact
+            total_hist_impact += rnd.historian_response.confidence_impact if rnd.historian_response else 0
+            total_lit_impact += rnd.literature_response.confidence_impact if rnd.literature_response else 0
+        
+        n_rounds = len(debate_output.rounds)
+        
+        # Convert impacts to confidence (how sure each agent is about its position)
+        critic_conf = max(0.1, min(0.9, 0.5 + abs(total_critic_impact)))
+        hist_conf = max(0.1, min(0.9, 0.5 + abs(total_hist_impact)))
+        lit_conf = max(0.1, min(0.9, 0.5 + abs(total_lit_impact)))
+        
+        # Convert impacts to alignment (positive impact = supports diagnosis)
+        critic_align = max(0.05, min(0.95, 0.5 + total_critic_impact * 2))
+        hist_align = max(0.05, min(0.95, 0.5 + total_hist_impact * 2))
+        lit_align = max(0.05, min(0.95, 0.5 + total_lit_impact * 2))
+    
+    # Dempster-Shafer fusion
+    fused_alignment, fused_uncertainty, conflict_K = compute_debate_ds_fusion(
+        critic_confidence=critic_conf,
+        critic_alignment=critic_align,
+        historian_confidence=hist_conf,
+        historian_alignment=hist_align,
+        literature_confidence=lit_conf,
+        literature_alignment=lit_align,
+    )
+    
+    # Apply IG formula for the debate node
+    ig_result = compute_ig(
+        agent_name="debate",
+        agent_uncertainty=fused_uncertainty,
+        alignment_score=fused_alignment,
+        system_uncertainty=state.get("current_uncertainty", 0.5),
+    )
+    
     # Build trace
     trace_entries = [
         f"DEBATE: {len(debate_output.rounds)} rounds completed",
         f"DEBATE: Consensus={'YES' if debate_output.final_consensus else 'NO'}",
-        f"DEBATE: Confidence adjustment={debate_output.total_confidence_adjustment:+.2%}"
+        f"DEBATE: Confidence adjustment={debate_output.total_confidence_adjustment:+.3f}",
+        f"DEBATE MUC: DS-fusion alignment={fused_alignment:.3f}, uncertainty={fused_uncertainty:.3f}, "
+        f"conflict_K={conflict_K:.3f}, IG={ig_result.information_gain:.4f}",
     ]
     
     if debate_output.escalate_to_chief:
@@ -437,17 +513,10 @@ def debate_node(state) -> dict:
     # Update routing decision based on debate outcome
     routing = "finalize" if debate_output.final_consensus else "chief"
     
-    # Update uncertainty based on debate
-    new_uncertainty = state.get("current_uncertainty", 0.5)
-    if debate_output.final_consensus:
-        new_uncertainty = max(0.1, new_uncertainty - 0.2)  # Reduce uncertainty on consensus
-    else:
-        new_uncertainty = min(0.9, new_uncertainty + 0.1)  # Increase on no consensus
-    
     return {
         "debate_output": debate_output,
         "routing_decision": routing,
-        "current_uncertainty": new_uncertainty,
+        "current_uncertainty": ig_result.system_uncertainty_after,
         "trace": trace_entries
     }
 
