@@ -36,6 +36,14 @@ from db.past_mistakes import (
 from uncertainty.case_embedding import generate_case_embedding_from_fields
 from langgraph.types import Command
 
+# NEW: Safety Guardrails, Evidence Report, and Monitoring
+from safety.guardrails import run_safety_check, SafetyReport
+from output.evidence_report import generate_evidence_report, save_evidence_report
+from monitoring.metrics import metrics, track_agent_execution, track_diagnosis, get_metrics_summary
+from monitoring.metrics import structured_logger
+
+from fastapi.responses import PlainTextResponse, HTMLResponse
+
 router = APIRouter()
 
 
@@ -513,3 +521,115 @@ async def get_stats():
         return stats
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
+# SAFETY GUARDRAILS ENDPOINTS
+# =============================================================================
+
+@router.get("/workflows/{session_id}/safety")
+async def get_safety_report(session_id: str):
+    """
+    Run safety guardrails check on a completed/suspended workflow.
+    Returns critical findings, red flags, and safety score.
+    """
+    config = {"configurable": {"thread_id": session_id}}
+    state_snapshot = graph_app.get_state(config)
+    
+    if not state_snapshot or not state_snapshot.created_at:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    state = state_snapshot.values
+    
+    try:
+        safety_report = run_safety_check(state)
+        
+        # Track safety metrics
+        metrics.safety_score.observe(safety_report.safety_score)
+        for flag in safety_report.red_flags:
+            metrics.safety_flags.labels(
+                flag_type=flag.flag_type, severity=flag.severity
+            ).inc()
+        if safety_report.critical_findings:
+            metrics.critical_findings.inc(len(safety_report.critical_findings))
+        
+        structured_logger.log("info", "Safety check completed",
+                             session_id=session_id,
+                             passed=safety_report.passed,
+                             safety_score=safety_report.safety_score)
+        
+        return safety_report.model_dump()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Safety check failed: {e}")
+
+
+# =============================================================================
+# EVIDENCE REPORT ENDPOINTS
+# =============================================================================
+
+@router.get("/workflows/{session_id}/report", response_class=HTMLResponse)
+async def get_evidence_report(session_id: str):
+    """
+    Generate and return an interactive HTML evidence report.
+    Self-contained HTML with embedded CSS — can be saved as a standalone file.
+    """
+    config = {"configurable": {"thread_id": session_id}}
+    state_snapshot = graph_app.get_state(config)
+    
+    if not state_snapshot or not state_snapshot.created_at:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    state = state_snapshot.values
+    
+    try:
+        html = generate_evidence_report(state, session_id)
+        return HTMLResponse(content=html)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Report generation failed: {e}")
+
+
+@router.post("/workflows/{session_id}/report/save")
+async def save_report(session_id: str):
+    """
+    Generate and save evidence report to disk.
+    Returns the file path of the saved HTML report.
+    """
+    config = {"configurable": {"thread_id": session_id}}
+    state_snapshot = graph_app.get_state(config)
+    
+    if not state_snapshot or not state_snapshot.created_at:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    state = state_snapshot.values
+    
+    try:
+        filepath = save_evidence_report(state, session_id)
+        return {"session_id": session_id, "report_path": filepath, "status": "saved"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Report save failed: {e}")
+
+
+# =============================================================================
+# OBSERVABILITY / METRICS ENDPOINTS
+# =============================================================================
+
+@router.get("/metrics", response_class=PlainTextResponse)
+async def prometheus_metrics():
+    """
+    Prometheus-compatible metrics endpoint.
+    Scrape this endpoint with Prometheus to monitor VERIFAI in production.
+    """
+    return PlainTextResponse(
+        content=metrics.to_prometheus_format(),
+        media_type="text/plain; charset=utf-8"
+    )
+
+
+@router.get("/metrics/summary")
+async def metrics_summary():
+    """
+    JSON summary of all collected metrics.
+    Includes agent performance, diagnostic quality, safety stats, and system health.
+    """
+    return get_metrics_summary()
+
