@@ -47,11 +47,23 @@ app.add_middleware(
 )
 
 # Include API routes
-app.include_router(router)
+app.include_router(router, prefix="/api/v1")
 
 # Include past mistakes router if available
 if PAST_MISTAKES_API_AVAILABLE:
-    app.include_router(past_mistakes_router)
+    app.include_router(past_mistakes_router, prefix="/api/v1")
+
+# Root-level /metrics for Prometheus (standard convention)
+from fastapi.responses import PlainTextResponse
+from monitoring.metrics import metrics as _metrics, get_metrics_summary
+
+@app.get("/metrics", response_class=PlainTextResponse)
+async def root_prometheus_metrics():
+    return PlainTextResponse(content=_metrics.to_prometheus_format(), media_type="text/plain; charset=utf-8")
+
+@app.get("/metrics/summary")
+async def root_metrics_summary():
+    return get_metrics_summary()
 
 
 if __name__ == "__main__":

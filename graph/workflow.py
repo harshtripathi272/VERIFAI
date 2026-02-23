@@ -27,6 +27,13 @@ from uncertainty.muc import (
     compute_critic_uncertainty, compute_critic_alignment,
 )
 
+# Monitoring integration
+try:
+    from monitoring.metrics import metrics as _metrics, track_agent_execution, structured_logger as _slog
+    _HAS_MONITORING = True
+except ImportError:
+    _HAS_MONITORING = False
+
 
 # Import agent nodes
 from agents.radiologist.agent import radiologist_node
@@ -96,6 +103,9 @@ def logged_radiologist_node(state: VerifaiState) -> dict:
         logger.log_radiologist(state, result)
     except Exception as e:
         print(f"[DB LOG] Failed to log radiologist: {e}")
+    # Track metrics
+    if _HAS_MONITORING:
+        _metrics.agent_invocations.labels(agent_name="radiologist", status="success").inc()
     return result
 
 
@@ -515,6 +525,20 @@ def finalize_node(state: VerifaiState) -> dict:
     )
 
     trace_entry = f"FINALIZE: {diagnosis_text[:80] if diagnosis_text else 'None'}... (confidence={confidence:.2%}, validator={recommendation})"
+
+    # Track diagnostic metrics
+    if _HAS_MONITORING:
+        from monitoring.metrics import track_diagnosis
+        try:
+            track_diagnosis(
+                confidence=confidence,
+                uncertainty=state.get('current_uncertainty', 0.5),
+                deferred=False,
+                debate_rounds=len(debate.rounds) if debate else 0,
+            )
+        except Exception:
+            pass
+
     return {
         "final_diagnosis": final,
         "trace": [trace_entry]

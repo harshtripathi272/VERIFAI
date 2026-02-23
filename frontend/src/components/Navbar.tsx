@@ -11,6 +11,7 @@ export function Navbar() {
 
   const links = [
     { href: "/diagnose", label: "New Diagnosis" },
+    { href: "/observability", label: "Observability" },
     { href: "/results/demo-123", label: "Demo Results" },
   ];
 
