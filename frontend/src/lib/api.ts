@@ -13,11 +13,14 @@ export interface WorkflowStatusResponse {
     final_result?: any;
 }
 
-export async function uploadAndStartWorkflow(file: File, patientId: string = ""): Promise<WorkflowStartResponse> {
+export async function uploadAndStartWorkflow(file: File, patientId: string = "", fhirFile?: File | null): Promise<WorkflowStartResponse> {
     const formData = new FormData();
     formData.append("image", file);
     if (patientId) {
         formData.append("patient_id", patientId);
+    }
+    if (fhirFile) {
+        formData.append("fhir_report", fhirFile);
     }
 
     const response = await fetch(`${API_BASE_URL}/workflows/start`, {

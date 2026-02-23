@@ -247,13 +247,14 @@ def _build_evidence_packet(state: VerifaiState) -> dict[str, Any]:
 # WORKFLOW EXECUTION ENDPOINTS (ASYNC / BACKGROUND)
 # =============================================================================
 
-def _run_workflow_background(file_path: str, patient_id: str, session_id: str):
+def _run_workflow_background(file_path: str, patient_id: str, fhir_content: Optional[str], session_id: str):
     """Background task to execute the graph."""
     try:
         initial_state: VerifaiState = {
             "_session_id": session_id,
             "image_path": file_path,
             "patient_id": patient_id,
+            "fhir_context": fhir_content,
             "dicom_metadata": None,
             "view": None,
             "radiologist_output": None,
@@ -287,7 +288,8 @@ def _run_workflow_background(file_path: str, patient_id: str, session_id: str):
 async def start_workflow(
     background_tasks: BackgroundTasks,
     image: UploadFile = File(...),
-    patient_id: Optional[str] = None
+    patient_id: Optional[str] = None,
+    fhir_report: Optional[UploadFile] = File(None)
 ):
     """
     Start the diagnostic workflow asynchronously.
@@ -301,11 +303,20 @@ async def start_workflow(
     
     with open(file_path, "wb") as f:
         shutil.copyfileobj(image.file, f)
+        
+    fhir_content = None
+    if fhir_report:
+        try:
+            content_bytes = await fhir_report.read()
+            fhir_content = content_bytes.decode("utf-8")
+        except Exception as e:
+            print(f"[API] Error reading FHIR report: {e}")
+            fhir_content = None
     
     session_id = str(uuid.uuid4())
     
     # Launch in background
-    background_tasks.add_task(_run_workflow_background, file_path, patient_id, session_id)
+    background_tasks.add_task(_run_workflow_background, file_path, patient_id, fhir_content, session_id)
     
     return WorkflowStartResponse(
         session_id=session_id,

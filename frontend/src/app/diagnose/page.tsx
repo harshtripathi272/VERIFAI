@@ -23,6 +23,7 @@ export default function DiagnosePage() {
   );
 
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [selectedFhirFile, setSelectedFhirFile] = useState<File | null>(null);
   const [patientId, setPatientId] = useState("");
   const [errorMsgs, setErrorMsgs] = useState<string>("");
 
@@ -41,7 +42,7 @@ export default function DiagnosePage() {
     setErrorMsgs("");
 
     try {
-      const resp = await uploadAndStartWorkflow(selectedFile, patientId);
+      const resp = await uploadAndStartWorkflow(selectedFile, patientId, selectedFhirFile);
       router.push(`/results/${resp.session_id}`);
     } catch (err: any) {
       console.error(err);
@@ -74,8 +75,8 @@ export default function DiagnosePage() {
         {/* Upload Zone */}
         <div
           className={`relative rounded-2xl border-2 border-dashed p-10 text-center cursor-pointer transition-all duration-300 group ${dragActive
-              ? "border-[#00E5FF]/50 bg-[#00E5FF]/[0.03]"
-              : (selectedFile ? "border-green-500/50 bg-green-500/[0.03]" : "border-white/[0.06] hover:border-white/[0.12] bg-white/[0.01] hover:bg-white/[0.02]")
+            ? "border-[#00E5FF]/50 bg-[#00E5FF]/[0.03]"
+            : (selectedFile ? "border-green-500/50 bg-green-500/[0.03]" : "border-white/[0.06] hover:border-white/[0.12] bg-white/[0.01] hover:bg-white/[0.02]")
             }`}
           onDragOver={(e) => { e.preventDefault(); setDragActive(true); }}
           onDragLeave={() => setDragActive(false)}
@@ -120,7 +121,7 @@ export default function DiagnosePage() {
         {/* Input Fields */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
-            <label className="block text-[13px] font-medium text-white/40 mb-2">Patient ID</label>
+            <label className="block text-[13px] font-medium text-white/40 mb-2">Patient ID (Optional)</label>
             <input
               type="text"
               placeholder="e.g. MRN-74892"
@@ -130,13 +131,23 @@ export default function DiagnosePage() {
             />
           </div>
           <div>
-            <label className="block text-[13px] font-medium text-white/40 mb-2">Study UID</label>
-            <input
-              type="text"
-              placeholder="e.g. 1.2.840.113..."
-              required
-              className="w-full bg-white/[0.02] border border-white/[0.06] rounded-xl px-4 py-3 text-sm text-white/90 placeholder:text-white/20 transition-all duration-200"
-            />
+            <label className="block text-[13px] font-medium text-white/40 mb-2">Current FHIR Report (Optional)</label>
+            <label className="flex items-center justify-between w-full bg-white/[0.02] border border-white/[0.06] rounded-xl px-4 py-3 text-sm text-white/90 transition-all duration-200 cursor-pointer hover:border-white/[0.12] hover:bg-white/[0.03]">
+              <span className="truncate mr-4 text-white/60">
+                {selectedFhirFile ? selectedFhirFile.name : "Select FHIR JSON..."}
+              </span>
+              <UploadCloud className="h-4 w-4 text-white/40 shrink-0" />
+              <input
+                type="file"
+                className="hidden"
+                accept=".json"
+                onChange={(e) => {
+                  if (e.target.files && e.target.files[0]) {
+                    setSelectedFhirFile(e.target.files[0]);
+                  }
+                }}
+              />
+            </label>
           </div>
         </div>
 
@@ -173,8 +184,8 @@ export default function DiagnosePage() {
                   key={agent.id}
                   onClick={() => toggleAgent(agent.id)}
                   className={`flex items-center gap-3 p-3 rounded-lg cursor-pointer transition-all duration-200 ${agents[agent.id]
-                      ? "bg-[#00E5FF]/[0.04] border border-[#00E5FF]/10"
-                      : "bg-white/[0.01] border border-white/[0.03] opacity-50"
+                    ? "bg-[#00E5FF]/[0.04] border border-[#00E5FF]/10"
+                    : "bg-white/[0.01] border border-white/[0.03] opacity-50"
                     }`}
                 >
                   <agent.icon className={`h-4 w-4 shrink-0 ${agents[agent.id] ? "text-[#00E5FF]" : "text-white/20"}`} />
