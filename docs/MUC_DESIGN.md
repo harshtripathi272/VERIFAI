@@ -106,16 +106,22 @@ def compute_ig(
 
 ```python
 SCALING_FACTORS = {
-    "chexbert":   0.15,   # Strongly structured — high weight
-    "historian":  0.12,   # Clinical context
-    "literature": 0.10,   # Published evidence
-    "critic":     0.10,   # Safety check
-    "debate":     0.18,   # Multi-agent consensus — highest weight
-    "validator":  0.08,   # Final rules check
+    "chexbert":    0.20,  # [MARS] Deterministic, structured extraction — high semantic validity
+    "historian":   0.15,  # [Agentic Uncertainty] Patient-specific EHR grounding
+    "literature":  0.10,  # [Agentic Uncertainty] General medical evidence
+    "critic":      0.10,  # Safety gating limit
+    "debate":      0.25,  # [Dempster-Shafer] Resolves K-conflict for 3 agents; highest mass capacity
+    "validator":   0.15,  # Terminal bounding check against absolute rules
 }
 ```
 
-The sum of all positive-direction IGs (if all agents agree) is `0.73`. This means the system can drop from `~0.78` to `0.05` (floor) in the best case, which equates to `~95%` confidence. This matches clinical calibration targets.
+The scaling factors are explicitly grounded in the [Research Foundation](#2-research-foundation):
+- **CheXbert (0.20)**: Derived from *MARS*. As a deterministic labeler of medical conditions, its output represents the highest semantic importance tokens. 
+- **Historian (0.15) & Literature (0.10)**: Derived from *Agentic Uncertainty Quantification* bidirectional signaling. The Historian carries more weight because patient-specific longitudinal data (EHR/FHIR) is a stronger prior than general literature distributions.
+- **Debate (0.25)**: Derived from *Dempster-Shafer*. Because this stage fuses the belief mass of three distinct agents and normalizes by the conflict metric $K$, it mathematically requires the largest capacity to shift system uncertainty. Reaching consensus here represents the strongest evidence signal in the cascade.
+- **Validator (0.15)**: The final bounding mechanism.
+
+The sum of all positive-direction IGs (if all agents perfectly agree) is `0.95`. This allows the system to drop from a max uncertainty of `0.95` down to the hard floor of `0.05` (95% confidence) in the best case, matching clinical calibration targets.
 
 ---
 

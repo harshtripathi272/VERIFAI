@@ -46,22 +46,18 @@ def radiologist_node(state: VerifaiState) -> dict:
                 "trace": [f"RADIOLOGIST: Error - Image not found: {path}"]
             }
     
-    for i in range(n_samples):
-        print("Generating sample", i+1)
-        # Call model with image path and view
-        raw_output = generate_findings(
-            image_paths=image_paths,
-            views=views
-        )
-        
-        if i == 0:
-            # Use first sample as the primary report
-            primary_report = raw_output
-        
-        # Collect impression text for KLE uncertainty calculation
-        impression_text = raw_output.get("impression", "")
-        if impression_text:
-            samples.append(impression_text)
+    
+    raw_output = generate_findings(
+        image_paths=image_paths,
+        views=views
+    )
+    
+    primary_report = raw_output
+    
+    # Collect impression text for KLE uncertainty calculation
+    impression_text = raw_output.get("impression", "")
+    if impression_text:
+        samples.append(impression_text)
     
     # Create RadiologistOutput from primary sample
     # Run disease analysis (classification + heatmaps) on the first image for now

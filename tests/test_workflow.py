@@ -65,7 +65,8 @@ initial_state = {
 
 # ── 4. Run ────────────────────────────────────────────────────────────────────
 print("\n[TEST] Running full VERIFAI workflow...\n")
-result = verifai_graph.invoke(initial_state)
+config = {"configurable": {"thread_id": "test_workflow_123"}}
+result = verifai_graph.invoke(initial_state, config)
 
 # ══ SUMMARY ══════════════════════════════════════════════════════════════════
 print("\n" + "=" * 65)

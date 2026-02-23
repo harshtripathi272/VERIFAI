@@ -21,11 +21,10 @@ import os
 import numpy as np
 import cv2
 
-# Classifier & Grad-CAM
+# Classifier & LRP
 from agents.radiologist.classifier import load_medsiglip_classifier
 from agents.radiologist.data import CHEXBERT_CLASSES
-from pytorch_grad_cam import GradCAMPlusPlus
-from pytorch_grad_cam.utils.image import show_cam_on_image
+from agents.radiologist.lrp import RelevanceGenerator
 from .prompts import INSTRUCTION
 
 # Global model cache
@@ -230,39 +229,9 @@ def generate_findings(
             "impression": generated_text[:500]
         }
 
-class ClassifierWrapper(nn.Module):
-    """
-    Wrapper for MedGemmaVisionHead to ensure it returns only logits.
-    Required because pytorch-grad-cam expects a single tensor output.
-    """
-    def __init__(self, model):
-        super().__init__()
-        self.model = model
-        # Target layers must be accessible via this wrapper if using string targets,
-        # but we pass the layer object directly, so this is fine.
-        
-    def forward(self, x):
-        return self.model(x, return_dict=False)
-
-def reshape_transform(tensor):
-    """
-    Reshape SigLIP output for Grad-CAM.
-    SigLIP output: [B, H*W, C] -> [B, C, H, W]
-    Assumes square grid because SigLIP/ViT.
-    """
-    # Tensor shape is [Batch, Tokens, Channels]
-    # No CLS token in SigLIP usually, but verify via config if using different backbone
-    # SigLIP 448x448 / 16 = 28x28 grid = 784 tokens
-    
-    b, t, c = tensor.shape
-    h = w = int(t ** 0.5) 
-    
-    result = tensor.reshape(b, h, w, c)
-    result = result.transpose(2, 3).transpose(1, 2) # [B, C, H, W]
-    return result
 
 def analyze_disease(image_path: str) -> dict:
-    """Classify diseases and generate heatmaps using MedSigLIP and Grad-CAM++."""
+    """Classify diseases and generate heatmaps using MedSigLIP and Chefer LRP."""
     _load_models()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
@@ -279,36 +248,7 @@ def analyze_disease(image_path: str) -> dict:
         return {"probabilities": {}, "heatmap_paths": {}}
         
     # 1. Classification
-    # Only need forward pass here, but GradCAM needs gradients enabled on inputs? 
-    # No, usually we do forward pass with grad enabled for CAM but we want probs first.
-    # We can do one pass.
-
-    inputs_param = pixel_values.requires_grad_(True) # Ensure input grad for safety if needed
-    
-    # We need to manually run forward to get logits because the wrapper does pooling internally
-    # _classifier_model is in eval() mode usually.
-    
-    # For GradCAM, we need to wrap the VISION MODEL encoded layers, not the whole wrapper necessarily.
-    # Target Layer: Last Encoder Layer of SigLIP
-    # Target Layer: Last Encoder Layer of SigLIP
-    # Structure: MedGemmaVisionHead -> SiglipVisionModel -> SiglipVisionTransformer (vision_model) -> SiglipEncoder (encoder) -> layers
-    target_layer = _classifier_model.vision_model.vision_model.encoder.layers[-1]
-
-
-    # 2. Setup Grad-CAM
-    cam = GradCAMPlusPlus(
-        model=ClassifierWrapper(_classifier_model), 
-        target_layers=[target_layer],
-        reshape_transform=reshape_transform # VITAL for ViT
-    )
-
-    # We need a custom forward func for the wrapper if standard CAM doesn't work out of box
-    # The wrapper's forward returns dict or logits. CAM expects logits.
-    # Wrapper returns dict by default if return_dict=True?
-    # Let's check wrapper. It calls self.vision_model and then classifier.
-    # We need to ensure wrapper returns Logits for CAM to work.
-    
-    # Let's compute Probs first
+    # Get standard probabilities without gradient retaining to parse diseases
     with torch.no_grad():
         logits = _classifier_model(pixel_values, return_dict=False)
         probs = torch.sigmoid(logits).squeeze(0)
@@ -318,7 +258,9 @@ def analyze_disease(image_path: str) -> dict:
         for cls, prob in zip(CHEXBERT_CLASSES, probs)
     }
     
-    # 3. Generate Heatmaps
+    # 2. Setup Relevance Generator for Heatmaps
+    lrp = RelevanceGenerator(_classifier_model)
+    
     heatmap_paths = {}
     output_dir = "output/heatmaps"
     os.makedirs(output_dir, exist_ok=True)
@@ -330,33 +272,23 @@ def analyze_disease(image_path: str) -> dict:
     for i, (cls_name, prob) in enumerate(zip(CHEXBERT_CLASSES, probs)):
         if prob > 0.5:
             try:
-                from pytorch_grad_cam.utils.model_targets import ClassifierOutputTarget
-                targets = [ClassifierOutputTarget(i)]
+                # 3. Generate Heatmap for positive classes
+                heatmap = lrp.generate(pixel_values, i, device=device)
                 
-                # We must ensure the model returns TENSOR logits
-                # Our wrapper needs to handle 'return_dict' check based on usage?
-                # Actually, standard usage of library might fail if model signature is non-standard.
-                # Monkey-patch or ensure wrapper handles it.
-                # Wrapper signature: forward(pixel_values, return_dict=True)
-                # CAM calls: model(input_tensor, ...)
-                # So it passes 'pixel_values' as positional arg 0? No, it passes it as 'input_tensor' usually?
-                # CAM usage: model(input_tensor)
-                # SigLIP arg is 'pixel_values'.
-                # We might need a wrapper lambda or modify call.
+                # Check for empty map
+                if heatmap.max() == 0:
+                    print(f"[Warning] Empty LRP heatmap generated for {cls_name}")
+                    continue
                 
-                # Correct way: Passing kwarg via enable_caching? No.
-                # Actually, pytorch-grad-cam handles this via forward hooks.
-                # But the forward call needs to match.
+                # Resize to image size (448x448)
+                heatmap_resized = cv2.resize(heatmap, (448, 448))
                 
-                # Let's rely on pixel_values being the first argument in our wrapper.
+                # Apply colormap (Jet)
+                heatmap_color = cv2.applyColorMap(np.uint8(255 * heatmap_resized), cv2.COLORMAP_JET)
+                heatmap_color = cv2.cvtColor(heatmap_color, cv2.COLOR_BGR2RGB) / 255.0
                 
-                grayscale_cam = cam(
-                   input_tensor=pixel_values, 
-                   targets=targets
-                ) # This enables grad context internally
-
-                grayscale_cam = grayscale_cam[0, :]
-                visualization = show_cam_on_image(rgb_img, grayscale_cam, use_rgb=True)
+                # Create visualization (Overlay)
+                visualization = np.uint8(255 * (rgb_img * 0.5 + heatmap_color * 0.5))
                 
                 # Save
                 save_path = os.path.join(output_dir, f"{base_name}_{cls_name.replace(' ', '_')}_heatmap.jpg")

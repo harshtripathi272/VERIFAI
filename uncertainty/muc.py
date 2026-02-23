@@ -35,12 +35,12 @@ from dataclasses import dataclass, field
 # ═══════════════════════════════════════════════════════════════════════════════
 
 SCALING_FACTORS = {
-    "chexbert":    0.15,  # Structured label verification
-    "historian":   0.12,  # Clinical history evidence
-    "literature":  0.10,  # Published evidence
-    "critic":      0.10,  # Overconfidence check
-    "debate":      0.18,  # Multi-agent consensus (highest weight)
-    "validator":   0.08,  # Final rules/entity check
+    "chexbert":    0.20,  # [MARS] Deterministic, structured extraction — high semantic validity
+    "historian":   0.15,  # [Agentic Uncertainty] Patient-specific EHR grounding
+    "literature":  0.10,  # [Agentic Uncertainty] General medical evidence
+    "critic":      0.10,  # Safety gating limit
+    "debate":      0.25,  # [Dempster-Shafer] Resolves K-conflict for 3 agents; highest mass capacity
+    "validator":   0.15,  # Terminal bounding check against absolute rules
 }
 
 

@@ -54,10 +54,9 @@ def get_client() -> Optional[Client]:
             "Check your .env file."
         )
 
-    if not hasattr(_local, 'client') or _local.client is None:
-        _local.client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-    return _local.client
+    # Create a fresh client instead of caching to avoid httpx ConnectError
+    # (Errno 104 Connection reset by peer) when connections go idle during long-running nodes
+    return create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
 def get_service_client() -> Optional[Client]:
@@ -80,11 +79,8 @@ def get_service_client() -> Optional[Client]:
             "Check your .env file."
         )
 
-    # Use a separate thread-local slot so anon and service clients don't collide.
-    if not hasattr(_local, 'service_client') or _local.service_client is None:
-        _local.service_client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-
-    return _local.service_client
+    # Create a fresh client instead of caching to avoid httpx ConnectError
+    return create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 
 @contextmanager

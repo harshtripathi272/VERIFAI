@@ -55,16 +55,20 @@ class AgentLogger:
         self._agent_count = 0
 
         # Create session row in Supabase
-        with get_db() as db:
-            session_data = prepare_insert_data({
-                'session_id': self.session_id,
-                'image_path': self.image_path,
-                'patient_id': patient_id,
-                'workflow_type': workflow_type,
-                'status': 'running',
-                'started_at': datetime.utcnow().isoformat()
-            })
-            db.table('workflow_sessions').insert(session_data).insert().execute()
+        try:
+            with get_db() as db:
+                session_data = prepare_insert_data({
+                    'session_id': self.session_id,
+                    'image_path': self.image_path,
+                    'patient_id': patient_id,
+                    'workflow_type': workflow_type,
+                    'status': 'running',
+                    'started_at': datetime.utcnow().isoformat()
+                })
+                # Use upsert to avoid Unique Violation if called multiple times in one session
+                db.table('workflow_sessions').upsert(session_data).execute()
+        except Exception as e:
+            print(f"[DB LOG ERROR] Failed to initialize session in Supabase: {e}")
 
     # =========================================================================
     # INTERNAL HELPERS
@@ -182,9 +186,11 @@ class AgentLogger:
                 self._log_trace_entries(db, "radiologist", trace)
 
             except Exception as e:
-                self._complete_invocation(db, inv_id, "error",
-                                           error_message=str(e), started_at=t0)
-                raise
+                print(f"[DB LOG ERROR] Failed to log radiologist: {e}")
+                try:
+                    self._complete_invocation(db, inv_id, "error", error_message=str(e), started_at=t0)
+                except Exception:
+                    pass
 
     # =========================================================================
     # CRITIC LOGGING
@@ -225,9 +231,11 @@ class AgentLogger:
                 self._log_trace_entries(db, "critic", trace)
 
             except Exception as e:
-                self._complete_invocation(db, inv_id, "error",
-                                           error_message=str(e), started_at=t0)
-                raise
+                print(f"[DB LOG ERROR] Failed to log critic: {e}")
+                try:
+                    self._complete_invocation(db, inv_id, "error", error_message=str(e), started_at=t0)
+                except Exception:
+                    pass
 
     # =========================================================================
     # HISTORIAN LOGGING
@@ -285,9 +293,11 @@ class AgentLogger:
                 self._log_trace_entries(db, "historian", trace)
 
             except Exception as e:
-                self._complete_invocation(db, inv_id, "error",
-                                           error_message=str(e), started_at=t0)
-                raise
+                print(f"[DB LOG ERROR] Failed to log historian: {e}")
+                try:
+                    self._complete_invocation(db, inv_id, "error", error_message=str(e), started_at=t0)
+                except Exception:
+                    pass
 
     # =========================================================================
     # LITERATURE LOGGING
@@ -356,9 +366,11 @@ class AgentLogger:
                 self._log_trace_entries(db, "literature", trace)
 
             except Exception as e:
-                self._complete_invocation(db, inv_id, "error",
-                                           error_message=str(e), started_at=t0)
-                raise
+                print(f"[DB LOG ERROR] Failed to log literature: {e}")
+                try:
+                    self._complete_invocation(db, inv_id, "error", error_message=str(e), started_at=t0)
+                except Exception:
+                    pass
 
     # =========================================================================
     # DEBATE LOGGING — Full round-by-round with arguments
@@ -426,9 +438,11 @@ class AgentLogger:
                 self._log_trace_entries(db, "debate", trace)
 
             except Exception as e:
-                self._complete_invocation(db, inv_id, "error",
-                                           error_message=str(e), started_at=t0)
-                raise
+                print(f"[DB LOG ERROR] Failed to log debate: {e}")
+                try:
+                    self._complete_invocation(db, inv_id, "error", error_message=str(e), started_at=t0)
+                except Exception:
+                    pass
 
     def _prepare_debate_argument(self, round_id: int, debate_log_id: int, arg) -> dict:
         """Prepare a debate argument for insertion."""
@@ -480,9 +494,11 @@ class AgentLogger:
                 self._log_trace_entries(db, "chief", trace)
 
             except Exception as e:
-                self._complete_invocation(db, inv_id, "error",
-                                           error_message=str(e), started_at=t0)
-                raise
+                print(f"[DB LOG ERROR] Failed to log chief: {e}")
+                try:
+                    self._complete_invocation(db, inv_id, "error", error_message=str(e), started_at=t0)
+                except Exception:
+                    pass
 
     # =========================================================================
     # FINALIZE LOGGING
@@ -517,9 +533,11 @@ class AgentLogger:
                 self._log_trace_entries(db, "finalize", trace)
 
             except Exception as e:
-                self._complete_invocation(db, inv_id, "error",
-                                           error_message=str(e), started_at=t0)
-                raise
+                print(f"[DB LOG ERROR] Failed to log finalize: {e}")
+                try:
+                    self._complete_invocation(db, inv_id, "error", error_message=str(e), started_at=t0)
+                except Exception:
+                    pass
 
     # =========================================================================
     # EVIDENCE GATHERING (parallel historian + literature)
@@ -529,16 +547,22 @@ class AgentLogger:
         """Log the evidence gathering node (combined historian + literature)."""
         trace = result.get("trace", [])
 
-        with get_db() as db:
-            inv_id = self._start_invocation(db, "evidence_gathering")
-            self._complete_invocation(db, inv_id, "success", trace_entries=trace, started_at=time.time())
-            self._log_trace_entries(db, "evidence_gathering", trace)
+        try:
+            with get_db() as db:
+                inv_id = self._start_invocation(db, "evidence_gathering")
+                self._complete_invocation(db, inv_id, "success", trace_entries=trace, started_at=time.time())
+                self._log_trace_entries(db, "evidence_gathering", trace)
+        except Exception as e:
+            print(f"[DB LOG ERROR] Failed to log evidence gathering base: {e}")
 
         # Also log individual agents if outputs are present
-        if result.get("historian_output"):
-            self.log_historian(state, result)
-        if result.get("literature_output"):
-            self.log_literature(state, result)
+        try:
+            if result.get("historian_output"):
+                self.log_historian(state, result)
+            if result.get("literature_output"):
+                self.log_literature(state, result)
+        except Exception as e:
+             print(f"[DB LOG ERROR] Failed to log evidence sub-agents: {e}")
 
     # =========================================================================
     # NEW: DOCTOR FEEDBACK LOGGING
@@ -624,37 +648,43 @@ class AgentLogger:
         
         Call this at the end of the pipeline with the final diagnosis.
         """
-        with get_db() as db:
-            if final_diagnosis:
-                update_data = prepare_insert_data({
-                    'status': 'completed',
-                    'completed_at': datetime.utcnow().isoformat(),
-                    'final_diagnosis': final_diagnosis.diagnosis,
-                    'final_confidence': final_diagnosis.calibrated_confidence,
-                    'was_deferred': final_diagnosis.deferred,
-                    'deferral_reason': final_diagnosis.deferral_reason,
-                    'total_agents_invoked': self._agent_count
-                })
-                db.table('workflow_sessions').update(update_data).eq('session_id', self.session_id).execute()
-            elif error_message:
-                update_data = prepare_insert_data({
-                    'status': 'failed',
-                    'completed_at': datetime.utcnow().isoformat(),
-                    'error_message': error_message,
-                    'total_agents_invoked': self._agent_count
-                })
-                db.table('workflow_sessions').update(update_data).eq('session_id', self.session_id).execute()
-            else:
-                update_data = prepare_insert_data({
-                    'status': 'completed',
-                    'completed_at': datetime.utcnow().isoformat(),
-                    'total_agents_invoked': self._agent_count
-                })
-                db.table('workflow_sessions').update(update_data).eq('session_id', self.session_id).execute()
+        try:
+            with get_db() as db:
+                if final_diagnosis:
+                    update_data = prepare_insert_data({
+                        'status': 'completed',
+                        'completed_at': datetime.utcnow().isoformat(),
+                        'final_diagnosis': final_diagnosis.diagnosis,
+                        'final_confidence': final_diagnosis.calibrated_confidence,
+                        'was_deferred': final_diagnosis.deferred,
+                        'deferral_reason': final_diagnosis.deferral_reason,
+                        'total_agents_invoked': self._agent_count
+                    })
+                    db.table('workflow_sessions').update(update_data).eq('session_id', self.session_id).execute()
+                elif error_message:
+                    update_data = prepare_insert_data({
+                        'status': 'failed',
+                        'completed_at': datetime.utcnow().isoformat(),
+                        'error_message': error_message,
+                        'total_agents_invoked': self._agent_count
+                    })
+                    db.table('workflow_sessions').update(update_data).eq('session_id', self.session_id).execute()
+                else:
+                    update_data = prepare_insert_data({
+                        'status': 'completed',
+                        'completed_at': datetime.utcnow().isoformat(),
+                        'total_agents_invoked': self._agent_count
+                    })
+                    db.table('workflow_sessions').update(update_data).eq('session_id', self.session_id).execute()
+        except Exception as e:
+            print(f"[DB LOG ERROR] Failed to complete session: {e}")
 
     def fail_session(self, error_message: str):
         """Mark the workflow session as failed."""
-        self.complete_session(error_message=error_message)
+        try:
+            self.complete_session(error_message=error_message)
+        except Exception as e:
+            print(f"[DB LOG ERROR] Failed to fail session: {e}")
 
     # =========================================================================
     # QUERY HELPERS — for retrieving logs
