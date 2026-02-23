@@ -22,7 +22,7 @@ export default function DiagnosePage() {
     Object.fromEntries(agentToggles.map((a) => [a.id, a.defaultOn]))
   );
 
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [selectedImages, setSelectedImages] = useState<{ file: File, view: string }[]>([]);
   const [selectedFhirFile, setSelectedFhirFile] = useState<File | null>(null);
   const [patientId, setPatientId] = useState("");
   const [errorMsgs, setErrorMsgs] = useState<string>("");
@@ -33,8 +33,8 @@ export default function DiagnosePage() {
 
   const handleAnalyze = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedFile) {
-      setErrorMsgs("Please upload a DICOM or Image file.");
+    if (selectedImages.length === 0) {
+      setErrorMsgs("Please upload at least one DICOM or Image file.");
       return;
     }
 
@@ -42,7 +42,9 @@ export default function DiagnosePage() {
     setErrorMsgs("");
 
     try {
-      const resp = await uploadAndStartWorkflow(selectedFile, patientId, selectedFhirFile);
+      const files = selectedImages.map(img => img.file);
+      const views = selectedImages.map(img => img.view);
+      const resp = await uploadAndStartWorkflow(files, views, patientId, selectedFhirFile);
       router.push(`/results/${resp.session_id}`);
     } catch (err: any) {
       console.error(err);
@@ -76,15 +78,16 @@ export default function DiagnosePage() {
         <div
           className={`relative rounded-2xl border-2 border-dashed p-10 text-center cursor-pointer transition-all duration-300 group ${dragActive
             ? "border-[#00E5FF]/50 bg-[#00E5FF]/[0.03]"
-            : (selectedFile ? "border-green-500/50 bg-green-500/[0.03]" : "border-white/[0.06] hover:border-white/[0.12] bg-white/[0.01] hover:bg-white/[0.02]")
+            : (selectedImages.length > 0 ? "border-[#00E5FF]/20 bg-[#00E5FF]/[0.01]" : "border-white/[0.06] hover:border-white/[0.12] bg-white/[0.01] hover:bg-white/[0.02]")
             }`}
           onDragOver={(e) => { e.preventDefault(); setDragActive(true); }}
           onDragLeave={() => setDragActive(false)}
           onDrop={(e) => {
             e.preventDefault();
             setDragActive(false);
-            if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-              setSelectedFile(e.dataTransfer.files[0]);
+            if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+              const newFiles = Array.from(e.dataTransfer.files).map(f => ({ file: f, view: "AP" }));
+              setSelectedImages(prev => [...prev, ...newFiles]);
             }
           }}
           onClick={() => document.getElementById('file-upload')?.click()}
@@ -93,19 +96,62 @@ export default function DiagnosePage() {
             type="file"
             id="file-upload"
             className="hidden"
+            multiple
             accept="image/*,.dcm,.zip"
             onChange={(e) => {
-              if (e.target.files && e.target.files[0]) {
-                setSelectedFile(e.target.files[0]);
+              if (e.target.files && e.target.files.length > 0) {
+                const newFiles = Array.from(e.target.files).map(f => ({ file: f, view: "AP" }));
+                setSelectedImages(prev => [...prev, ...newFiles]);
               }
             }}
           />
-          <UploadCloud className={`h-10 w-10 mx-auto mb-4 transition-all duration-300 ${dragActive ? "text-[#00E5FF] scale-110" : (selectedFile ? "text-green-400 scale-105" : "text-white/20 group-hover:text-white/40 group-hover:scale-105")
-            }`} />
-          {selectedFile ? (
-            <p className="text-sm font-medium text-green-400 mb-1">
-              {selectedFile.name}
-            </p>
+          {selectedImages.length === 0 && (
+            <UploadCloud className={`h-10 w-10 mx-auto mb-4 transition-all duration-300 ${dragActive ? "text-[#00E5FF] scale-110" : "text-white/20 group-hover:text-white/40 group-hover:scale-105"}`} />
+          )}
+          {selectedImages.length > 0 ? (
+            <div className="flex flex-col gap-3 w-full max-w-md mx-auto">
+              {selectedImages.map((img, idx) => (
+                <div key={idx} className="flex items-center justify-between bg-white/[0.03] p-3 rounded-xl border border-white/[0.06]" onClick={(e) => e.stopPropagation()}>
+                  <span className="text-sm font-medium text-[#00E5FF]/90 truncate max-w-[200px]">{img.file.name}</span>
+                  <div className="flex items-center gap-3">
+                    <select
+                      value={img.view}
+                      onChange={(e) => {
+                        const newImgs = [...selectedImages];
+                        newImgs[idx].view = e.target.value;
+                        setSelectedImages(newImgs);
+                      }}
+                      className="bg-black/50 text-white/90 text-xs px-2.5 py-1.5 rounded-lg border border-white/[0.08] outline-none hover:border-[#00E5FF]/40 transition-colors"
+                    >
+                      <option value="AP">AP</option>
+                      <option value="PA">PA</option>
+                      <option value="LATERAL">LATERAL</option>
+                    </select>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        const newImgs = [...selectedImages];
+                        newImgs.splice(idx, 1);
+                        setSelectedImages(newImgs);
+                      }}
+                      className="text-white/30 hover:text-red-400 transition-colors"
+                    >
+                      &times;
+                    </button>
+                  </div>
+                </div>
+              ))}
+              <div
+                className="text-xs text-[#00E5FF]/60 mt-2 font-medium hover:text-[#00E5FF] transition-colors py-2 border border-dashed border-[#00E5FF]/20 rounded-xl bg-[#00E5FF]/[0.02]"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  document.getElementById('file-upload')?.click();
+                }}
+              >
+                + Add another image
+              </div>
+            </div>
           ) : (
             <>
               <p className="text-sm font-medium text-white/60 mb-1">

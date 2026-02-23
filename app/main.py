@@ -47,7 +47,7 @@ app.add_middleware(
 )
 
 # Include API routes
-app.include_router(router)
+app.include_router(router, prefix="/api/v1")
 
 # Include past mistakes router if available
 if PAST_MISTAKES_API_AVAILABLE:

@@ -133,7 +133,8 @@ def init_db():
             print(f"  1. SUPABASE_URL and SUPABASE_KEY are set in .env")
             print(f"  2. Database schema has been created using db/supabase_schema.sql")
             print(f"  3. Tables have proper permissions")
-            raise
+            # We don't raise here to keep the logger completely non-blocking
+            _initialized = True  # Prevent repeated crash attempts on startup
 
  
 

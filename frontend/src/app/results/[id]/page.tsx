@@ -69,17 +69,57 @@ export default function ResultsPage({ params }: { params: { id: string } }) {
     { id: "audit", label: "Audit Trail", icon: ShieldAlert },
   ];
 
-  const renderLoadingState = () => (
-    <div className="flex flex-col items-center justify-center min-h-[60vh] space-y-6">
-      <Loader2 className="w-12 h-12 text-[#00E5FF] animate-spin" />
-      <h2 className="text-2xl font-semibold text-white/80">Analyzing Study...</h2>
-      <p className="text-white/40">The Multi-Agent Pipeline is evaluating the case.</p>
-      <div className="flex gap-2 text-[10px] text-[#00E5FF]/70 bg-[#00E5FF]/10 px-3 py-1 rounded-full font-mono uppercase tracking-widest mt-8">
-        <span className="w-1.5 h-1.5 rounded-full bg-[#00E5FF] animate-ping inline-block mt-[2px]"></span>
-        Session {params.id}
+  const renderLoadingState = () => {
+    const state = workflowInfo?.current_state || {};
+    const traceLength = state.trace?.length || 0;
+
+    // Determine active stage
+    let activeStage = "Initializing Multi-Agent Graph...";
+    if (state.radiologist) activeStage = "Radiologist Analysis Complete";
+    if (state.chexbert) activeStage = "CheXbert Semantic Extraction Complete";
+    if (state.historian) activeStage = "Historian Clinical Anchoring Complete";
+    if (state.literature) activeStage = "Literature Search Complete";
+    if (state.critic) activeStage = "Critic Verification Complete";
+    if (state.debate) activeStage = "Multi-Agent Debate Complete";
+
+    return (
+      <div className="flex flex-col items-center justify-center min-h-[60vh] space-y-6">
+        <Loader2 className="w-12 h-12 text-[#00E5FF] animate-spin" />
+        <h2 className="text-2xl font-semibold text-white/80">Analyzing Study...</h2>
+        <p className="text-[#00E5FF]/80 font-medium tracking-wide">{activeStage}</p>
+        <p className="text-white/40 text-sm">Processed {traceLength} internal reasoning steps so far.</p>
+
+        {/* Agent Checklist */}
+        <div className="w-full max-w-sm bg-black/40 border border-white/[0.05] rounded-xl p-6 mt-6 space-y-4 shadow-xl">
+          <div className="flex items-center justify-between">
+            <span className={`text-[13px] font-medium transition-colors ${state.radiologist ? "text-white/80" : "text-white/40"}`}>1. Vision Backbone (Radiologist)</span>
+            {state.radiologist ? <CheckCircle2 className="w-4 h-4 text-green-400" /> : <Loader2 className="w-4 h-4 text-[#00E5FF] animate-spin" />}
+          </div>
+          <div className="flex items-center justify-between">
+            <span className={`text-[13px] font-medium transition-colors ${state.chexbert ? "text-white/80" : "text-white/40"}`}>2. Structured Pathology (CheXbert)</span>
+            {state.chexbert ? <CheckCircle2 className="w-4 h-4 text-green-400" /> : (state.radiologist ? <Loader2 className="w-4 h-4 text-[#00E5FF] animate-spin" /> : <span className="w-4 h-4 rounded-full border border-white/20" />)}
+          </div>
+          <div className="flex items-center justify-between">
+            <span className={`text-[13px] font-medium transition-colors ${state.historian ? "text-white/80" : "text-white/40"}`}>3. EHR Context (Historian)</span>
+            {state.historian ? <CheckCircle2 className="w-4 h-4 text-green-400" /> : (state.chexbert ? <Loader2 className="w-4 h-4 text-[#00E5FF] animate-spin" /> : <span className="w-4 h-4 rounded-full border border-white/20" />)}
+          </div>
+          <div className="flex items-center justify-between">
+            <span className={`text-[13px] font-medium transition-colors ${state.literature ? "text-white/80" : "text-white/40"}`}>4. Evidence Retrieval (Literature)</span>
+            {state.literature ? <CheckCircle2 className="w-4 h-4 text-green-400" /> : (state.historian ? <Loader2 className="w-4 h-4 text-[#00E5FF] animate-spin" /> : <span className="w-4 h-4 rounded-full border border-white/20" />)}
+          </div>
+          <div className="flex items-center justify-between">
+            <span className={`text-[13px] font-medium transition-colors ${state.critic ? "text-white/80" : "text-white/40"}`}>5. Adversarial Validation (Critic)</span>
+            {state.critic ? <CheckCircle2 className="w-4 h-4 text-green-400" /> : (state.literature ? <Loader2 className="w-4 h-4 text-[#00E5FF] animate-spin" /> : <span className="w-4 h-4 rounded-full border border-white/20" />)}
+          </div>
+        </div>
+
+        <div className="flex gap-2 text-[10px] text-[#00E5FF]/70 bg-[#00E5FF]/10 px-3 py-1 rounded-full font-mono uppercase tracking-widest mt-8">
+          <span className="w-1.5 h-1.5 rounded-full bg-[#00E5FF] animate-ping inline-block mt-[2px]"></span>
+          Session {params.id.slice(0, 8)}
+        </div>
       </div>
-    </div>
-  );
+    );
+  };
 
   if (!workflowInfo || workflowInfo.status === "running") {
     return <div className="max-w-7xl mx-auto px-6 py-8">{renderLoadingState()}</div>;

@@ -58,7 +58,8 @@ def _get_or_create_logger(state: VerifaiState):
     session_id = session_id or str(uuid.uuid4())
     logger = get_logger(  # NEW: Uses adapter to select SQLite or Supabase
         session_id=session_id,
-        image_path=state.get("image_path", ""),
+        image_paths=state.get("image_paths", []),
+        views=state.get("views", []),
         patient_id=state.get("patient_id"),
         workflow_type="debate"
     )
