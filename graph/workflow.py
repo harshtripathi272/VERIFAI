@@ -328,7 +328,10 @@ def logged_validator_node(state: VerifaiState) -> dict:
         flag_count=rules.get('flag_count', 0),
         retrieval_agrees=retrieval.get('agrees_with_chexbert', True) if retrieval and not retrieval.get('error') else True,
     )
-    val_align = compute_validator_alignment(recommendation)
+    val_align = compute_validator_alignment(
+        recommendation=recommendation,
+        entity_f1=entity_f1 if entity_f1 is not None else 0.5
+    )
     val_ig = compute_ig(
         agent_name="validator",
         agent_uncertainty=val_unc,
