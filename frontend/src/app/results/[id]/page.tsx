@@ -38,6 +38,8 @@ export default function ResultsPage({ params }: { params: { id: string } }) {
   const [liveEvents, setLiveEvents] = useState<AgentEvent[]>([]);
   const [sseConnected, setSseConnected] = useState(false);
   const [sseTrigger, setSseTrigger] = useState(0);
+  const [rerunInProgress, setRerunInProgress] = useState(false);
+  const rerunInProgressRef = useRef(false);
   const feedRef = useRef<HTMLDivElement>(null);
 
   // SSE Live Feed + Polling Fallback
@@ -89,6 +91,13 @@ export default function ResultsPage({ params }: { params: { id: string } }) {
         setWorkflowInfo(data);
         if (data.status === "completed" || data.status === "failed") {
           clearInterval(intervalId);
+          rerunInProgressRef.current = false;
+          setRerunInProgress(false);
+        }
+        // If rerun was in progress and workflow is now suspended again, the rerun finished
+        if (data.status === "suspended" && rerunInProgressRef.current) {
+          rerunInProgressRef.current = false;
+          setRerunInProgress(false);
         }
       } catch { }
     };
@@ -145,10 +154,18 @@ export default function ResultsPage({ params }: { params: { id: string } }) {
       await submitHumanFeedback(params.id, action, feedbackText, correctDx);
 
       if (action === "reject") {
+        // Hide the HITL box and show "rerunning" state
+        rerunInProgressRef.current = true;
+        setRerunInProgress(true);
         // Clear previous live events so the rerun shows fresh progress
         setLiveEvents([]);
         setFeedbackText("");
         setCorrectDx("");
+      }
+
+      if (action === "approve") {
+        // Immediately reflect approved state in the UI
+        setWorkflowInfo(prev => prev ? { ...prev, status: "completed" } : prev);
       }
 
       setTimeout(async () => {
@@ -164,6 +181,8 @@ export default function ResultsPage({ params }: { params: { id: string } }) {
       console.error(err);
       alert("Failed to submit feedback. Please try again.");
       setIsSubmittingFeedback(false);
+      rerunInProgressRef.current = false;
+      setRerunInProgress(false);
     }
   };
 
@@ -315,7 +334,69 @@ export default function ResultsPage({ params }: { params: { id: string } }) {
         </div>
       </div>
 
-      {workflowInfo!.status === "suspended" && (
+      {/* Workflow Rerunning Banner + Live Agent Feed - shown while feedback rerun is in progress */}
+      {rerunInProgress && (
+        <div className="mb-8 p-5 rounded-2xl border-2 border-amber-400/40 bg-amber-400/[0.02] shadow-[0_0_30px_rgba(251,191,36,0.05)] animate-fadeInUp">
+          <div className="flex items-center gap-3 mb-2">
+            <Loader2 className="h-5 w-5 animate-spin text-amber-400" />
+            <h2 className="text-xl font-bold text-white">Workflow Rerunning with Your Feedback</h2>
+          </div>
+          <p className="text-white/60 text-sm mb-4">The AI pipeline is re-analyzing with your clinical guidance. View the live agent progress below.</p>
+
+          {/* Live Agent Feed (same as first-run) */}
+          {liveEvents.length > 0 && (
+            <div className="mt-2">
+              <div className="flex items-center gap-2 mb-3">
+                <Radio className={cn("w-4 h-4", sseConnected ? "text-green-400 animate-pulse" : "text-white/30")} />
+                <span className="text-xs font-mono text-white/50 uppercase tracking-wider">
+                  Live Agent Feed {sseConnected ? "• Connected" : ""}
+                </span>
+              </div>
+              <div
+                ref={feedRef}
+                className="bg-black/40 border border-white/10 rounded-xl p-4 max-h-72 overflow-y-auto space-y-2 scrollbar-thin scrollbar-thumb-white/10"
+              >
+                {liveEvents.map((event, i) => (
+                  <div
+                    key={i}
+                    className={cn(
+                      "flex items-start gap-3 py-2 px-3 rounded-lg text-sm transition-all duration-300",
+                      event.status === "started" && "bg-[#00E5FF]/5 border-l-2 border-[#00E5FF]/50",
+                      event.status === "completed" && "bg-green-500/5 border-l-2 border-green-500/50",
+                      event.status === "workflow_complete" && "bg-purple-500/10 border-l-2 border-purple-400/50",
+                      event.status === "connected" && "bg-white/5 border-l-2 border-white/20",
+                      event.status === "error" && "bg-red-500/10 border-l-2 border-red-500/50",
+                    )}
+                  >
+                    <span className="text-lg mt-0.5 shrink-0">{AGENT_ICONS[event.agent] || "🔹"}</span>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="font-medium text-white/90 capitalize">{event.agent}</span>
+                        <span className={cn(
+                          "text-[10px] px-1.5 py-0.5 rounded-full font-mono uppercase",
+                          event.status === "started" && "bg-[#00E5FF]/20 text-[#00E5FF]",
+                          event.status === "completed" && "bg-green-500/20 text-green-400",
+                          event.status === "workflow_complete" && "bg-purple-500/20 text-purple-300",
+                          event.status === "connected" && "bg-white/10 text-white/50",
+                          event.status === "error" && "bg-red-500/20 text-red-400",
+                        )}>
+                          {event.status === "workflow_complete" ? "done" : event.status}
+                        </span>
+                      </div>
+                      <p className="text-white/50 text-xs mt-0.5 truncate">{event.message}</p>
+                    </div>
+                    <span className="text-[10px] text-white/20 font-mono shrink-0 mt-1">
+                      {new Date(event.timestamp).toLocaleTimeString()}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {workflowInfo!.status === "suspended" && !rerunInProgress && (
         <div className="mb-8 p-5 rounded-2xl border-2 border-[#00E5FF]/40 bg-[#00E5FF]/[0.02] shadow-[0_0_30px_rgba(0,229,255,0.05)] animate-fadeInUp">
           <div className="flex items-center gap-3 mb-4">
             <span className="relative flex h-3 w-3">
