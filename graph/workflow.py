@@ -111,7 +111,8 @@ def logged_radiologist_node(state: VerifaiState) -> dict:
     print("="*60)
     _sse(state, "radiologist", "started", message="Analyzing chest X-ray with MedGemma...")
     logger = _get_or_create_logger(state)
-    result = radiologist_node(state)
+    with track_agent_execution("radiologist"):
+        result = radiologist_node(state)
     u_out = result.get("current_uncertainty", u_in)
     delta = u_out - u_in
     findings_len = len(result.get('radiologist_output', {}).findings or '')
@@ -140,7 +141,8 @@ def logged_chexbert_node(state: VerifaiState) -> dict:
     print("="*60)
     _sse(state, "chexbert", "started", message="Running structured pathology labeling...")
     logger = _get_or_create_logger(state)
-    result = chexbert_node(state)
+    with track_agent_execution("chexbert"):
+        result = chexbert_node(state)
     chex_output = result.get('chexbert_output')
     u_out = result.get("current_uncertainty", u_in)
     delta = u_out - u_in
@@ -177,7 +179,8 @@ def logged_critic_node(state: VerifaiState) -> dict:
     print("="*60)
     _sse(state, "critic", "started", message="MedGemma semantic critic evaluating diagnosis...")
     logger = _get_or_create_logger(state)
-    result = critic_node(state)
+    with track_agent_execution("critic"):
+        result = critic_node(state)
     critic_output = result.get('critic_output')
     u_out = result.get("current_uncertainty", u_in)
     delta = u_out - u_in
@@ -221,7 +224,8 @@ def logged_evidence_gathering_node(state: VerifaiState) -> dict:
     print("="*60)
     _sse(state, "evidence", "started", message="Gathering clinical history (FHIR) and literature (PubMed)...")
     logger = _get_or_create_logger(state)
-    result = evidence_gathering_node(state)
+    with track_agent_execution("evidence"):
+        result = evidence_gathering_node(state)
     # === MUC: Compute IG for Historian ===
     u_current = u_in
     hist = result.get('historian_output')
@@ -330,7 +334,8 @@ def logged_debate_node(state: VerifaiState) -> dict:
     print("="*60)
     _sse(state, "debate", "started", message="Multi-agent debate starting — Critic vs Evidence Team...")
     logger = _get_or_create_logger(state)
-    result = debate_node(state)
+    with track_agent_execution("debate"):
+        result = debate_node(state)
     debate_output = result.get('debate_output')
     u_out = result.get("current_uncertainty", u_in)
     delta = u_out - u_in
@@ -366,7 +371,8 @@ def logged_validator_node(state: VerifaiState) -> dict:
         print("[WORKFLOW] Validator mode: ESCALATION (max rounds exceeded)")
     print("="*60)
     _sse(state, "validator", "started", message="Validating diagnosis with RadGraph + Rules Engine...")
-    result = validator_node(state)
+    with track_agent_execution("validator"):
+        result = validator_node(state)
     # === MUC: Compute Validator IG ===
     vout = result.get("validator_output") or {}
     entity = vout.get('entity_matching', {})
@@ -420,7 +426,8 @@ def logged_finalize_node(state: VerifaiState) -> dict:
     print("="*60)
     _sse(state, "finalize", "started", message="Generating final diagnosis...")
     logger = _get_or_create_logger(state)
-    result = finalize_node(state)
+    with track_agent_execution("finalize"):
+        result = finalize_node(state)
     final_dx = result.get("final_diagnosis")
     if final_dx:
         final_u = max(0.01, 1.0 - final_dx.calibrated_confidence)
@@ -536,23 +543,6 @@ def finalize_node(state: VerifaiState) -> dict:
             "trace": ["FINALIZE: No findings to finalize"]
         }
 
-    # ── FLAG_FOR_HUMAN: validator says evidence is weak / critical rule violated ──
-    if recommendation == "FLAG_FOR_HUMAN":
-        return {
-            "final_diagnosis": FinalDiagnosis(
-                diagnosis=debate.consensus_diagnosis if (debate and debate.final_consensus) else rad.impression[:200],
-                calibrated_confidence=0.0,
-                deferred=True,
-                deferral_reason=f"Validator flagged for human review: {validator_explanation}",
-                recommended_next_steps=[
-                    "Manual radiologist review required",
-                    "Check validator flags: " + str(validator_out.get("rules", {}).get("triggered_rule_names", [])),
-                    "Review retrieved historical cases in validator_output"
-                ]
-            ),
-            "trace": [f"FINALIZE: DEFERRED — Validator flagged for human review ({validator_explanation})"]
-        }
-
     # ── Build base confidence ─────────────────────────────────────────────────
     if debate and debate.final_consensus:
         diagnosis_text = debate.consensus_diagnosis
@@ -569,6 +559,23 @@ def finalize_node(state: VerifaiState) -> dict:
             confidence += debate.total_confidence_adjustment
         confidence = max(0.0, min(0.99, confidence))
         base_explanation = f"No debate consensus after {len(debate.rounds) if debate else 0} rounds. Based on radiologist impression with uncertainty={uncertainty:.3f}."
+
+    # ── FLAG_FOR_HUMAN: validator says evidence is weak / critical rule violated ──
+    if recommendation == "FLAG_FOR_HUMAN":
+        return {
+            "final_diagnosis": FinalDiagnosis(
+                diagnosis=diagnosis_text,
+                calibrated_confidence=confidence,
+                deferred=True,
+                deferral_reason=f"Validator flagged for human review: {validator_explanation}",
+                recommended_next_steps=[
+                    "Manual radiologist review required",
+                    "Check validator flags: " + str(validator_out.get("rules", {}).get("triggered_rule_names", [])),
+                    "Review retrieved historical cases in validator_output"
+                ]
+            ),
+            "trace": [f"FINALIZE: DEFERRED — Validator flagged for human review ({validator_explanation})"]
+        }
 
     # ── FINALIZE_LOW_CONFIDENCE: cap at 0.65 ─────────────────────────────────
     if recommendation == "FINALIZE_LOW_CONFIDENCE":

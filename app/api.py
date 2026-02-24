@@ -38,7 +38,7 @@ from langgraph.types import Command
 
 # NEW: Safety Guardrails, Evidence Report, and Monitoring
 from safety.guardrails import run_safety_check, SafetyReport
-from output.evidence_report import generate_evidence_report, save_evidence_report
+from utils.evidence_report import generate_evidence_report, save_evidence_report
 from monitoring.metrics import metrics, track_agent_execution, track_diagnosis, get_metrics_summary
 from monitoring.metrics import structured_logger
 
@@ -76,6 +76,7 @@ class WorkflowStartResponse(BaseModel):
 class WorkflowStatusResponse(BaseModel):
     session_id: str
     status: str  # "running", "suspended", "completed", "failed", "not_found"
+    current_state: dict[str, Any] | None = None
     pending_review_data: dict[str, Any] | None = None
     final_result: dict[str, Any] | None = None
 
@@ -264,6 +265,7 @@ def _build_evidence_packet(state: VerifaiState) -> dict[str, Any]:
 
 def _run_workflow_background(file_paths: List[str], views: List[str], patient_id: str, fhir_content: Optional[str], session_id: str):
     """Background task to execute the graph."""
+    metrics.start_workflow(session_id)
     try:
         initial_state: VerifaiState = {
             "_session_id": session_id,
@@ -298,8 +300,10 @@ def _run_workflow_background(file_paths: List[str], views: List[str], patient_id
         
     except Exception as e:
         print(f"[BACKGROUND] Workflow {session_id} failed: {e}")
-    # We deliberately DO NOT delete file_path here because the workflow is suspended.
-    # It must be deleted when the graph reaches END.
+    finally:
+        # We deliberately DO NOT delete file_path here because the workflow is suspended.
+        # It must be deleted when the graph reaches END.
+        metrics.end_workflow(session_id)
 
 
 @router.post("/workflows/start", response_model=WorkflowStartResponse)
@@ -369,25 +373,6 @@ async def get_workflow_status(session_id: str):
     if not state_snapshot or not state_snapshot.created_at:
         return WorkflowStatusResponse(session_id=session_id, status="not_found")
     
-    # If the graph is not running and has next tasks, it's either suspended or interrupted
-    if not state_snapshot.next:
-        # No more nodes to run -> It is COMPLETED
-        final_state = state_snapshot.values
-        final_dx = final_state.get("final_diagnosis")
-        evidence = _build_evidence_packet(final_state)
-        
-        return WorkflowStatusResponse(
-            session_id=session_id,
-            status="completed",
-            final_result={
-                "diagnosis": getattr(final_dx, "diagnosis", None),
-                "confidence": getattr(final_dx, "calibrated_confidence", 0.0),
-                "reproducibility_hash": getattr(final_dx, "reproducibility_hash", None),
-                "evidence_packet": evidence,
-                "trace": final_state.get("trace", [])
-            }
-        )
-    
     # Extract current state for live mirroring on frontend
     state_values = state_snapshot.values
     
@@ -407,6 +392,27 @@ async def get_workflow_status(session_id: str):
         "routing": state_values.get("routing_decision"),
         "trace": state_values.get("trace", [])
     }
+
+    # If the graph is not running and has next tasks, it's either suspended or interrupted
+    if not state_snapshot.next:
+        # No more nodes to run -> It is COMPLETED
+        final_state = state_snapshot.values
+        final_dx = final_state.get("final_diagnosis")
+        evidence = _build_evidence_packet(final_state)
+        
+        return WorkflowStatusResponse(
+            session_id=session_id,
+            status="completed",
+            current_state=current_state,
+            final_result={
+                "diagnosis": getattr(final_dx, "diagnosis", None),
+                "confidence": getattr(final_dx, "calibrated_confidence", 0.0),
+                "evidence_packet": evidence,
+                "trace": final_state.get("trace", [])
+            }
+        )
+    
+
     
     # It has next nodes. Check if it's currently interrupted by the `human_review_node`
     # In LangGraph 0.2+, `tasks` contains the `interrupts`
@@ -432,9 +438,10 @@ async def get_workflow_status(session_id: str):
 
 
 @router.post("/workflows/{session_id}/resume")
-async def resume_workflow(session_id: str, req: HumanReviewRequest):
+async def resume_workflow(session_id: str, req: HumanReviewRequest, background_tasks: BackgroundTasks):
     """
     Provide human feedback to a suspended workflow.
+    Executes the rest of the workflow in the background to prevent server deadlock.
     """
     config = {"configurable": {"thread_id": session_id}}
     state_snapshot = graph_app.get_state(config)
@@ -442,23 +449,117 @@ async def resume_workflow(session_id: str, req: HumanReviewRequest):
     if not state_snapshot or not state_snapshot.next:
         raise HTTPException(status_code=400, detail="Workflow not found or not suspended.")
         
-    payload = {
-         "action": req.action,
-         "feedback": req.feedback,
-         "correct_diagnosis": req.correct_diagnosis
-    }
+    # Enqueue background execution instead of blocking the event loop
+    background_tasks.add_task(_resume_workflow_background, session_id, req, config, state_snapshot)
     
+    return {"session_id": session_id, "status": "resumed", "action": req.action}
+
+
+async def _resume_workflow_background(session_id: str, req: HumanReviewRequest, config: dict, state_snapshot: Any):
+    """Background task to run the rest of the workflow without blocking the API."""
+    # Store mistake in database if rejected
+    if req.action == "reject" and not getattr(settings, "MOCK_MODELS", False):
+        try:
+             current_state = state_snapshot.values
+             
+             image_paths = current_state.get("image_paths", [])
+             image_path = image_paths[0] if image_paths else "unknown"
+             
+             final_diagnosis_obj = current_state.get("final_diagnosis")
+             original_diagnosis = getattr(final_diagnosis_obj, "diagnosis", "Unknown") if hasattr(final_diagnosis_obj, "diagnosis") else "Unknown"
+             
+             chexbert = current_state.get("chexbert", {})
+             disease_type = "unknown"
+             if chexbert:
+                  present = [k for k,v in chexbert.items() if v in ["present", "uncertain"]]
+                  if present:
+                       disease_type = present[0].lower()
+             if disease_type == "unknown":
+                  disease_type = original_diagnosis.split()[0].lower()
+                  
+             kle = current_state.get("current_uncertainty", 0.5)
+             
+             critic = current_state.get("critic", {})
+             safety_score = getattr(critic, "safety_score", 0.5) if hasattr(critic, "safety_score") else 0.5
+             
+             historian = current_state.get("historian", {})
+             clinical_summary = getattr(historian, "clinical_summary", "") if hasattr(historian, "clinical_summary") else ""
+             
+             debate = current_state.get("debate", {})
+             debate_summary = getattr(debate, "debate_summary", "") if hasattr(debate, "debate_summary") else ""
+             
+             embedding = generate_case_embedding_from_fields(
+                 disease_type=disease_type,
+                 original_diagnosis=original_diagnosis,
+                 corrected_diagnosis=req.correct_diagnosis,
+                 error_type="misdiagnosis",
+                 uncertainty_score=kle,
+                 chexbert_labels=chexbert,
+                 clinical_summary=clinical_summary,
+                 debate_summary=debate_summary
+             )
+             
+             insert_validated_mistake(
+                 session_id=session_id,
+                 image_path=image_path,
+                 original_diagnosis=original_diagnosis,
+                 corrected_diagnosis=req.correct_diagnosis,
+                 disease_type=disease_type,
+                 error_type="misdiagnosis",
+                 severity_level=3,
+                 case_embedding=embedding,
+                 kle_uncertainty=kle,
+                 safety_score=safety_score,
+                 chexbert_labels=chexbert,
+                 clinical_summary=clinical_summary,
+                 debate_summary=debate_summary
+             )
+             print(f"[VERIFAI] Successfully recorded rejected diagnosis for {session_id} to Past Mistakes DB.")
+        except Exception as e:
+             print(f"[VERIFAI] Warning: Failed to record mistake to DB: {e}")
+
     try:
+        payload = {
+             "action": req.action,
+             "feedback": req.feedback,
+             "correct_diagnosis": req.correct_diagnosis
+        }
+    
         # Resume the workflow using the Command primitive
-        # This streams the remaining execution synchronously. In true production,
-        # you might invoke this in a background task again, but since it's just
-        # returning back to Critic or END, we can run it here
+        # Run synchronously since we are now in a BackgroundTask Thread
         for _ in graph_app.stream(Command(resume=payload), config, stream_mode="values"):
              pass
              
-        return {"session_id": session_id, "status": "resumed", "action": req.action}
+        # Extract the final completed state to populate Observability Metrics
+        new_state = graph_app.get_state(config)
+        if new_state and new_state.values:
+             final_vals = new_state.values
+             final_dx = final_vals.get("final_diagnosis")
+             if final_dx:
+                  confidence = getattr(final_dx, "calibrated_confidence", 0.0)
+                  deferred = getattr(final_dx, "deferred", False)
+                  uncertainty = max(0.01, 1.0 - confidence)
+                  debate = final_vals.get("debate_output")
+                  debate_rounds = len(debate.rounds) if debate and hasattr(debate, "rounds") else 0
+                  
+                  critic = final_vals.get("critic_output")
+                  safety_score = getattr(critic, "safety_score", 1.0) if hasattr(critic, "safety_score") else 1.0
+                  
+                  track_diagnosis(
+                      confidence=confidence,
+                      uncertainty=uncertainty,
+                      deferred=deferred,
+                      debate_rounds=debate_rounds,
+                      safety_score=safety_score
+                  )
+                  print(f"[VERIFAI] Successfully recorded diagnosis metrics for {session_id}.")
+                  
+        # Mark workflow ended in global metrics to trigger observability flush    
+        metrics.end_workflow(session_id)
+             
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to resume graph: {e}")
+        structured_logger.log("error", "Background workflow block failed.",
+                              session_id=session_id, error=str(e))
 
 
 # =============================================================================

@@ -197,58 +197,9 @@ export default function DiagnosePage() {
           </div>
         </div>
 
-        <div>
-          <label className="block text-[13px] font-medium text-white/40 mb-2">Clinical Question</label>
-          <textarea
-            placeholder="What specifically should the diagnostic pipeline investigate?"
-            required
-            rows={3}
-            className="w-full bg-white/[0.02] border border-white/[0.06] rounded-xl px-4 py-3 text-sm text-white/90 placeholder:text-white/20 resize-none transition-all duration-200"
-          />
-        </div>
 
-        {/* Advanced Settings */}
-        <div className="rounded-xl border border-white/[0.04] bg-white/[0.01] overflow-hidden">
-          <button
-            type="button"
-            onClick={() => setShowAdvanced(!showAdvanced)}
-            className="w-full flex items-center justify-between px-5 py-3.5 text-sm text-white/40 hover:text-white/60 transition-colors"
-          >
-            <span className="flex items-center gap-2">
-              Agent Configuration
-              <span className="text-[11px] text-[#00E5FF]/50 bg-[#00E5FF]/[0.06] px-2 py-0.5 rounded-full">
-                {Object.values(agents).filter(Boolean).length}/5 active
-              </span>
-            </span>
-            {showAdvanced ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
-          </button>
 
-          {showAdvanced && (
-            <div className="px-5 pb-5 space-y-2 border-t border-white/[0.04] pt-4">
-              {agentToggles.map((agent) => (
-                <div
-                  key={agent.id}
-                  onClick={() => toggleAgent(agent.id)}
-                  className={`flex items-center gap-3 p-3 rounded-lg cursor-pointer transition-all duration-200 ${agents[agent.id]
-                    ? "bg-[#00E5FF]/[0.04] border border-[#00E5FF]/10"
-                    : "bg-white/[0.01] border border-white/[0.03] opacity-50"
-                    }`}
-                >
-                  <agent.icon className={`h-4 w-4 shrink-0 ${agents[agent.id] ? "text-[#00E5FF]" : "text-white/20"}`} />
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-white/80">{agent.label}</p>
-                    <p className="text-[11px] text-white/25">{agent.description}</p>
-                  </div>
-                  <div className={`w-8 h-[18px] rounded-full relative transition-colors ${agents[agent.id] ? "bg-[#00E5FF]/30" : "bg-white/10"
-                    }`}>
-                    <div className={`absolute top-[2px] w-[14px] h-[14px] rounded-full transition-all duration-200 ${agents[agent.id] ? "right-[2px] bg-[#00E5FF] shadow-[0_0_8px_rgba(0,229,255,0.6)]" : "left-[2px] bg-white/30"
-                      }`} />
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
+
 
         {/* Submit */}
         <button

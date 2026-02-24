@@ -87,12 +87,13 @@ class DebateOrchestrator:
                 challenge_text = f"Safety concern detected: {'; '.join(concerns[:2])}"
                 if critic_output.recommended_hedging:
                     challenge_text += f" Suggestion: {critic_output.recommended_hedging[:100]}"
+                confidence_impact = -0.20
             elif concerns:
                 challenge_text = f"Moderate concerns: {'; '.join(concerns[:2])}"
+                confidence_impact = -0.15
             else:
                 challenge_text = "No significant concerns identified. Requesting evidence validation."
-            
-            confidence_impact = -0.05 if critic_output.is_overconfident else 0.0
+                confidence_impact = 0.0
             
             return DebateArgument(
                 agent="critic",
@@ -105,25 +106,41 @@ class DebateOrchestrator:
         # Subsequent rounds: Challenge based on previous responses
         last_round = previous_rounds[-1] if previous_rounds else None
         if last_round:
+            hist_arg = getattr(last_round.historian_response, "argument", "") if last_round.historian_response else ""
+            hist_snippet = hist_arg[:80].strip() if hist_arg else "No preceding clinical history"
+            
             # Check if historian/literature provided strong evidence
             hist_impact = last_round.historian_response.confidence_impact if last_round.historian_response else 0
             lit_impact = last_round.literature_response.confidence_impact if last_round.literature_response else 0
             
+            # Use the round number to cycle through different types of follow-up challenges
+            round_num = len(previous_rounds) + 1
+            
             if hist_impact + lit_impact > 0.1:
-                # Evidence was strong, reduce challenge intensity
+                # Evidence was strong, reduce challenge intensity but ask for specificity
+                if round_num % 2 == 0:
+                    challenge_msg = f"Historian noted: '{hist_snippet}...'. While supportive, please verify if secondary disease patterns in the patient's history uniquely confirm this."
+                else:
+                    challenge_msg = f"The historical evidence ('{hist_snippet[:40]}...') aligns well. Literature, are there any recent studies documenting rare contra-indications for this specific presentation?"
+                
                 return DebateArgument(
                     agent="critic",
                     position="challenge",
-                    argument="Evidence appears supportive. Verifying consistency with imaging findings.",
+                    argument=challenge_msg,
                     confidence_impact=-0.02,
                     evidence_refs=["reduced_challenge_intensity"]
                 )
             else:
-                # Evidence was weak, maintain challenge
+                # Evidence was weak, maintain challenge and push back
+                if round_num % 2 == 0:
+                    challenge_msg = f"Historian's previous claim ('{hist_snippet}...') is insufficient to resolve uncertainty. Are there definitive prior reports or contradicting differentials?"
+                else:
+                    challenge_msg = f"The provided evidence remains weak. We must consider alternative diagnoses. What other pathologies present with these exact visual findings?"
+                    
                 return DebateArgument(
                     agent="critic",
                     position="challenge",
-                    argument="Evidence insufficient to resolve uncertainty. Recommend additional validation.",
+                    argument=challenge_msg,
                     confidence_impact=-0.08,
                     evidence_refs=["maintained_challenge"]
                 )
@@ -139,15 +156,18 @@ class DebateOrchestrator:
         self,
         historian_output,
         critic_challenge: DebateArgument,
-        radiologist_output
+        radiologist_output,
+        round_num: int
     ) -> DebateArgument:
         """Generate historian's response to critic's challenge."""
         
+        prefix = f"[Round {round_num}] Replying to Critic ('{critic_challenge.argument[:50]}...'): " if round_num > 1 else ""
+
         if not historian_output:
             return DebateArgument(
                 agent="historian",
                 position="refine",
-                argument="No clinical history available to support or refute.",
+                argument=f"{prefix}No clinical history available to support or refute.",
                 confidence_impact=0.0
             )
         
@@ -161,7 +181,7 @@ class DebateOrchestrator:
             return DebateArgument(
                 agent="historian",
                 position="support",
-                argument=f"Clinical history supports diagnosis: {support_text}",
+                argument=f"{prefix}Clinical history supports diagnosis: {support_text}",
                 confidence_impact=min(0.15, len(supporting) * 0.05),
                 evidence_refs=[f.fhir_resource_id for f in supporting[:3]]
             )
@@ -171,7 +191,7 @@ class DebateOrchestrator:
             return DebateArgument(
                 agent="historian",
                 position="refine",
-                argument=f"Clinical history raises concerns: {contra_text}. Consider differential.",
+                argument=f"{prefix}Clinical history raises concerns: {contra_text}. Consider differential.",
                 confidence_impact=-min(0.10, len(contradicting) * 0.04),
                 evidence_refs=[f.fhir_resource_id for f in contradicting[:2]]
             )
@@ -180,7 +200,7 @@ class DebateOrchestrator:
             return DebateArgument(
                 agent="historian",
                 position="refine",
-                argument=f"Clinical history is mixed. {historian_output.clinical_summary[:200]}",
+                argument=f"{prefix}Clinical history is mixed. {historian_output.clinical_summary[:200]}",
                 confidence_impact=historian_output.confidence_adjustment,
                 evidence_refs=[]
             )
@@ -189,15 +209,18 @@ class DebateOrchestrator:
         self,
         literature_output,
         critic_challenge: DebateArgument,
-        radiologist_output
+        radiologist_output,
+        round_num: int
     ) -> DebateArgument:
         """Generate literature agent's response to critic's challenge."""
         
+        prefix = f"[Round {round_num}] Addressing Critic ('{critic_challenge.argument[:50]}...'): " if round_num > 1 else ""
+
         if not literature_output:
             return DebateArgument(
                 agent="literature",
                 position="refine",
-                argument="No literature evidence retrieved.",
+                argument=f"{prefix}No literature evidence retrieved.",
                 confidence_impact=0.0
             )
         
@@ -208,7 +231,7 @@ class DebateOrchestrator:
                 return DebateArgument(
                     agent="literature",
                     position="refine",
-                    argument="Literature search found no directly relevant studies.",
+                    argument=f"{prefix}Literature search found no directly relevant studies.",
                     confidence_impact=0.0
                 )
             
@@ -232,7 +255,7 @@ class DebateOrchestrator:
             return DebateArgument(
                 agent="literature",
                 position=position,
-                argument=f"Literature evidence: {literature_output[:300]}",
+                argument=f"{prefix}Literature evidence: {literature_output[:300]}",
                 confidence_impact=confidence_impact,
                 evidence_refs=["literature_synthesis"]
             )
@@ -245,7 +268,7 @@ class DebateOrchestrator:
             return DebateArgument(
                 agent="literature",
                 position="refine",
-                argument="No relevant literature citations found.",
+                argument=f"{prefix}No relevant literature citations found.",
                 confidence_impact=0.0
             )
         
@@ -254,28 +277,43 @@ class DebateOrchestrator:
         
         if evidence_strength == "high" or len(high_evidence) >= 2:
             cite_text = "; ".join([f"{c.authors[0] if c.authors else 'Unknown'} et al. ({c.year})" for c in citations[:3]])
+            if round_num > 1:
+                base_msg = f"{prefix}Reaffirming strong literature support: {cite_text}. No contra-indications found in the retrieved cohort."
+            else:
+                base_msg = f"{prefix}Strong literature support: {cite_text}. {citations[0].relevance_summary[:150] if citations else ''}"
+                
             return DebateArgument(
                 agent="literature",
                 position="support",
-                argument=f"Strong literature support: {cite_text}. {citations[0].relevance_summary[:150] if citations else ''}",
+                argument=base_msg,
                 confidence_impact=0.12,
                 evidence_refs=[c.pmid for c in citations[:3]]
             )
         elif evidence_strength == "medium":
+            if round_num > 1:
+                base_msg = f"{prefix}The {len(citations)} retrieved studies continue to offer moderate support, but lack definitive randomized trial data for this edge case."
+            else:
+                base_msg = f"{prefix}Moderate literature support from {len(citations)} studies."
+                
             return DebateArgument(
                 agent="literature",
                 position="support",
-                argument=f"Moderate literature support from {len(citations)} studies.",
+                argument=base_msg,
                 confidence_impact=0.06,
                 evidence_refs=[c.pmid for c in citations[:3]]
             )
         else:
+            if round_num > 1:
+                base_msg = f"{prefix}Literature evidence remains limited. The queried references do not strongly distinguish between the primary and secondary differentials."
+            else:
+                base_msg = f"{prefix}Limited literature evidence. Only {len(citations)} marginally relevant studies found."
+                
             return DebateArgument(
                 agent="literature",
                 position="refine",
-                argument=f"Limited literature evidence. Only {len(citations)} marginally relevant studies found.",
+                argument=base_msg,
                 confidence_impact=0.02,
-                evidence_refs=[c.pmid for c in citations[:2]]
+                evidence_refs=[c.pmid for c in citations[:3]]
             )
     
     def _check_consensus(
@@ -356,11 +394,11 @@ class DebateOrchestrator:
             # 2. Evidence team responds (in parallel)
             historian_future = self.executor.submit(
                 self._generate_historian_response,
-                historian_output, critic_challenge, radiologist_output
+                historian_output, critic_challenge, radiologist_output, round_num
             )
             literature_future = self.executor.submit(
                 self._generate_literature_response,
-                literature_output, critic_challenge, radiologist_output
+                literature_output, critic_challenge, radiologist_output, round_num
             )
             
             historian_response = historian_future.result(timeout=5)
