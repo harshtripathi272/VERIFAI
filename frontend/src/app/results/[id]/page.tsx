@@ -210,8 +210,8 @@ export default function ResultsPage({ params }: { params: { id: string } }) {
         <span className="w-1.5 h-1.5 rounded-full bg-[#00E5FF] animate-ping inline-block mt-[2px]"></span>
         Session {params.id}
       </div>
-    </div>
-  );
+    );
+  };
 
   if (!workflowInfo || workflowInfo.status === "running") {
     return <div className="max-w-7xl mx-auto px-6 py-8">{renderLoadingState()}</div>;

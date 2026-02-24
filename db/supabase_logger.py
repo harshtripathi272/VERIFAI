@@ -29,13 +29,14 @@ class AgentLogger:
     outputs, and trace entries into structured PostgreSQL tables.
     """
 
-    def __init__(self, session_id: str = None, image_path: str = "", patient_id: str = None, workflow_type: str = "debate"):
+    def __init__(self, session_id: str = None, image_paths: list = None, views: list = None, patient_id: str = None, workflow_type: str = "debate"):
         """
         Initialize logger and create a workflow session.
         
         Args:
             session_id: Unique session ID. Auto-generated if not provided.
-            image_path: Path to the input X-ray image.
+            image_paths: List of paths to the input X-ray images.
+            views: List of corresponding views.
             patient_id: Optional FHIR patient ID.
             workflow_type: 'debate' or 'legacy'.
         """
@@ -44,11 +45,11 @@ class AgentLogger:
 
         self.session_id = session_id or str(uuid.uuid4())
         
-        # Normalize image_path to string if it's a list
-        if isinstance(image_path, list):
-            self.image_path = ", ".join(image_path)
+        # Normalize image_path to string if it's a list (for DB compat)
+        if isinstance(image_paths, list):
+            self.image_path = ", ".join(image_paths)
         else:
-            self.image_path = image_path
+            self.image_path = image_paths or ""
             
         self.patient_id = patient_id
         self.workflow_type = workflow_type
@@ -76,51 +77,64 @@ class AgentLogger:
 
     def _start_invocation(self, db, agent_name: str, input_summary: dict = None, is_feedback_iteration: bool = False) -> int:
         """Record the start of an agent invocation. Returns invocation_id."""
-        data = prepare_insert_data({
-            'session_id': self.session_id,
-            'agent_name': agent_name,
-            'started_at': datetime.utcnow().isoformat(),
-            'status': 'running',
-            'input_summary': input_summary,
-            'is_feedback_iteration': is_feedback_iteration
-        })
-        
-        result = db.table('agent_invocations').insert(data).execute()
-        self._agent_count += 1
-        return result.data[0]['invocation_id']
+        try:
+            data = prepare_insert_data({
+                'session_id': self.session_id,
+                'agent_name': agent_name,
+                'started_at': datetime.utcnow().isoformat(),
+                'status': 'running',
+                'input_summary': input_summary,
+                'is_feedback_iteration': is_feedback_iteration
+            })
+            
+            result = db.table('agent_invocations').insert(data).execute()
+            self._agent_count += 1
+            return result.data[0]['invocation_id']
+        except Exception as e:
+            print(f"[DB LOG ERROR] Failed to start invocation for {agent_name}: {e}")
+            return -1
 
     def _complete_invocation(self, db, invocation_id: int, status: str,
                               output_summary: Any = None, trace_entries: list = None,
                               error_message: str = None, started_at: float = None):
         """Mark an agent invocation as complete."""
-        duration_ms = int((time.time() - started_at) * 1000) if started_at else None
-        
-        update_data = prepare_insert_data({
-            'completed_at': datetime.utcnow().isoformat(),
-            'duration_ms': duration_ms,
-            'status': status,
-            'output_summary': output_summary,
-            'trace_entries': trace_entries or [],
-            'error_message': error_message
-        })
-        
-        db.table('agent_invocations').update(update_data).eq('invocation_id', invocation_id).execute()
+        if invocation_id == -1:
+            return
+            
+        try:
+            duration_ms = int((time.time() - started_at) * 1000) if started_at else None
+            
+            update_data = prepare_insert_data({
+                'completed_at': datetime.utcnow().isoformat(),
+                'duration_ms': duration_ms,
+                'status': status,
+                'output_summary': output_summary,
+                'trace_entries': trace_entries or [],
+                'error_message': error_message
+            })
+            
+            db.table('agent_invocations').update(update_data).eq('invocation_id', invocation_id).execute()
+        except Exception as e:
+            print(f"[DB LOG ERROR] Failed to complete invocation {invocation_id}: {e}")
 
     def _log_trace_entries(self, db, agent_name: str, entries: list):
         """Insert trace entries into the flat trace_log table."""
         if not entries:
             return
-        
-        trace_entries = []
-        for entry in entries:
-            trace_entries.append(prepare_insert_data({
-                'session_id': self.session_id,
-                'agent_name': agent_name,
-                'entry': entry,
-                'created_at': datetime.utcnow().isoformat()
-            }))
-        
-        db.table('trace_log').insert(trace_entries).execute()
+            
+        try:
+            trace_entries = []
+            for entry in entries:
+                trace_entries.append(prepare_insert_data({
+                    'session_id': self.session_id,
+                    'agent_name': agent_name,
+                    'entry': entry,
+                    'created_at': datetime.utcnow().isoformat()
+                }))
+            
+            db.table('trace_log').insert(trace_entries).execute()
+        except Exception as e:
+            print(f"[DB LOG ERROR] Failed to log trace entries for {agent_name}: {e}")
 
     def _safe_json(self, obj) -> Any:
         """Safely serialize an object to JSON-compatible format."""
@@ -156,7 +170,7 @@ class AgentLogger:
         with get_db() as db:
             inv_id = self._start_invocation(
                 db, "radiologist",
-                input_summary={'image_path': state.get("image_path", "")}
+                input_summary={'image_paths': state.get("image_paths", [])}
             )
 
             try:
@@ -165,14 +179,14 @@ class AgentLogger:
                     num_samples = getattr(settings, 'KLE_NUM_SAMPLES', 5)
                     
                     # Ensure image_path from state is also normalized
-                    image_path_state = state.get("image_path", "")
-                    if isinstance(image_path_state, list):
-                        image_path_state = ", ".join(image_path_state)
+                    image_paths_state = state.get("image_paths", [])
+                    if isinstance(image_paths_state, list):
+                        image_paths_state = ", ".join(image_paths_state)
 
                     rad_log_data = prepare_insert_data({
                         'session_id': self.session_id,
                         'invocation_id': inv_id,
-                        'image_path': image_path_state,
+                        'image_path': image_paths_state,
                         'findings_text': rad_output.findings,
                         'impression_text': rad_output.impression,
                         'kle_uncertainty': kle_uncertainty,

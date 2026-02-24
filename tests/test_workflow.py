@@ -30,7 +30,6 @@ initialize_validator_tools(vision_encoder=None, image_processor=None)
 # ── 3. Import & configure graph ───────────────────────────────────────────────
 from graph.workflow import app as verifai_graph
 
-# Real FHIR patient from verifai_fhir.duckdb
 TEST_PATIENT_ID = "6265ea60-b031-40da-95bb-0ef6178a5a45"
 
 initial_state = {

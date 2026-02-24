@@ -9,13 +9,25 @@ export interface WorkflowStartResponse {
 export interface WorkflowStatusResponse {
     session_id: string;
     status: "running" | "suspended" | "completed" | "failed" | "not_found";
+    current_state?: any;
     pending_review_data?: any;
     final_result?: any;
 }
 
-export async function uploadAndStartWorkflow(file: File, patientId: string = "", fhirFile?: File | null): Promise<WorkflowStartResponse> {
+export async function uploadAndStartWorkflow(
+    files: File[],
+    views: string[],
+    patientId: string = "",
+    fhirFile?: File | null
+): Promise<WorkflowStartResponse> {
     const formData = new FormData();
-    formData.append("image", file);
+    files.forEach(file => {
+        formData.append("images", file);
+    });
+    views.forEach(view => {
+        formData.append("views", view);
+    });
+
     if (patientId) {
         formData.append("patient_id", patientId);
     }

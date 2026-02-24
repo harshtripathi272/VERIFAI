@@ -12,7 +12,7 @@ import shutil
 import uuid
 from typing import Optional, Any
 
-from fastapi import APIRouter, UploadFile, File, HTTPException, Query
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Query
 from pydantic import BaseModel
 
 from app.config import settings
@@ -221,12 +221,19 @@ def _build_evidence_packet(state: VerifaiState) -> dict[str, Any]:
         }
     
     # Literature
+    # Literature
     lit = state.get("literature_output")
     if lit:
-        packet["literature"] = {
-            "citations": [c.model_dump() for c in lit.citations],
-            "overall_strength": lit.overall_evidence_strength
-        }
+        if isinstance(lit, str):
+            packet["literature"] = {
+                "citations": [],
+                "overall_strength": lit
+            }
+        else:
+            packet["literature"] = {
+                "citations": [c.model_dump() for c in getattr(lit, "citations", [])],
+                "overall_strength": getattr(lit, "overall_evidence_strength", "")
+            }
     
     # Critic assessment
     critic = state.get("critic_output")
@@ -255,28 +262,31 @@ def _build_evidence_packet(state: VerifaiState) -> dict[str, Any]:
 # WORKFLOW EXECUTION ENDPOINTS (ASYNC / BACKGROUND)
 # =============================================================================
 
-def _run_workflow_background(file_path: str, patient_id: str, fhir_content: Optional[str], session_id: str):
+def _run_workflow_background(file_paths: List[str], views: List[str], patient_id: str, fhir_content: Optional[str], session_id: str):
     """Background task to execute the graph."""
     try:
         initial_state: VerifaiState = {
             "_session_id": session_id,
-            "image_path": file_path,
+            "image_paths": file_paths,
             "patient_id": patient_id,
-            "fhir_context": fhir_content,
+            "current_fhir": fhir_content,
             "dicom_metadata": None,
-            "view": None,
+            "views": views,
             "radiologist_output": None,
+            "chexbert_output": None,
             "critic_output": None,
             "historian_output": None,
             "literature_output": None,
             "debate_output": None,
+            "validator_output": None,
             "current_uncertainty": 1.0,
             "routing_decision": "",
             "steps_taken": 0,
             "radiologist_kle_uncertainty": None,
             "final_diagnosis": None,
             "trace": [f"[INIT] Processing async, Patient: {patient_id or 'N/A'}"],
-            "is_feedback_iteration": False
+            "is_feedback_iteration": False,
+            "doctor_feedback": None
         }
         
         # Thread config for memory checkpointer
@@ -295,28 +305,36 @@ def _run_workflow_background(file_path: str, patient_id: str, fhir_content: Opti
 @router.post("/workflows/start", response_model=WorkflowStartResponse)
 async def start_workflow(
     background_tasks: BackgroundTasks,
-    image: UploadFile = File(...),
-    patient_id: Optional[str] = None,
+    images: List[UploadFile] = File(...),
+    views: List[str] = Form(..., description="List of view names (e.g., AP, PA, LATERAL)"),
+    patient_id: Optional[str] = Form(None),
     fhir_report: Optional[UploadFile] = File(None)
 ):
     """
     Start the diagnostic workflow asynchronously.
     Returns immediately with a session_id you can poll.
     """
-    if not image.filename:
-        raise HTTPException(status_code=400, detail="No filename provided")
+    if not images:
+        raise HTTPException(status_code=400, detail="No images provided")
+    
+    if len(images) != len(views):
+        raise HTTPException(status_code=400, detail="Number of images must match number of views")
     
     os.makedirs("uploads", exist_ok=True)
-    file_path = f"uploads/{image.filename}"
+    file_paths = []
     
-    with open(file_path, "wb") as f:
-        shutil.copyfileobj(image.file, f)
+    for img in images:
+        file_path = f"uploads/{uuid.uuid4()}_{img.filename}"
+        with open(file_path, "wb") as f:
+            shutil.copyfileobj(img.file, f)
+        file_paths.append(file_path)
         
     fhir_content = None
     if fhir_report:
         try:
+            import json
             content_bytes = await fhir_report.read()
-            fhir_content = content_bytes.decode("utf-8")
+            fhir_content = json.loads(content_bytes.decode("utf-8"))
         except Exception as e:
             print(f"[API] Error reading FHIR report: {e}")
             fhir_content = None
@@ -331,7 +349,7 @@ async def start_workflow(
         pass
     
     # Launch in background
-    background_tasks.add_task(_run_workflow_background, file_path, patient_id, fhir_content, session_id)
+    background_tasks.add_task(_run_workflow_background, file_paths, views, patient_id, fhir_content, session_id)
     
     return WorkflowStartResponse(
         session_id=session_id,
@@ -369,6 +387,25 @@ async def get_workflow_status(session_id: str):
             }
         )
     
+    # Extract current state for live mirroring on frontend
+    state_values = state_snapshot.values
+    
+    def try_model_dump(obj):
+        if hasattr(obj, "model_dump"):
+            return obj.model_dump()
+        return obj
+
+    current_state = {
+        "radiologist": try_model_dump(state_values.get("radiologist_output")),
+        "chexbert": try_model_dump(state_values.get("chexbert_output")),
+        "historian": try_model_dump(state_values.get("historian_output")),
+        "literature": try_model_dump(state_values.get("literature_output")),
+        "critic": try_model_dump(state_values.get("critic_output")),
+        "debate": try_model_dump(state_values.get("debate_output")),
+        "routing": state_values.get("routing_decision"),
+        "trace": state_values.get("trace", [])
+    }
+    
     # It has next nodes. Check if it's currently interrupted by the `human_review_node`
     # In LangGraph 0.2+, `tasks` contains the `interrupts`
     interrupts = []
@@ -384,11 +421,12 @@ async def get_workflow_status(session_id: str):
         return WorkflowStatusResponse(
             session_id=session_id,
             status="suspended",
+            current_state=current_state,
             pending_review_data=pending_data
         )
         
     # Otherwise, it's just actively running in the background thread
-    return WorkflowStatusResponse(session_id=session_id, status="running")
+    return WorkflowStatusResponse(session_id=session_id, status="running", current_state=current_state)
 
 
 @router.post("/workflows/{session_id}/resume")

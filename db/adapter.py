@@ -16,14 +16,15 @@ from typing import Optional
 from app.config import settings
 
 
-def get_logger(session_id: str = None, image_path: str = "", patient_id: str = None, workflow_type: str = "debate"):
+def get_logger(session_id: str = None, image_paths: list = None, views: list = None, patient_id: str = None, workflow_type: str = "debate"):
     """
     Get the Supabase logger instance.
     SQLite fallback has been removed.
     
     Args:
         session_id: Unique session ID (auto-generated if not provided)
-        image_path: Path to input X-ray image
+        image_paths: List of paths to input X-ray images
+        views: List of corresponding view names
         patient_id: Optional FHIR patient ID
         workflow_type: 'debate' or 'legacy'
     
@@ -32,7 +33,7 @@ def get_logger(session_id: str = None, image_path: str = "", patient_id: str = N
     """
     try:
         from db.supabase_logger import AgentLogger
-        return AgentLogger(session_id, image_path, patient_id, workflow_type)
+        return AgentLogger(session_id, image_paths, views, patient_id, workflow_type)
     except ImportError as e:
         print(f"[DB Adapter] ERROR: Supabase not available: {e}")
         raise RuntimeError("Supabase must be installed and configured.")
