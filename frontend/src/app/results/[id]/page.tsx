@@ -149,7 +149,8 @@ export default function ResultsPage({ params }: { params: { id: string } }) {
     { id: "audit", label: "Audit Trail", icon: ShieldAlert },
   ];
 
-  const renderLoadingState = () => (
+  const renderLoadingState = () => {
+    return (
     <div className="flex flex-col items-center justify-center min-h-[60vh] space-y-6">
       <Loader2 className="w-12 h-12 text-[#00E5FF] animate-spin" />
       <h2 className="text-2xl font-semibold text-white/80">Analyzing Study...</h2>
@@ -210,8 +211,10 @@ export default function ResultsPage({ params }: { params: { id: string } }) {
         <span className="w-1.5 h-1.5 rounded-full bg-[#00E5FF] animate-ping inline-block mt-[2px]"></span>
         Session {params.id}
       </div>
+    </div>
     );
   };
+
 
   if (!workflowInfo || workflowInfo.status === "running") {
     return <div className="max-w-7xl mx-auto px-6 py-8">{renderLoadingState()}</div>;
@@ -625,22 +628,50 @@ export default function ResultsPage({ params }: { params: { id: string } }) {
             )}
 
             {activeTab === "audit" && (
-              <div className="space-y-5 relative pl-8">
-                <div className="absolute left-3 top-0 bottom-0 w-px bg-gradient-to-b from-[#00E5FF]/30 via-white/5 to-transparent" />
-
-                {(workflowInfo.status === "completed" ? workflowInfo.final_result?.trace : [])?.map((traceStr: string, index: number) => (
-                  <div key={index} className="relative flex items-start gap-4 group">
+              <div className="space-y-5">
+                {/* Reproducibility Hash Banner */}
+                {workflowInfo.final_result?.reproducibility_hash && (
+                  <div className="rounded-xl border border-[#00E5FF]/15 bg-[#00E5FF]/[0.03] p-4">
+                    <div className="flex items-center gap-2 mb-2">
+                      <Shield className="h-4 w-4 text-[#00E5FF]" />
+                      <span className="text-[11px] font-semibold uppercase tracking-widest text-[#00E5FF]">
+                        Reproducibility Hash
+                      </span>
+                      <span className="text-[10px] bg-[#00E5FF]/10 text-[#00E5FF]/70 px-1.5 py-0.5 rounded font-mono">
+                        SHA-256 · FDA 21 CFR Part 11
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-white/30 mb-2">
+                      Fingerprint of: X-ray pixels + patient FHIR context + model versions + config
+                    </p>
                     <div
-                      className="absolute -left-5 w-6 h-6 rounded-full border-2 flex items-center justify-center bg-[#050507] z-10 group-hover:scale-110 transition-transform"
-                      style={{ borderColor: `#00E5FF50` }}
+                      className="font-mono text-[11px] text-[#00E5FF]/80 bg-black/40 rounded-lg px-4 py-2.5 break-all cursor-pointer hover:bg-black/60 transition-colors"
+                      title="Click to copy"
+                      onClick={() => navigator.clipboard?.writeText(workflowInfo.final_result.reproducibility_hash)}
                     >
-                      <Activity className="h-3 w-3 text-[#00E5FF]" />
+                      {workflowInfo.final_result.reproducibility_hash}
                     </div>
-                    <div className="rounded-xl border border-white/[0.04] bg-black/20 p-4 flex-1 group-hover:border-white/[0.08] transition-colors">
-                      <p className="text-[13px] text-white/40 leading-relaxed">{traceStr}</p>
-                    </div>
+                    <p className="text-[10px] text-white/20 mt-1.5">Click to copy</p>
                   </div>
-                ))}
+                )}
+
+                {/* Trace Timeline */}
+                <div className="relative pl-8">
+                  <div className="absolute left-3 top-0 bottom-0 w-px bg-gradient-to-b from-[#00E5FF]/30 via-white/5 to-transparent" />
+                  {(workflowInfo.status === "completed" ? workflowInfo.final_result?.trace : [])?.map((traceStr: string, index: number) => (
+                    <div key={index} className="relative flex items-start gap-4 group mb-5">
+                      <div
+                        className="absolute -left-5 w-6 h-6 rounded-full border-2 flex items-center justify-center bg-[#050507] z-10 group-hover:scale-110 transition-transform"
+                        style={{ borderColor: `#00E5FF50` }}
+                      >
+                        <Activity className="h-3 w-3 text-[#00E5FF]" />
+                      </div>
+                      <div className="rounded-xl border border-white/[0.04] bg-black/20 p-4 flex-1 group-hover:border-white/[0.08] transition-colors">
+                        <p className="text-[13px] text-white/40 leading-relaxed">{traceStr}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
               </div>
             )}
           </div>

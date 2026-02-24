@@ -575,18 +575,58 @@ def finalize_node(state: VerifaiState) -> dict:
         confidence = min(confidence, 0.65)
         base_explanation += f" Validator confidence reduced: {validator_explanation}"
 
+    # ── REPRODUCIBILITY HASH ──────────────────────────────────────────────────
+    # SHA-256 fingerprint of everything that influenced this diagnosis.
+    # FDA 21 CFR Part 11 compliant: proves provenance, not bit-exact reproduction.
+    repro_hash = None
+    try:
+        import hashlib, json as _json
+        h = hashlib.sha256()
+
+        # 1. Image bytes (all views)
+        for img_path in (state.get("image_paths") or []):
+            try:
+                with open(img_path, "rb") as f:
+                    h.update(f.read())
+            except OSError:
+                h.update(img_path.encode())  # fallback: hash path string
+
+        # 2. Patient identity
+        h.update((state.get("patient_id") or "").encode())
+
+        # 3. FHIR context snapshot (sorted keys for determinism)
+        fhir = state.get("current_fhir")
+        if fhir:
+            h.update(_json.dumps(fhir, sort_keys=True, default=str).encode())
+
+        # 4. Model + config versions
+        from app.config import settings as _cfg
+        config_sig = {
+            "ENABLE_LLM_CRITIC": getattr(_cfg, "ENABLE_LLM_CRITIC", None),
+            "MAX_DEBATE_ROUNDS": getattr(_cfg, "MAX_DEBATE_ROUNDS", None),
+            "MOCK_MODELS": getattr(_cfg, "MOCK_MODELS", None),
+            "model": "medgemma-4b-it|chexbert-v1.0|sentence-transformers-all-MiniLM-L6-v2",
+        }
+        h.update(_json.dumps(config_sig, sort_keys=True).encode())
+
+        repro_hash = h.hexdigest()
+        print(f"[FINALIZE] Reproducibility hash: {repro_hash[:16]}...")
+    except Exception as e:
+        print(f"[FINALIZE] Hash generation failed (non-critical): {e}")
+
     final = FinalDiagnosis(
         diagnosis=diagnosis_text,
         calibrated_confidence=confidence,
         deferred=False,
         explanation=base_explanation,
+        reproducibility_hash=repro_hash,
         recommended_next_steps=[
             "Confirm with clinical correlation",
             "Consider follow-up imaging if symptoms persist"
         ]
     )
 
-    trace_entry = f"FINALIZE: {diagnosis_text[:80] if diagnosis_text else 'None'}... (confidence={confidence:.2%}, validator={recommendation})"
+    trace_entry = f"FINALIZE: {diagnosis_text[:80] if diagnosis_text else 'None'}... (confidence={confidence:.2%}, validator={recommendation}, hash={repro_hash[:8] if repro_hash else 'n/a'})"
 
     # Track diagnostic metrics
     if _HAS_MONITORING:

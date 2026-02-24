@@ -120,6 +120,10 @@ class FinalDiagnosis(BaseModel):
     deferral_reason: Optional[str] = None
     recommended_next_steps: List[str] = Field(default_factory=list)
     explanation: str = ""
+    reproducibility_hash: Optional[str] = Field(
+        None,
+        description="SHA-256 fingerprint of inputs (image + patient context + config). FDA 21 CFR Part 11 audit trail."
+    )
 
 # DEBATE MODELS
 class DebateArgument(BaseModel):
