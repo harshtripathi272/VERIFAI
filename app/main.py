@@ -63,6 +63,9 @@ app.add_middleware(
 os.makedirs("uploads", exist_ok=True)
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
+os.makedirs("output/heatmaps", exist_ok=True)
+app.mount("/output", StaticFiles(directory="output"), name="output")
+
 # Mobile demo (on-device AI)
 _demo_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "mobile_demo")
 if os.path.isdir(_demo_dir):

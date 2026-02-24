@@ -574,6 +574,26 @@ Visit `http://localhost:3000/observability` for the visual metrics dashboard.
 
 When running via `test_workflow.py`, metrics are saved to `metrics_snapshot.json` and automatically picked up by the API dashboard.
 
+### Database Schema (Supabase)
+
+When `DATABASE_MODE=supabase` or cloud logging is enabled, VERIFAI logs extensive telemetry and workflow states to the following Supabase (PostgreSQL) tables for observability, auditability, and the past-mistakes memory loop.
+
+| Table Name | Description | Key Features |
+|------------|-------------|--------------|
+| `workflow_sessions` | Core table tracking each full pipeline invocation. | `session_id`, `status`, `final_diagnosis`, doctor feedback flags. |
+| `agent_invocations` | Tracks each individual agent call within a session. | Execution duration, input/output summaries. |
+| `radiologist_logs` | Radiologist outputs and initial bounds. | Findings, impression, `kle_uncertainty`. |
+| `critic_logs` | Adversarial checks and overconfidence detection. | `is_overconfident`, `safety_score`, historical risk. |
+| `historian_logs`, `_facts` | FHIR retrieved clinical context and extracted facts. | Supporting vs. contradicting clinical facts. |
+| `literature_logs`, `_citations` | PubMed/PMC searches and matched papers. | Evidence strength, relevance summaries, PMIDs. |
+| `debate_logs`, `_rounds`, `_arguments`| Full record of the multi-agent debate process. | Rounds, arguments presented, consensus status. |
+| `chief_logs` | Final arbitration decisions by the Chief agent. | Calibrated confidence, deferral reasons. |
+| `trace_log` | Flat diagnostic audit trail mirroring `state.trace`. | Line-by-line event log for FDA trace compliance. |
+| `doctor_feedback` | Captures human-in-the-loop review actions. | Doctor notes, corrected diagnoses, reprocessing links. |
+| `past_mistakes` | Memory repository of historical diagnostic errors. | Uses **pgvector** (`VECTOR(384)`) and HNSW index for semantic retrieval. |
+
+See `db/supabase_schema.sql` for the complete schema definitions.
+
 ---
 
 ## Testing
@@ -649,14 +669,22 @@ curl -X POST http://localhost:8000/api/v1/workflows/start \
 
 All settings are in `app/config.py` and can be overridden via `.env`:
 
-### Model Configuration
+### Model Configuration (`app/config.py`)
+
+You can configure model settings and local paths for fine-tuned weights by updating `.env` or conceptually modifying `app/config.py`. All local paths can be set as absolute paths if your models are stored across different directories to manage disk space.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MEDGEMMA_4B_MODEL` | `google/medgemma-1.5-4b-it` | Base MedGemma model |
 | `MEDSIGLIP_BASE_MODEL` | `google/medsiglip-448` | Vision encoder for similarity |
+| `MEDSIGLIP_WEIGHTS_PATH` | `../output/medsiglip_full_model.pt` | Local path to fine-tuned MedSigLIP weights |
+| `MEDGEMMA_LORA_ROOT` | `../dataset/med/fine_tuned_model/v1/` | Base directory for MedGemma fine-tuned models |
+| `MEDGEMMA_LORA_ADAPTERS`| `../dataset/med/fine_tuned_model/v1/` | Path to load local MedGemma LoRA adapters |
 | `TEXT_EMBEDDING_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` | KLE embeddings |
+| `RADGRAPH_CACHE_DIR` | `~/elephant_detection/med/dataset/med` | Base directory for RadGraph model |
 | `MOCK_MODELS` | `False` | Skip real models, use mocks |
+
+> **Note on Custom Model Paths**: To override default relative paths like `MEDGEMMA_LORA_ADAPTERS` or `MEDSIGLIP_WEIGHTS_PATH`, set them in your `.env` file using absolute paths (e.g., `MEDGEMMA_LORA_ADAPTERS=/path/to/your/custom/adapters`).
 
 ### Workflow Configuration
 
