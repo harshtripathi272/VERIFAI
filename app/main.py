@@ -63,6 +63,11 @@ app.add_middleware(
 os.makedirs("uploads", exist_ok=True)
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
+# Mobile demo (on-device AI)
+_demo_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "mobile_demo")
+if os.path.isdir(_demo_dir):
+    app.mount("/demo", StaticFiles(directory=_demo_dir, html=True), name="mobile_demo")
+
 # Include API routes
 app.include_router(router, prefix="/api/v1")
 app.include_router(streaming_router, prefix="/api/v1")
