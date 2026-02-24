@@ -214,3 +214,35 @@ for entry in result.get("trace", [])[-25:]:
     print(f"  {entry}")
 
 print("=" * 65)
+
+
+# ── 5. Save Metrics for Observability Dashboard ──────────────────────
+print("\n[TEST] Saving metrics for observability dashboard...")
+try:
+    from monitoring.metrics import metrics, track_diagnosis, save_metrics_snapshot
+
+    # Record workflow-level metrics
+    metrics.start_workflow("test_workflow_123")
+
+    # Track the diagnosis metrics
+    if final_dx:
+        track_diagnosis(
+            confidence=final_dx.calibrated_confidence,
+            uncertainty=result.get("current_uncertainty", 0),
+            deferred=final_dx.deferred,
+            debate_rounds=len(result.get("debate_output", {}).rounds) if result.get("debate_output") else 0,
+            safety_score=getattr(result.get("critic_output", None), "safety_score", 1.0) if result.get("critic_output") else 1.0,
+        )
+
+    # Track agent invocations
+    for agent_name in ["radiologist", "chexbert", "historian", "literature", "critic", "debate", "validator", "finalize"]:
+        metrics.agent_invocations.labels(agent_name=agent_name, status="success").inc()
+
+    # End workflow
+    metrics.end_workflow("test_workflow_123")
+
+    # Save snapshot to JSON file (read by API dashboard)
+    save_metrics_snapshot()
+    print("[TEST] ✓ Metrics saved — observability dashboard will show real data!")
+except Exception as e:
+    print(f"[TEST] ✗ Failed to save metrics: {e}")

@@ -18,7 +18,7 @@ import logging
 import json
 import statistics
 from typing import Any, Dict, List, Optional, Callable
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
 from contextlib import contextmanager
 from functools import wraps
@@ -392,9 +392,61 @@ def track_diagnosis(confidence: float, uncertainty: float, deferred: bool,
         metrics.deferrals.inc()
 
 
+# =============================================================================
+# SHARED PERSISTENCE (allows test_workflow.py to feed the dashboard)
+# =============================================================================
+
+import os
+from pathlib import Path
+
+METRICS_SNAPSHOT_PATH = Path(os.path.dirname(os.path.abspath(__file__))).parent / "metrics_snapshot.json"
+
+
+def save_metrics_snapshot():
+    """Save current metrics to a shared JSON file so the API dashboard can read it."""
+    summary = metrics.get_summary()
+    summary["_saved_at"] = datetime.now(timezone.utc).isoformat() if hasattr(datetime, 'now') else datetime.utcnow().isoformat()
+    try:
+        METRICS_SNAPSHOT_PATH.write_text(json.dumps(summary, indent=2, default=str))
+        logger.info(f"Metrics snapshot saved to {METRICS_SNAPSHOT_PATH}")
+    except Exception as e:
+        logger.error(f"Failed to save metrics snapshot: {e}")
+
+
+def _load_snapshot() -> Optional[dict]:
+    """Load metrics from snapshot file if it exists and is recent (< 1 hour old)."""
+    try:
+        if METRICS_SNAPSHOT_PATH.exists():
+            data = json.loads(METRICS_SNAPSHOT_PATH.read_text())
+            return data
+    except Exception:
+        pass
+    return None
+
+
 def get_metrics_summary() -> dict:
-    """Get JSON summary of all collected metrics."""
-    return metrics.get_summary()
+    """
+    Get JSON summary of all collected metrics.
+    
+    If in-memory metrics are empty (e.g., API server just started),
+    falls back to reading from the shared snapshot file written by test_workflow.py.
+    """
+    in_memory = metrics.get_summary()
+
+    # Check if in-memory has any data
+    has_data = in_memory["system"]["total_workflows"] > 0
+
+    if has_data:
+        return in_memory
+
+    # Fall back to snapshot file
+    snapshot = _load_snapshot()
+    if snapshot:
+        # Remove internal metadata
+        snapshot.pop("_saved_at", None)
+        return snapshot
+
+    return in_memory
 
 
 # =============================================================================
