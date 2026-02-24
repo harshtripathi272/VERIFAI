@@ -664,8 +664,6 @@ All settings are in `app/config.py` and can be overridden via `.env`:
 |----------|---------|-------------|
 | `DEBATE_MAX_ROUNDS` | `3` | Maximum debate rounds |
 | `DEBATE_CONSENSUS_THRESHOLD` | `0.15` | Max disagreement for consensus |
-| `KLE_UNCERTAINTY_THRESHOLD` | `0.30` | Uncertainty threshold for escalation |
-| `KLE_NUM_SAMPLES` | `3` | Samples for KLE computation |
 | `MAX_ROUTING_STEPS` | `5` | Prevent infinite loops |
 | `ENABLE_LLM_CRITIC` | `False` | MedGemma-based semantic critic |
 | `ENABLE_PAST_MISTAKES_MEMORY` | `True` | Historical error retrieval |
