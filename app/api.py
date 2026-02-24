@@ -382,6 +382,7 @@ async def get_workflow_status(session_id: str):
             final_result={
                 "diagnosis": getattr(final_dx, "diagnosis", None),
                 "confidence": getattr(final_dx, "calibrated_confidence", 0.0),
+                "reproducibility_hash": getattr(final_dx, "reproducibility_hash", None),
                 "evidence_packet": evidence,
                 "trace": final_state.get("trace", [])
             }
