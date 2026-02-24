@@ -70,7 +70,7 @@ VERIFAI orchestrates **multiple specialized AI agents** through a LangGraph stat
 │  └──────────────────────────┬───────────────────────────────────┘   │
 │                             ▼                                       │
 │  ┌──────────────────────────────────────────────────────────────┐   │
-│  │    Validator (MedSigLIP Similarity + Clinical Rules)         │   │
+│  │    Validator (CXR-RePaiR Retrieval + RadGraph NLP + Rules Engine)  │   │
 │  │    → FINALIZE / FINALIZE_LOW_CONFIDENCE / FLAG_FOR_HUMAN     │   │
 │  └──────────────────────────┬───────────────────────────────────┘   │
 │                             ▼                                       │
@@ -95,13 +95,13 @@ VERIFAI orchestrates **multiple specialized AI agents** through a LangGraph stat
 
 | # | Agent | Role | Model/Tool | Output |
 |---|-------|------|-----------|--------|
-| 1 | **Radiologist** | Analyze CXR image, generate findings + impression | MedGemma 4B-IT + MedSigLIP | `RadiologistOutput` (findings, impression, disease probabilities, heatmaps) |
+| 1 | **Radiologist** | Analyze CXR image, generate findings + impression | MedGemma 4B-IT + MedSigLIP + LRP (Chefer CVPR 2021) | `RadiologistOutput` (findings, impression, disease probabilities, LRP heatmaps) |
 | 2 | **CheXbert** | Extract structured pathology labels from report text | CheXbert BERT | `CheXbertOutput` (14 CXR condition labels) |
-| 3 | **Historian** | Retrieve patient history from EHR/FHIR records | DuckDB + FAISS vector search | `HistorianOutput` (supporting/contradicting facts) |
-| 4 | **Literature** | Search PubMed/Europe PMC for evidence | BioPython + Semantic Scholar API | `LiteratureOutput` (citations, evidence strength) |
+| 3 | **Historian** | Retrieve patient history from EHR/FHIR records, generate clinical reasoning | DuckDB + FAISS vector search + Clinical Reasoner | `HistorianOutput` (supporting/contradicting facts, clinical summary) |
+| 4 | **Literature** | Search PubMed/Europe PMC for evidence (rate-limited) | BioPython + Semantic Scholar API + Rate Limiter | `LiteratureOutput` (citations, evidence strength) |
 | 5 | **Critic** | Adversarial verification — detect overconfidence, check past mistakes | MUC Uncertainty + SentenceTransformers | `CriticOutput` (safety score, concern flags) |
 | 6 | **Debate** | Multi-round debate between Critic, Historian, and Literature | LangGraph orchestration | `DebateOutput` (consensus, confidence adjustment) |
-| 7 | **Validator** | Final quality gate — visual similarity + clinical rules | MedSigLIP cosine similarity | Recommendation: `FINALIZE` / `FLAG_FOR_HUMAN` |
+| 7 | **Validator** | Final quality gate — visual retrieval + NLP entity matching + clinical rules | CXR-RePaiR (MedSigLIP FAISS) + RadGraph entity matching + Rules Engine | Recommendation: `FINALIZE` / `FINALIZE_LOW_CONFIDENCE` / `FLAG_FOR_HUMAN` |
 | 8 | **Finalize** | Build final diagnosis with reproducibility hash | SHA-256, Pydantic | `FinalDiagnosis` (diagnosis, confidence, hash) |
 | 9 | **Human Review** | Doctor approves/rejects; rejected cases re-enter at Critic | LangGraph `interrupt()` | Approve/Reject + Feedback loop |
 
@@ -110,20 +110,23 @@ VERIFAI orchestrates **multiple specialized AI agents** through a LangGraph stat
 ## Key Features
 
 ### Core
-- **Multi-Agent Orchestration** — Multiple agents coordinated via LangGraph state machine with typed state
+- **Multi-Agent Orchestration** — 9 specialized agents coordinated via LangGraph state machine with typed state
 - **Multi-View Support** — Accepts multiple X-ray views (AP, PA, Lateral) simultaneously
-- **MUC (Monotonic Uncertainty Cascade)** — Bidirectional Information Gain per agent; each agent either confirms (↓ uncertainty) or contradicts (↑ uncertainty) the current diagnosis via log-odds updates. Dempster-Shafer evidence fusion during debate rounds. Grounded in 5 research papers (ICML 2026, ACL 2024, MICCAI 2024, Shafer 1976, arXiv:2601.15703). See [`docs/MUC_DESIGN.md`](docs/MUC_DESIGN.md) for full derivation.
+- **MUC (Monotonic Uncertainty Cascade)** — Bidirectional Information Gain per agent; each agent either confirms (↓ uncertainty) or contradicts (↑ uncertainty) the current diagnosis via log-odds updates. Dempster-Shafer evidence fusion during debate rounds. Grounded in 5 research papers (ICML 2026, ACL 2024, MICCAI 2024, Shafer 1976, arXiv:2601.15703). See [`docs/PRINCIPLED_UNCERTAINTY.md`](docs/PRINCIPLED_UNCERTAINTY.md) for full derivation.
 - **Multi-Agent Debate** — Up to 3 rounds of adversarial debate before consensus
-- **Human-in-the-Loop** — LangGraph interrupt-based doctor review with feedback reprocessing
+- **Human-in-the-Loop** — LangGraph interrupt-based doctor review with feedback reprocessing; rejected diagnoses re-enter at Critic with full context preserved
+- **MCP-Style Tool Registry** — Unified tool interface (FHIR, Literature, Vision categories) inspired by Model Context Protocol servers, with tool discovery, invocation tracking, and rate limiting
 
 ### Safety & Trust
 - **Medical Safety Guardrails** — Rule-based + embedding-based checks for dangerous hallucinations
 - **Reproducibility Hash** — SHA-256 fingerprint (image + FHIR + config) for FDA 21 CFR Part 11 audit trail
-- **Past Mistakes Memory** — FAISS-indexed historical errors inform future diagnoses via Critic
+- **Past Mistakes Memory** — Hybrid retrieval system: DuckDB HNSW vector index (local) + Supabase pgvector (cloud), with **neural re-ranking** (temporal recency weighting, clinical relevance scoring, optional MedGemma semantic analysis) and **automatic mistake detection** (severity classification, error-type taxonomy). Rejected diagnoses from human review are automatically inserted into the database for future reference.
 - **CheXbert Cross-Validation** — Structured labels validate free-text radiologist findings
+- **Validator Quality Gate** — Three-layer validation: CXR-RePaiR visual retrieval (FAISS similarity search against MIMIC-CXR), RadGraph NLP entity matching (structured clinical entity comparison), and clinical rules engine
 
 ### Infrastructure
-- **SSE Real-Time Streaming** — Server-Sent Events for live agent progress to frontend
+- **SSE Real-Time Streaming** — Server-Sent Events for live agent progress to frontend (visible during both initial run and reruns)
+- **LRP Heatmaps** — Transformer explainability via Chefer et al. (CVPR 2021) Layer-wise Relevance Propagation adapted for SigLIP
 - **Observability Dashboard** — Prometheus-style metrics (latency, confidence, safety scores)
 - **Evidence Report Generator** — Rich HTML reports with citations, heatmaps, and audit trail
 - **Edge Deployable** — Runs on a single consumer GPU (12 GB+ VRAM) with optional 4-bit quantization
@@ -135,87 +138,155 @@ VERIFAI orchestrates **multiple specialized AI agents** through a LangGraph stat
 ```
 VERIFAI/
 ├── agents/                      # AI Agent implementations
-│   ├── radiologist/             # MedGemma 4B vision + MedSigLIP heatmaps
-│   │   ├── model.py             # Model loading (4-bit quantized)
+│   ├── radiologist/             # MedGemma 4B vision + MedSigLIP classifier + LRP heatmaps
+│   │   ├── model.py             # Model loading (4-bit NF4 quantized) + VLM inference
 │   │   ├── agent.py             # Radiologist agent logic
-│   │   ├── classifier.py        # Disease probability classifier
-│   │   └── interpretability.py  # Grad-CAM / attention heatmaps
+│   │   ├── classifier.py        # MedGemmaVisionHead: frozen SigLIP + trainable head
+│   │   ├── lrp.py               # Chefer et al. (CVPR 2021) LRP heatmaps for SigLIP
+│   │   ├── data.py              # CheXbert class labels + dataset constants
+│   │   └── prompts.py           # Structured JSON generation prompts
 │   ├── chexbert/                # CheXbert structured labeling
-│   │   └── agent.py             # Extract 14 CXR condition labels
-│   ├── historian/               # FHIR patient history retrieval
-│   │   ├── agent.py             # DuckDB + FAISS vector search
-│   │   └── fhir_retriever.py    # FHIR R4 resource parser
-│   ├── literature/              # PubMed / Europe PMC search
+│   │   ├── agent.py             # Extract 14 CXR condition labels
+│   │   └── model.py             # CheXbert BERT model wrapper
+│   ├── historian/               # FHIR patient history retrieval + clinical reasoning
+│   │   ├── agent.py             # DuckDB + FAISS vector search orchestrator
+│   │   ├── fhir_client.py       # FHIR R4 resource parser + patient context builder
+│   │   ├── reasoner.py          # Clinical reasoning synthesizer
+│   │   └── hyp_code_map.py      # ICD/hypothesis code mappings
+│   ├── literature/              # PubMed / Europe PMC / Semantic Scholar search
 │   │   ├── agent.py             # Literature search orchestrator
-│   │   ├── pubmed_tool.py       # BioPython E-Utilities wrapper
-│   │   ├── europepmc_tool.py    # Europe PMC REST API
-│   │   └── semantic_scholar.py  # Semantic Scholar API
-│   ├── critic/                  # Adversarial verification
-│   │   ├── agent.py             # Overconfidence detection + past mistakes
-│   │   └── past_mistakes.py     # FAISS-indexed error memory
+│   │   ├── pubmed_entrez.py     # BioPython E-Utilities wrapper
+│   │   ├── europe_pmc.py        # Europe PMC REST API
+│   │   ├── semantic_scholar.py  # Semantic Scholar API
+│   │   ├── rate_limiter.py      # Adaptive rate limiter (NCBI 3/sec, etc.)
+│   │   └── prompt.py            # Literature search prompt templates
+│   ├── critic/                  # Adversarial verification (4-stage + LLM)
+│   │   ├── agent.py             # Overconfidence detection + past mistakes retrieval
+│   │   ├── model.py             # Rule-based linguistic certainty + historian/literature challenge
+│   │   └── llm_critic.py        # MedGemma semantic critic (gated)
 │   ├── debate/                  # Multi-agent debate protocol
-│   │   └── agent.py             # 3-round structured debate
-│   ├── validator/               # Final quality gate
-│   │   └── agent.py             # MedSigLIP similarity + clinical rules
+│   │   └── agent.py             # 3-round structured debate with Dempster-Shafer fusion
+│   ├── validator/               # Final quality gate (3-layer verification)
+│   │   ├── agent.py             # Validator orchestrator
+│   │   ├── retrieval_tool.py    # CXR-RePaiR: MedSigLIP FAISS visual retrieval
+│   │   ├── radgraph_tool.py     # RadGraph NLP entity matching
+│   │   └── rules_engine.py      # Clinical rules engine
 │   └── feedback/                # Doctor feedback handler
-│       └── agent.py             # Process rejection → re-enter pipeline
+│       └── agent.py             # Process rejection → re-enter pipeline at Critic
 │
 ├── graph/                       # LangGraph workflow
 │   ├── state.py                 # VerifaiState TypedDict + Pydantic models
-│   ├── workflow.py              # Full graph definition + node wrappers
+│   ├── workflow.py              # Full graph definition + node wrappers + interrupt()
 │   └── router.py                # Uncertainty-based routing logic
+│
+├── tools/                       # MCP-Style Tool Registry
+│   └── registry.py              # Unified tool interface (FHIR, Literature, Vision)
 │
 ├── app/                         # FastAPI backend
 │   ├── main.py                  # App entry point + middleware
-│   ├── api.py                   # REST endpoints (start, status, resume)
-│   ├── config.py                # Settings (models, thresholds, flags)
-│   └── streaming.py             # SSE event bus + streaming endpoint
+│   ├── api.py                   # REST endpoints (start, status, resume, SSE)
+│   ├── config.py                # Settings (models, thresholds, feature flags)
+│   ├── streaming.py             # SSE event bus + streaming endpoint
+│   ├── shared_model_loader.py   # Thread-safe MedGemma singleton (27GB→9GB VRAM)
+│   └── past_mistakes_routes.py  # Past mistakes CRUD API endpoints
 │
 ├── frontend/                    # Next.js 15 dashboard
 │   ├── src/app/
 │   │   ├── diagnose/page.tsx    # Upload X-ray + start workflow
-│   │   ├── results/[id]/page.tsx # Live results + SSE feed + tabs
+│   │   ├── results/[id]/page.tsx # Live results + SSE feed + HITL review
 │   │   └── observability/page.tsx # Metrics dashboard
 │   └── src/lib/api.ts           # TypeScript API client
 │
-├── monitoring/                  # Observability layer
-│   └── metrics.py               # Prometheus-style counters + histograms
+├── db/                          # Database layer (DuckDB local + Supabase cloud)
+│   ├── logger.py                # Session-scoped structured logging
+│   ├── supabase_logger.py       # Supabase cloud DB logger
+│   ├── connection.py            # DuckDB connection pooling
+│   ├── past_mistakes.py         # Past Mistakes DB (DuckDB + HNSW vector index)
+│   ├── past_mistakes_repository.py # Supabase pgvector HNSW backend
+│   ├── rerank_mistakes.py       # Neural re-ranking (temporal decay + clinical relevance)
+│   ├── auto_detect_mistakes.py  # Automatic mistake detection + severity scoring
+│   ├── adapter.py               # Database adapter abstraction
+│   └── supabase_schema.sql      # Supabase table/function definitions
+│
+├── uncertainty/                 # MUC framework
+│   ├── muc.py                   # Monotonic Uncertainty Cascade (Information Gain)
+│   ├── kle.py                   # KL-divergence Epistemic uncertainty
+│   └── case_embedding.py        # SentenceTransformers case embeddings for similarity
+│
+├── utils/                       # Shared utilities
+│   ├── evidence_report.py       # Rich HTML evidence report builder
+│   └── inference.py             # Robust JSON extraction from LLM output
 │
 ├── safety/                      # Medical safety guardrails
 │   └── guardrails.py            # Critical finding detection + hallucination checks
 │
-├── uncertainty/                 # MUC framework
-│   ├── muc.py                   # Multi-agent Uncertainty Calibration (Information Gain)
-│   ├── kle.py                   # Semantic uncertainty computation
-│   └── case_embedding.py        # Case-level embedding for similarity
+├── monitoring/                  # Observability layer
+│   └── metrics.py               # Prometheus-style counters + histograms
 │
-├── output/                      # Report generation
-│   └── evidence_report.py       # HTML evidence report builder
-│
-
-├── db/                          # Database adapters
-│   ├── logger.py                # Session-scoped structured logging
-│   ├── supabase_logger.py       # Cloud database adapter
-│   └── sqlite_logger.py         # Local SQLite adapter
+├── tests/                       # Comprehensive test suite (17 test files)
+│   ├── test_workflow.py         # End-to-end 9-agent workflow test
+│   ├── test_debate.py           # Multi-round debate tests
+│   ├── test_past_mistakes.py    # Past mistakes DB + retrieval tests
+│   └── ...                      # 14 more test files
 │
 ├── scripts/                     # Utility scripts
-│   ├── build_retrieval_index.py # Build FHIR FAISS index
-│   ├── seed_pb.py               # Seed past mistakes database
-│   └── install_radgraph_model.py# Install RadGraph model
+│   ├── build_retrieval_index.py # Build FAISS index from MIMIC-CXR
+│   ├── install_radgraph_model.py # RadGraph model first-time setup
+│   └── seed_pb.py               # Seed patient database
 │
-├── qlora_medgemma.py            # QLoRA fine-tuning script for MedGemma
-├── fine_tune_hugging_face.py    # HuggingFace Trainer fine-tuning
-├── train_classifier.py          # Disease classifier training
-├── extract_fhir_to_duckdb.py   # FHIR bundle → DuckDB ETL
+├── docs/                        # Documentation
+│   └── PRINCIPLED_UNCERTAINTY.md # Full MUC uncertainty derivation (5 papers)
 │
-├── tests/                       # Test suite
-│   └── test_workflow.py         # End-to-end workflow test
-│
-├── requirements.txt             # Python dependencies
-├── .env.example                 # Environment variable template
-├── Dockerfile                   # Container build
-└── README.md                    # This file
-```
+├── qlora_medgemma.py            # QLoRA fine-tuning (SFTTrainer + NF4 + LoRA)
+├── train_classifier.py          # MedSigLIP classifier training
+└── README.md
+
+---
+
+## Deep Dive: How Key Systems Work
+
+### Critic: 4-Stage Adversarial Evaluation + Past Mistakes Tool
+
+The Critic agent (`agents/critic/model.py`) runs a **4-stage pipeline** to detect overconfidence and hallucinations:
+
+1. **Rule-Based Linguistic Analysis** — Regex-based detection of high-certainty phrases ("definite", "diagnostic of") vs. hedging language ("possible", "may", "consider"). Compares linguistic certainty score against KLE epistemic uncertainty to flag overconfidence.
+
+2. **Historian Challenge** — When FHIR patient history contains contradicting clinical facts (e.g., no prior lung disease but impression says "chronic pneumonia"), the Critic applies proportional safety penalties (5% per contradiction, capped at 20%).
+
+3. **Literature Challenge** — When published evidence suggests alternative diagnoses but the impression omits differentials, the Critic flags the gap.
+
+4. **Past Mistakes Memory Retrieval** — The Critic queries a DuckDB database (with HNSW vector index) or Supabase pgvector to find historically similar diagnostic errors. This is how the model learns from its mistakes:
+   - When a doctor **rejects** a diagnosis during Human-in-the-Loop review, the rejected diagnosis is **automatically inserted** into the past mistakes database (`db/auto_detect_mistakes.py`).
+   - On subsequent cases, the Critic generates a case embedding via SentenceTransformers, then retrieves the top-K most similar past mistakes using hybrid search (structured field filtering + cosine similarity).
+   - Results are **neurally re-ranked** (`db/rerank_mistakes.py`) using temporal decay (recent mistakes weighted higher), clinical relevance scoring, and optionally MedGemma semantic analysis.
+   - If high-severity past mistakes are found (severity ≥ 4), the Critic **forces overconfidence=true** and applies significant safety penalties.
+
+Optional **Stage 5: MedGemma LLM Semantic Critic** (`agents/critic/llm_critic.py`) — gated behind `ENABLE_LLM_CRITIC` feature flag, only runs when uncertainty > 0.3 or rule-based analysis already flagged overconfidence. Uses shared MedGemma to detect justification gaps, missing differentials, and semantic risk.
+
+### LRP Heatmaps: Chefer et al. (CVPR 2021)
+
+Heatmaps are generated using **Layer-wise Relevance Propagation**, NOT Grad-CAM++. The implementation (`agents/radiologist/lrp.py`) adapts Chefer et al.'s transformer attribution:
+
+1. Forward pass through frozen MedSigLIP with `output_attentions=True` (requires `attn_implementation="eager"`)
+2. Backward pass to compute gradients of the target class logit w.r.t. attention maps
+3. Iterative relevance propagation through transformer layers using attention × gradient products
+4. Final heatmap computed as column mean of the accumulated relevance matrix
+5. Resized to 448×448, colored with Jet colormap, overlaid on original CXR (50% blend)
+
+Heatmaps are generated only for classes with probability > 0.5 from the MedSigLIP classifier.
+
+### Shared Model Loader: 27 GB → 9 GB VRAM
+
+Three agents (Historian, Literature, LLM Critic) all use MedGemma 4B for text inference. Without sharing, this would load 3 copies (~27 GB). The `shared_model_loader.py` implements a **thread-safe singleton** with double-checked locking, reducing total VRAM to ~9 GB. A global inference lock ensures only one agent calls `model.generate()` at a time.
+
+### MedGemma Radiologist: Structured JSON Generation
+
+The Radiologist loads MedGemma in 4-bit NF4 quantization (BitsAndBytes) with custom stopping criteria:
+- A `StopOnCloseBrace` callback monitors decoded output and halts generation at the first `}` character
+- Post-generation safety truncation ensures output ends at the last `}`
+- Robust JSON extraction (`utils/inference.py`) handles malformed LLM output
+- Multi-view support via special tokens (`<PA>`, `<AP>`, `<LATERAL>`) embedded in the prompt
+
 
 ---
 
@@ -369,7 +440,7 @@ npm run dev
 python tests/test_workflow.py
 ```
 
-This runs the full 7-agent pipeline on a test image and prints:
+This runs the full 9-agent pipeline on a test image and prints:
 - Radiologist findings and impression
 - CheXbert structured labels
 - Critic safety assessment
@@ -399,41 +470,46 @@ curl -N http://localhost:8000/api/v1/workflows/abc-123/stream
 
 ## Fine-Tuning MedGemma
 
-VERIFAI includes two fine-tuning scripts for adapting MedGemma to your specific dataset:
+VERIFAI includes a QLoRA fine-tuning pipeline for adapting MedGemma to generate structured radiology reports.
 
-### Option A: QLoRA Fine-Tuning (Recommended)
+### QLoRA Fine-Tuning (Recommended)
 
-Memory-efficient fine-tuning using 4-bit quantization + Low-Rank Adaptation.
+Memory-efficient fine-tuning using 4-bit NF4 quantization + Low-Rank Adaptation via `SFTTrainer`:
 
 ```bash
-python qlora_medgemma.py \
-  --dataset_path ../dataset/med/official_data_iccv_final \
-  --output_dir ../dataset/med/fine_tuned_model/v1 \
-  --num_epochs 3 \
-  --batch_size 2 \
-  --learning_rate 2e-4 \
-  --lora_rank 16 \
-  --lora_alpha 32
+# Overfit sanity check (50 samples x 5 epochs — verifies training works)
+python qlora_medgemma.py --mode overfit
+
+# Full training (all studies, 1 epoch)
+python qlora_medgemma.py --mode full
+
+# Custom run
+python qlora_medgemma.py --mode full --epochs 3 --version v2 --max_images 2
 ```
 
-**Requirements:** 6 GB VRAM minimum (4-bit base + LoRA adapters)
+**Training Details:**
+- **LoRA Config:** rank=16, alpha=16, targets `q_proj`, `k_proj`, `v_proj`, `o_proj`
+- **Quantization:** NF4 double-quantized via BitsAndBytes
+- **Optimizer:** `paged_adamw_8bit` with gradient checkpointing
+- **Vision tower:** Frozen during training (only language model adapts)
+- **Dataset:** MIMIC-CXR JSONL with multi-view support (`<PA>`, `<AP>`, `<LATERAL>` tokens)
+- **Output:** Structured JSON (`{"findings": "...", "impression": "..."}`) via chat template
+
+**Requirements:** 12 GB+ VRAM (4-bit base + LoRA adapters + activations)
 
 **Dataset format:** Directory containing subdirectories per patient, each with:
 - `study1/` containing `.jpg` chest X-ray images
 - `findings.txt` and `impression.txt` (ground truth)
 
-### Option B: HuggingFace Trainer Fine-Tuning
+### MedSigLIP Disease Classifier
 
-Full-featured training with HuggingFace's `Trainer` API:
+The disease classifier is a custom `MedGemmaVisionHead` that wraps a frozen MedSigLIP vision encoder (`google/medsiglip-448`) with a trainable classification head:
 
-```bash
-python fine_tune_hugging_face.py \
-  --model_name google/medgemma-1.5-4b-it \
-  --dataset_path ../dataset/med/official_data_iccv_final \
-  --output_dir ../dataset/med/fine_tuned_model/v2
+```
+Frozen SigLIP Vision Encoder → MAP Pooled Output → Linear(1152, 1152) → LayerNorm → GELU → Linear(1152, 14)
 ```
 
-### Training the Disease Classifier
+The classification head predicts 14 CheXbert pathology labels. Training only updates the head parameters while keeping the vision backbone frozen. The model must use `attn_implementation="eager"` for LRP gradient extraction.
 
 Train a custom chest X-ray disease classifier on CheXpert/NIH labels:
 
@@ -633,7 +709,12 @@ pytest tests/ -v
 | `POST` | `/api/v1/safety/validate` | Run safety guardrails on a diagnosis |
 | `GET` | `/api/v1/metrics/summary` | Get observability metrics |
 | `GET` | `/api/v1/health` | Server health check |
-| `GET` | `/api/v1/tools` | List available tools and agents |
+| `GET` | `/api/v1/tools` | List available MCP-registered tools |
+| `POST` | `/api/past-mistakes/insert` | Insert a validated diagnostic mistake |
+| `POST` | `/api/past-mistakes/search` | Search for similar past mistakes (hybrid vector search) |
+| `GET` | `/api/past-mistakes/{id}` | Get a specific mistake by ID |
+| `DELETE`| `/api/past-mistakes/{id}` | Delete a mistake record |
+| `GET` | `/api/past-mistakes/statistics` | Aggregate statistics on past mistakes |
 
 ### Start Workflow Request
 
@@ -720,9 +801,9 @@ A single LLM producing diagnoses has no internal checks — it can hallucinate c
 
 1. **Radiologist** generates findings (may hallucinate)
 2. **CheXbert** independently extracts structured labels (catches text hallucinations)
-3. **Critic** adversarially challenges the findings using uncertainty metrics
-4. **Debate** forces agents to defend/refute their positions
-5. **Validator** applies hard clinical rules before finalizing
+3. **Critic** adversarially challenges the findings using uncertainty metrics + past mistakes memory
+4. **Debate** forces agents to defend/refute their positions with Dempster-Shafer fusion
+5. **Validator** applies three-layer verification: CXR-RePaiR visual retrieval, RadGraph NLP entity matching, and clinical rules engine before finalizing
 
 ### Why MUC (Monotonic Uncertainty Cascade)?
 
