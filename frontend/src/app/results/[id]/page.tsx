@@ -136,24 +136,33 @@ export default function ResultsPage({ params }: { params: { id: string } }) {
 
   const handleFeedback = async (action: "approve" | "reject") => {
     if (action === "reject" && !feedbackText.trim()) {
-      alert("Please provide the reason for rejection.");
+      alert("Please provide your feedback or notes before rerunning the workflow.");
       return;
     }
 
     setIsSubmittingFeedback(true);
     try {
       await submitHumanFeedback(params.id, action, feedbackText, correctDx);
+
+      if (action === "reject") {
+        // Clear previous live events so the rerun shows fresh progress
+        setLiveEvents([]);
+        setFeedbackText("");
+        setCorrectDx("");
+      }
+
       setTimeout(async () => {
         const data = await checkWorkflowStatus(params.id);
         setWorkflowInfo(data);
         setIsSubmittingFeedback(false);
         if (action === "reject") {
+          // Re-trigger SSE to pick up the rerun's live events
           setSseTrigger(prev => prev + 1);
         }
       }, 1500);
     } catch (err) {
       console.error(err);
-      alert("Failed to submit feedback.");
+      alert("Failed to submit feedback. Please try again.");
       setIsSubmittingFeedback(false);
     }
   };
@@ -313,43 +322,45 @@ export default function ResultsPage({ params }: { params: { id: string } }) {
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#00E5FF] opacity-75"></span>
               <span className="relative inline-flex rounded-full h-3 w-3 bg-[#00E5FF]"></span>
             </span>
-            <h2 className="text-xl font-bold text-white">Pending Radiologist Review</h2>
+            <h2 className="text-xl font-bold text-white">Human-in-the-Loop Review</h2>
           </div>
-          <p className="text-white/60 text-sm mb-6">The AI pipeline requires final sign-off. Please review the visual and clinical evidence below.</p>
+          <p className="text-white/60 text-sm mb-6">The AI pipeline has completed its analysis and is awaiting your review. Approve the diagnosis or provide feedback to rerun the workflow with your guidance.</p>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
-              <label className="block text-xs text-white/40 mb-2 uppercase tracking-wide">Doctor&apos;s Assessment</label>
+              <label className="block text-xs text-white/40 mb-2 uppercase tracking-wide">Doctor&apos;s Feedback</label>
               <textarea
                 value={feedbackText}
                 onChange={(e) => setFeedbackText(e.target.value)}
-                placeholder="Reason for rejection or additional notes..."
-                className="w-full bg-black/40 border border-white/[0.05] rounded-xl p-3 text-sm text-white resize-none h-[80px]"
+                placeholder="Write your clinical observations, disagreements, or additional context for the AI to consider on rerun..."
+                className="w-full bg-black/40 border border-white/[0.05] rounded-xl p-3 text-sm text-white resize-none h-[80px] placeholder:text-white/20 focus:border-[#00E5FF]/30 focus:outline-none transition-colors"
               />
             </div>
             <div>
-              <label className="block text-xs text-white/40 mb-2 uppercase tracking-wide">Correction (if rejecting)</label>
+              <label className="block text-xs text-white/40 mb-2 uppercase tracking-wide">Suggested Diagnosis (optional)</label>
               <input
                 type="text"
                 value={correctDx}
                 onChange={(e) => setCorrectDx(e.target.value)}
-                placeholder="Correct diagnosis..."
-                className="w-full bg-black/40 border border-white/[0.05] rounded-xl p-3 text-sm text-white mb-4"
+                placeholder="Your diagnosis if different from the AI's..."
+                className="w-full bg-black/40 border border-white/[0.05] rounded-xl p-3 text-sm text-white mb-4 placeholder:text-white/20 focus:border-[#00E5FF]/30 focus:outline-none transition-colors"
               />
               <div className="flex gap-3">
                 <button
                   onClick={() => handleFeedback("approve")}
                   disabled={isSubmittingFeedback}
-                  className="flex-1 bg-green-500/20 text-green-400 border border-green-500/30 hover:bg-green-500/30 font-medium text-sm py-2.5 rounded-lg transition-colors"
+                  className="flex-1 bg-green-500/20 text-green-400 border border-green-500/30 hover:bg-green-500/30 font-medium text-sm py-2.5 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                 >
+                  {isSubmittingFeedback ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
                   Approve Diagnosis
                 </button>
                 <button
                   onClick={() => handleFeedback("reject")}
                   disabled={isSubmittingFeedback}
-                  className="flex-1 bg-red-500/20 text-red-500 border border-red-500/30 hover:bg-red-500/30 font-medium text-sm py-2.5 rounded-lg transition-colors"
+                  className="flex-1 bg-[#00E5FF]/20 text-[#00E5FF] border border-[#00E5FF]/30 hover:bg-[#00E5FF]/30 font-medium text-sm py-2.5 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                 >
-                  Reject &amp; Rerun
+                  {isSubmittingFeedback ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                  Rerun with Feedback
                 </button>
               </div>
             </div>
