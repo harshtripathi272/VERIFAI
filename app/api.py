@@ -529,11 +529,30 @@ def _resume_workflow_background(session_id: str, req: HumanReviewRequest, config
              "feedback": req.feedback,
              "correct_diagnosis": req.correct_diagnosis
         }
-    
+
+        # Ensure SSE queue exists for this session before agents start emitting
+        # (the old queue may have been cleaned up after the first run)
+        from app.streaming import register_session as _register_sse, emit_agent_event as _emit_sse, _event_queues
+        if session_id not in _event_queues:
+            _register_sse(session_id)
+
         # Resume the workflow using the Command primitive
         # Run synchronously since we are now in a BackgroundTask Thread
         for _ in graph_app.stream(Command(resume=payload), config, stream_mode="values"):
              pass
+
+        # Check if the rerun has suspended again (reject looping to another review)
+        # or if it has completed (approve ending the workflow)
+        new_state_check = graph_app.get_state(config)
+        if new_state_check and new_state_check.next:
+            # Workflow suspended again (waiting for next human review)
+            # Emit a signal so the frontend SSE knows to stop showing the feed
+            _emit_sse(session_id, "system", "workflow_complete",
+                      {"suspended": True}, "Workflow suspended for human review")
+        else:
+            # Workflow fully ended (approved)
+            _emit_sse(session_id, "system", "workflow_complete",
+                      {"approved": True}, "Workflow completed — diagnosis approved")
              
         # Extract the final completed state to populate Observability Metrics
         new_state = graph_app.get_state(config)
