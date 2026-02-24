@@ -284,7 +284,7 @@ python -c "import nltk; nltk.download('punkt'); nltk.download('punkt_tab')"
 ### 6. Install RadGraph Model (for NLP validation)
 
 ```bash
-python scripts/install_radgraph_model.py
+python scripts/install_radgraph_model.py else Download modern-radgraph-xl.tar.gz from https://huggingface.co/StanfordAIMI/RRG_scorers/blob/main/modern-radgraph-xl.tar.gz
 ```
 
 ### 7. Install Frontend

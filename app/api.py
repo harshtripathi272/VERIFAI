@@ -455,7 +455,7 @@ async def resume_workflow(session_id: str, req: HumanReviewRequest, background_t
     return {"session_id": session_id, "status": "resumed", "action": req.action}
 
 
-async def _resume_workflow_background(session_id: str, req: HumanReviewRequest, config: dict, state_snapshot: Any):
+def _resume_workflow_background(session_id: str, req: HumanReviewRequest, config: dict, state_snapshot: Any):
     """Background task to run the rest of the workflow without blocking the API."""
     # Store mistake in database if rejected
     if req.action == "reject" and not getattr(settings, "MOCK_MODELS", False):
@@ -468,10 +468,15 @@ async def _resume_workflow_background(session_id: str, req: HumanReviewRequest, 
              final_diagnosis_obj = current_state.get("final_diagnosis")
              original_diagnosis = getattr(final_diagnosis_obj, "diagnosis", "Unknown") if hasattr(final_diagnosis_obj, "diagnosis") else "Unknown"
              
-             chexbert = current_state.get("chexbert", {})
+             chexbert_obj = current_state.get("chexbert_output")
+             chexbert_labels = {}
+             if chexbert_obj and hasattr(chexbert_obj, "labels"):
+                  chexbert_labels = chexbert_obj.labels
+             elif isinstance(chexbert_obj, dict):
+                  chexbert_labels = chexbert_obj
              disease_type = "unknown"
-             if chexbert:
-                  present = [k for k,v in chexbert.items() if v in ["present", "uncertain"]]
+             if chexbert_labels:
+                  present = [k for k,v in chexbert_labels.items() if v in ["present", "uncertain"]]
                   if present:
                        disease_type = present[0].lower()
              if disease_type == "unknown":
@@ -479,13 +484,13 @@ async def _resume_workflow_background(session_id: str, req: HumanReviewRequest, 
                   
              kle = current_state.get("current_uncertainty", 0.5)
              
-             critic = current_state.get("critic", {})
+             critic = current_state.get("critic_output", {})
              safety_score = getattr(critic, "safety_score", 0.5) if hasattr(critic, "safety_score") else 0.5
              
-             historian = current_state.get("historian", {})
+             historian = current_state.get("historian_output", {})
              clinical_summary = getattr(historian, "clinical_summary", "") if hasattr(historian, "clinical_summary") else ""
              
-             debate = current_state.get("debate", {})
+             debate = current_state.get("debate_output", {})
              debate_summary = getattr(debate, "debate_summary", "") if hasattr(debate, "debate_summary") else ""
              
              embedding = generate_case_embedding_from_fields(
@@ -494,7 +499,7 @@ async def _resume_workflow_background(session_id: str, req: HumanReviewRequest, 
                  corrected_diagnosis=req.correct_diagnosis,
                  error_type="misdiagnosis",
                  uncertainty_score=kle,
-                 chexbert_labels=chexbert,
+                 chexbert_labels=chexbert_labels,
                  clinical_summary=clinical_summary,
                  debate_summary=debate_summary
              )
@@ -510,7 +515,7 @@ async def _resume_workflow_background(session_id: str, req: HumanReviewRequest, 
                  case_embedding=embedding,
                  kle_uncertainty=kle,
                  safety_score=safety_score,
-                 chexbert_labels=chexbert,
+                 chexbert_labels=chexbert_labels,
                  clinical_summary=clinical_summary,
                  debate_summary=debate_summary
              )
