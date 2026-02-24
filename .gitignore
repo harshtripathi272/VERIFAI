@@ -13,6 +13,6 @@ logs/
 venv
 agents/radiologist/CheXpert_Dataset
 .env
-*.duckdb
+
 .radgraph
 /uploads
