@@ -448,67 +448,100 @@ export default function ResultsPage({ params }: { params: { id: string } }) {
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
                     <p className="text-[11px] uppercase tracking-[0.15em] text-white/25 mb-3">Original DICOM</p>
-                    <div className="aspect-[4/3] bg-black/40 rounded-xl border border-white/[0.04] relative overflow-hidden">
-                      <div className="w-full h-full bg-gradient-to-br from-slate-700/40 via-slate-800/60 to-black" />
-                      <p className="absolute bottom-3 left-3 text-[10px] text-white/20 font-mono">AP View &bull; 14:02:55</p>
+                    <div className="aspect-[4/3] bg-black/40 rounded-xl border border-white/[0.04] relative flex items-center justify-center overflow-hidden">
+                      {workflowInfo.current_state?.image_path ? (
+                        <img src={`http://localhost:8000/${workflowInfo.current_state.image_path}`} alt="Original View" className="object-contain w-full h-full" />
+                      ) : (
+                        <div className="w-full h-full bg-gradient-to-br from-slate-700/40 via-slate-800/60 to-black" />
+                      )}
                     </div>
                   </div>
                   <div>
                     <p className="text-[11px] uppercase tracking-[0.15em] text-[#00E5FF]/50 mb-3 flex items-center gap-1">
-                      Grad-CAM Heatmap
+                      Visual Heatmap
                     </p>
-                    <div className="aspect-[4/3] bg-black/40 rounded-xl border border-[#00E5FF]/10 relative overflow-hidden glow-cyan">
-                      <div className="w-full h-full bg-gradient-to-br from-slate-700/40 via-slate-800/60 to-black" />
-                      <div className="absolute top-1/4 left-1/4 w-28 h-36 bg-red-500/30 rounded-[100%] blur-[25px] animate-pulse" />
-                      <div className="absolute top-1/3 right-1/4 w-32 h-40 bg-orange-500/20 rounded-[100%] blur-[30px] animate-pulse" style={{ animationDelay: "1s" }} />
+                    <div className="aspect-[4/3] bg-black/40 rounded-xl border border-[#00E5FF]/10 relative flex items-center justify-center overflow-hidden glow-cyan">
+                      {workflowInfo.current_state?.radiologist?.heatmap_paths && Object.keys(workflowInfo.current_state.radiologist.heatmap_paths).length > 0 ? (
+                        <img
+                          src={`http://localhost:8000/${Object.values(workflowInfo.current_state.radiologist.heatmap_paths)[0]}`}
+                          alt="Heatmap"
+                          className="object-contain w-full h-full mix-blend-screen"
+                        />
+                      ) : workflowInfo.current_state?.image_path ? (
+                        <img src={`http://localhost:8000/${workflowInfo.current_state.image_path}`} alt="Original View Fallback" className="object-contain w-full h-full opacity-50 grayscale" />
+                      ) : (
+                        <div className="w-full h-full bg-gradient-to-br from-slate-700/40 via-slate-800/60 to-black" />
+                      )}
                     </div>
                   </div>
                 </div>
-                <div className="bg-[#00E5FF]/[0.04] border border-[#00E5FF]/10 rounded-xl p-4 text-[13px] text-[#00E5FF]/70 flex items-start gap-3">
-                  <CheckCircle2 className="h-4 w-4 shrink-0 text-[#00E5FF] mt-0.5" />
-                  Peak activation in perihilar regions bilaterally, consistent with PCP visual presentation.
-                </div>
+                {workflowInfo.current_state?.radiologist?.findings && (
+                  <div className="bg-[#00E5FF]/[0.04] border border-[#00E5FF]/10 rounded-xl p-4 text-[13px] text-[#00E5FF]/70 flex items-start gap-3">
+                    <CheckCircle2 className="h-4 w-4 shrink-0 text-[#00E5FF] mt-0.5" />
+                    <div>{workflowInfo.current_state.radiologist.findings}</div>
+                  </div>
+                )}
               </div>
             )}
 
             {activeTab === "clinical" && (
               <div className="space-y-4">
-                <div className="rounded-xl border border-white/[0.04] bg-black/20 p-5 border-l-2 border-l-[#00E5FF]/40">
-                  <div className="flex justify-between items-start mb-3">
-                    <h4 className="text-sm font-medium text-white/70 flex items-center gap-2">
-                      <FileText className="h-3.5 w-3.5 text-[#00E5FF]" /> FHIR Condition Resource
-                    </h4>
-                    <span className="text-[11px] text-white/20 font-mono bg-white/[0.03] px-2 py-1 rounded">3 days ago</span>
-                  </div>
-                  <div className="text-sm text-white/50 bg-black/30 p-4 rounded-lg font-mono leading-relaxed border border-white/[0.03]">
-                    Patient presented with progressive dyspnea and dry cough. Known HIV, CD4 count 180 cells/&micro;L. On prophylactic TMP-SMX.
-                  </div>
-                  <div className="flex flex-wrap gap-2 mt-4">
-                    <span className="text-[11px] px-2.5 py-1 rounded-full bg-[#00E5FF]/[0.06] text-[#00E5FF] border border-[#00E5FF]/15">Immunocompromised</span>
-                    <span className="text-[11px] px-2.5 py-1 rounded-full bg-red-500/[0.06] text-red-400 border border-red-500/15">CD4 = 180</span>
-                    <span className="text-[11px] px-2.5 py-1 rounded-full bg-white/[0.03] text-white/30 border border-white/[0.04]">Dyspnea</span>
-                  </div>
+                <h3 className="text-sm font-semibold text-white/70 mb-3">Clinical Evidence Summary</h3>
+                <div className="text-sm text-white/60 bg-black/20 p-4 rounded-lg border border-white/[0.03] leading-relaxed">
+                  {workflowInfo.current_state?.historian?.clinical_summary || "No clinical summary available yet."}
                 </div>
+
+                <h3 className="text-sm font-semibold text-green-400 mt-6 mb-3">Supporting Facts</h3>
+                {workflowInfo.current_state?.historian?.supporting_facts?.length > 0 ? (
+                  workflowInfo.current_state.historian.supporting_facts.map((fact: any, i: number) => (
+                    <div key={`supp-${i}`} className="rounded-xl border border-white/[0.04] bg-black/20 p-4 border-l-2 border-l-green-400/40 transition-colors hover:bg-black/40">
+                      <div className="text-sm text-white/60 leading-relaxed">{fact.description}</div>
+                      <div className="text-[11px] text-white/30 font-mono mt-3 inline-block bg-white/[0.05] px-2 py-0.5 rounded">
+                        {fact.fhir_resource_type} / {fact.fhir_resource_id}
+                      </div>
+                    </div>
+                  ))
+                ) : (
+                  <div className="text-[13px] text-white/30 p-4 border border-white/[0.02] rounded-xl text-center">No supporting historical facts retrieved.</div>
+                )}
+
+                <h3 className="text-sm font-semibold text-red-500 mt-6 mb-3">Contradicting Facts</h3>
+                {workflowInfo.current_state?.historian?.contradicting_facts?.length > 0 ? (
+                  workflowInfo.current_state.historian.contradicting_facts.map((fact: any, i: number) => (
+                    <div key={`cont-${i}`} className="rounded-xl border border-white/[0.04] bg-black/20 p-4 border-l-2 border-l-red-500/40 transition-colors hover:bg-black/40">
+                      <div className="text-sm text-white/60 leading-relaxed">{fact.description}</div>
+                      <div className="text-[11px] text-white/30 font-mono mt-3 inline-block bg-white/[0.05] px-2 py-0.5 rounded">
+                        {fact.fhir_resource_type} / {fact.fhir_resource_id}
+                      </div>
+                    </div>
+                  ))
+                ) : (
+                  <div className="text-[13px] text-white/30 p-4 border border-white/[0.02] rounded-xl text-center">No contradicting historical facts retrieved.</div>
+                )}
               </div>
             )}
 
             {activeTab === "literary" && (
               <div className="space-y-4">
-                <div className="rounded-xl border border-white/[0.04] bg-black/20 p-5 hover:border-[#00E5FF]/10 transition-colors cursor-pointer group">
-                  <div className="flex items-center gap-2 mb-3 text-[11px] text-[#00E5FF] font-medium tracking-wide">
-                    <CheckCircle2 className="h-3.5 w-3.5" /> HIGH RELEVANCE
-                    <span className="bg-[#00E5FF]/10 px-1.5 py-0.5 rounded font-mono text-[10px]">0.92</span>
+                {workflowInfo.current_state?.literature?.citations && workflowInfo.current_state.literature.citations.length > 0 ? (
+                  workflowInfo.current_state.literature.citations.map((c: any, i: number) => (
+                    <div key={i} className="rounded-xl border border-white/[0.04] bg-black/20 p-5 hover:border-[#00E5FF]/10 transition-colors cursor-pointer group">
+                      <h4 className="text-sm font-semibold text-white/80 mb-2 group-hover:text-[#00E5FF] transition-colors">
+                        {c.title}
+                      </h4>
+                      <p className="text-[11px] text-[#00E5FF]/80 font-mono mb-3 flex items-center gap-1">
+                        <BookOpen className="h-3 w-3" /> <a href={c.url} target="_blank" rel="noreferrer" className="hover:underline text-white/40">{c.url}</a>
+                      </p>
+                      <p className="text-[13px] text-white/50 leading-relaxed border-l-2 border-[#00E5FF]/20 pl-4">
+                        {c.relevance_summary}
+                      </p>
+                    </div>
+                  ))
+                ) : (
+                  <div className="p-5 text-[13px] text-white/40 text-center border rounded-xl border-white/[0.02] bg-white/[0.01]">
+                    No literature citations retrieved for this context yet.
                   </div>
-                  <h4 className="text-sm font-medium text-white/80 mb-2 group-hover:text-[#00E5FF] transition-colors">
-                    Radiographic manifestations of Pneumocystis jirovecii pneumonia in HIV patients
-                  </h4>
-                  <p className="text-[11px] text-white/25 font-mono mb-3 flex items-center gap-1">
-                    <BookOpen className="h-3 w-3" /> J Thoracic Imaging &bull; 2021 &bull; PMID: 33458291
-                  </p>
-                  <p className="text-[13px] text-white/40 leading-relaxed border-l-2 border-[#00E5FF]/20 pl-4">
-                    Bilateral ground-glass opacities are the hallmark of PCP on chest radiography, occurring in up to 90% of cases...
-                  </p>
-                </div>
+                )}
               </div>
             )}
 
@@ -575,8 +608,8 @@ export default function ResultsPage({ params }: { params: { id: string } }) {
                           <div key={i} className={cn(
                             "rounded-xl border p-4 mb-2",
                             flag.severity === "high" ? "border-red-500/15 bg-red-500/[0.03]" :
-                            flag.severity === "medium" ? "border-yellow-500/15 bg-yellow-500/[0.03]" :
-                            "border-green-500/15 bg-green-500/[0.03]"
+                              flag.severity === "medium" ? "border-yellow-500/15 bg-yellow-500/[0.03]" :
+                                "border-green-500/15 bg-green-500/[0.03]"
                           )}>
                             <div className="flex items-start gap-3">
                               {severityIcon(flag.severity)}
