@@ -36,7 +36,8 @@ def test_full_pipeline():
     }
     
     try:
-        result = app.invoke(initial_state)
+        config = {"configurable": {"thread_id": "test_router_123"}}
+        result = app.invoke(initial_state, config)
         
         print("\n📝 EXECUTION TRACE:")
         print("-" * 40)

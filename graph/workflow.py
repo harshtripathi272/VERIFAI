@@ -11,6 +11,8 @@ START → Radiologist → CheXbert → Evidence Gathering (Hist + Lit parallel) 
 import uuid
 from typing import Any
 from langgraph.graph import StateGraph, START, END
+from langgraph.types import interrupt
+from langgraph.checkpoint.memory import MemorySaver
 from concurrent.futures import ThreadPoolExecutor, wait
 
 from graph.state import VerifaiState, FinalDiagnosis
@@ -25,6 +27,28 @@ from uncertainty.muc import (
     compute_critic_uncertainty, compute_critic_alignment,
 )
 
+# Monitoring integration
+try:
+    from monitoring.metrics import metrics as _metrics, track_agent_execution, structured_logger as _slog
+    _HAS_MONITORING = True
+except ImportError:
+    _HAS_MONITORING = False
+
+# SSE streaming integration
+try:
+    from app.streaming import emit_agent_event as _emit_sse
+    _HAS_SSE = True
+except ImportError:
+    _HAS_SSE = False
+
+def _sse(state, agent, status, data=None, message=""):
+    """Helper to emit SSE event if streaming is available."""
+    if not _HAS_SSE:
+        return
+    sid = state.get("_session_id", "")
+    if sid:
+        _emit_sse(sid, agent, status, data, message)
+
 
 # Import agent nodes
 from agents.radiologist.agent import radiologist_node
@@ -35,6 +59,7 @@ from agents.literature.agent import literature_agent_node as literature_node
 from agents.debate.agent import debate_node
 from agents.validator import validator_node, initialize_validator_tools  # Validator: runs after debate always
 from agents.feedback.agent import feedback_node  # Doctor feedback processing
+from graph.state import DoctorFeedback
 
 
 # THREAD-LOCAL LOGGER REGISTRY (one logger per session)
@@ -55,7 +80,8 @@ def _get_or_create_logger(state: VerifaiState):
     session_id = session_id or str(uuid.uuid4())
     logger = get_logger(  # NEW: Uses adapter to select SQLite or Supabase
         session_id=session_id,
-        image_path=state.get("image_path", ""),
+        image_paths=state.get("image_paths", []),
+        views=state.get("views", []),
         patient_id=state.get("patient_id"),
         workflow_type="debate"
     )
@@ -83,16 +109,26 @@ def logged_radiologist_node(state: VerifaiState) -> dict:
     u_in = state.get("current_uncertainty", 0.50)
     print(f"  ⤷ Uncertainty IN  : {u_in:.2%}")
     print("="*60)
+    _sse(state, "radiologist", "started", message="Analyzing chest X-ray with MedGemma...")
     logger = _get_or_create_logger(state)
-    result = radiologist_node(state)
+    with track_agent_execution("radiologist"):
+        result = radiologist_node(state)
     u_out = result.get("current_uncertainty", u_in)
     delta = u_out - u_in
-    print(f"[WORKFLOW] Radiologist completed - Generated {len(result.get('radiologist_output', {}).findings or '')} chars of findings")
+    findings_len = len(result.get('radiologist_output', {}).findings or '')
+    print(f"[WORKFLOW] Radiologist completed - Generated {findings_len} chars of findings")
     print(f"  ⤷ Uncertainty OUT : {u_out:.2%}  (Δ = {delta:+.3f})")
     try:
         logger.log_radiologist(state, result)
     except Exception as e:
         print(f"[DB LOG] Failed to log radiologist: {e}")
+    if _HAS_MONITORING:
+        _metrics.agent_invocations.labels(agent_name="radiologist", status="success").inc()
+    _sse(state, "radiologist", "completed", {
+        "findings_chars": findings_len,
+        "uncertainty": round(u_out, 4),
+        "delta": round(delta, 4)
+    }, f"Radiologist completed — {findings_len} chars, uncertainty {u_out:.0%}")
     return result
 
 
@@ -103,11 +139,15 @@ def logged_chexbert_node(state: VerifaiState) -> dict:
     u_in = state.get("current_uncertainty", 0.50)
     print(f"  ⤷ Uncertainty IN  : {u_in:.2%}")
     print("="*60)
+    _sse(state, "chexbert", "started", message="Running structured pathology labeling...")
     logger = _get_or_create_logger(state)
-    result = chexbert_node(state)
+    with track_agent_execution("chexbert"):
+        result = chexbert_node(state)
     chex_output = result.get('chexbert_output')
     u_out = result.get("current_uncertainty", u_in)
     delta = u_out - u_in
+    num_present = 0
+    num_uncertain = 0
     if chex_output:
         num_present = sum(1 for s in chex_output.labels.values() if s == "present")
         num_uncertain = sum(1 for s in chex_output.labels.values() if s == "uncertain")
@@ -120,10 +160,13 @@ def logged_chexbert_node(state: VerifaiState) -> dict:
     else:
         print("[WORKFLOW] CheXbert completed - No output")
     print(f"  ⤷ Uncertainty OUT : {u_out:.2%}  (Δ = {delta:+.3f})")
-    # Log trace entries from agent
     for t in result.get("trace", []):
         if "MUC" in t:
             print(f"  {t}")
+    _sse(state, "chexbert", "completed", {
+        "present": num_present, "uncertain": num_uncertain,
+        "uncertainty": round(u_out, 4)
+    }, f"CheXbert — {num_present} present, {num_uncertain} uncertain")
     return result
 
 
@@ -134,8 +177,10 @@ def logged_critic_node(state: VerifaiState) -> dict:
     u_in = state.get("current_uncertainty", 0.50)
     print(f"  ⤷ Uncertainty IN  : {u_in:.2%}")
     print("="*60)
+    _sse(state, "critic", "started", message="MedGemma semantic critic evaluating diagnosis...")
     logger = _get_or_create_logger(state)
-    result = critic_node(state)
+    with track_agent_execution("critic"):
+        result = critic_node(state)
     critic_output = result.get('critic_output')
     u_out = result.get("current_uncertainty", u_in)
     delta = u_out - u_in
@@ -162,6 +207,11 @@ def logged_critic_node(state: VerifaiState) -> dict:
         logger.log_critic(state, result)
     except Exception as e:
         print(f"[DB LOG] Failed to log critic: {e}")
+    _sse(state, "critic", "completed", {
+        "safety_score": critic_output.safety_score if critic_output else 0,
+        "overconfident": critic_output.is_overconfident if critic_output else False,
+        "flags": len(critic_output.concern_flags) if critic_output else 0,
+    }, f"Critic — safety={critic_output.safety_score:.2f}, {len(critic_output.concern_flags)} flags" if critic_output else "Critic completed")
     return result
 
 
@@ -172,8 +222,10 @@ def logged_evidence_gathering_node(state: VerifaiState) -> dict:
     u_in = state.get("current_uncertainty", 0.50)
     print(f"  ⤷ Uncertainty IN  : {u_in:.2%}")
     print("="*60)
+    _sse(state, "evidence", "started", message="Gathering clinical history (FHIR) and literature (PubMed)...")
     logger = _get_or_create_logger(state)
-    result = evidence_gathering_node(state)
+    with track_agent_execution("evidence"):
+        result = evidence_gathering_node(state)
     # === MUC: Compute IG for Historian ===
     u_current = u_in
     hist = result.get('historian_output')
@@ -263,6 +315,13 @@ def logged_evidence_gathering_node(state: VerifaiState) -> dict:
         logger.log_evidence_gathering(state, result)
     except Exception as e:
         print(f"[DB LOG] Failed to log evidence_gathering: {e}")
+    hist = result.get('historian_output')
+    lit = result.get('literature_output')
+    _sse(state, "evidence", "completed", {
+        "historian_facts": len(hist.supporting_facts) if hist else 0,
+        "literature_found": lit is not None,
+        "uncertainty": round(u_current, 4),
+    }, f"Evidence gathered — {len(hist.supporting_facts) if hist else 0} clinical facts, literature {'found' if lit else 'unavailable'}")
     return result
 
 
@@ -273,8 +332,10 @@ def logged_debate_node(state: VerifaiState) -> dict:
     u_in = state.get("current_uncertainty", 0.50)
     print(f"  ⤷ Uncertainty IN  : {u_in:.2%}")
     print("="*60)
+    _sse(state, "debate", "started", message="Multi-agent debate starting — Critic vs Evidence Team...")
     logger = _get_or_create_logger(state)
-    result = debate_node(state)
+    with track_agent_execution("debate"):
+        result = debate_node(state)
     debate_output = result.get('debate_output')
     u_out = result.get("current_uncertainty", u_in)
     delta = u_out - u_in
@@ -289,6 +350,11 @@ def logged_debate_node(state: VerifaiState) -> dict:
         logger.log_debate(state, result)
     except Exception as e:
         print(f"[DB LOG] Failed to log debate: {e}")
+    _sse(state, "debate", "completed", {
+        "rounds": len(debate_output.rounds) if debate_output else 0,
+        "consensus": debate_output.final_consensus if debate_output else False,
+        "confidence": round(debate_output.consensus_confidence, 3) if debate_output else 0,
+    }, f"Debate — {len(debate_output.rounds) if debate_output else 0} rounds, {'consensus reached' if debate_output and debate_output.final_consensus else 'no consensus'}")
     return result
 
 
@@ -304,7 +370,9 @@ def logged_validator_node(state: VerifaiState) -> dict:
     else:
         print("[WORKFLOW] Validator mode: ESCALATION (max rounds exceeded)")
     print("="*60)
-    result = validator_node(state)
+    _sse(state, "validator", "started", message="Validating diagnosis with RadGraph + Rules Engine...")
+    with track_agent_execution("validator"):
+        result = validator_node(state)
     # === MUC: Compute Validator IG ===
     vout = result.get("validator_output") or {}
     entity = vout.get('entity_matching', {})
@@ -325,7 +393,10 @@ def logged_validator_node(state: VerifaiState) -> dict:
         flag_count=rules.get('flag_count', 0),
         retrieval_agrees=retrieval.get('agrees_with_chexbert', True) if retrieval and not retrieval.get('error') else True,
     )
-    val_align = compute_validator_alignment(recommendation)
+    val_align = compute_validator_alignment(
+        recommendation=recommendation,
+        entity_f1=entity_f1 if entity_f1 is not None else 0.5
+    )
     val_ig = compute_ig(
         agent_name="validator",
         agent_uncertainty=val_unc,
@@ -339,6 +410,10 @@ def logged_validator_node(state: VerifaiState) -> dict:
 
     # Store updated uncertainty
     result["current_uncertainty"] = val_ig.system_uncertainty_after
+    _sse(state, "validator", "completed", {
+        "recommendation": recommendation,
+        "uncertainty": round(val_ig.system_uncertainty_after, 4),
+    }, f"Validator — {recommendation}, uncertainty {val_ig.system_uncertainty_after:.0%}")
     return result
 
 
@@ -349,8 +424,10 @@ def logged_finalize_node(state: VerifaiState) -> dict:
     u_in = state.get("current_uncertainty", 0.50)
     print(f"  ⤷ Uncertainty IN  : {u_in:.2%}")
     print("="*60)
+    _sse(state, "finalize", "started", message="Generating final diagnosis...")
     logger = _get_or_create_logger(state)
-    result = finalize_node(state)
+    with track_agent_execution("finalize"):
+        result = finalize_node(state)
     final_dx = result.get("final_diagnosis")
     if final_dx:
         final_u = max(0.01, 1.0 - final_dx.calibrated_confidence)
@@ -366,6 +443,14 @@ def logged_finalize_node(state: VerifaiState) -> dict:
         _cleanup_logger(logger.session_id)
     except Exception as e:
         print(f"[DB LOG] Failed to log finalize: {e}")
+    if final_dx:
+        _sse(state, "finalize", "workflow_complete", {
+            "diagnosis": final_dx.diagnosis[:120] if final_dx.diagnosis else None,
+            "confidence": round(final_dx.calibrated_confidence, 3),
+            "deferred": final_dx.deferred,
+        }, f"Diagnosis: {final_dx.diagnosis[:60] if final_dx.diagnosis else 'None'} ({final_dx.calibrated_confidence:.0%})")
+    else:
+        _sse(state, "finalize", "workflow_complete", {}, "Workflow completed")
     return result
 
 
@@ -458,23 +543,6 @@ def finalize_node(state: VerifaiState) -> dict:
             "trace": ["FINALIZE: No findings to finalize"]
         }
 
-    # ── FLAG_FOR_HUMAN: validator says evidence is weak / critical rule violated ──
-    if recommendation == "FLAG_FOR_HUMAN":
-        return {
-            "final_diagnosis": FinalDiagnosis(
-                diagnosis=debate.consensus_diagnosis if (debate and debate.final_consensus) else rad.impression[:200],
-                calibrated_confidence=0.0,
-                deferred=True,
-                deferral_reason=f"Validator flagged for human review: {validator_explanation}",
-                recommended_next_steps=[
-                    "Manual radiologist review required",
-                    "Check validator flags: " + str(validator_out.get("rules", {}).get("triggered_rule_names", [])),
-                    "Review retrieved historical cases in validator_output"
-                ]
-            ),
-            "trace": [f"FINALIZE: DEFERRED — Validator flagged for human review ({validator_explanation})"]
-        }
-
     # ── Build base confidence ─────────────────────────────────────────────────
     if debate and debate.final_consensus:
         diagnosis_text = debate.consensus_diagnosis
@@ -492,27 +560,171 @@ def finalize_node(state: VerifaiState) -> dict:
         confidence = max(0.0, min(0.99, confidence))
         base_explanation = f"No debate consensus after {len(debate.rounds) if debate else 0} rounds. Based on radiologist impression with uncertainty={uncertainty:.3f}."
 
+    # ── FLAG_FOR_HUMAN: validator says evidence is weak / critical rule violated ──
+    if recommendation == "FLAG_FOR_HUMAN":
+        return {
+            "final_diagnosis": FinalDiagnosis(
+                diagnosis=diagnosis_text,
+                calibrated_confidence=confidence,
+                deferred=True,
+                deferral_reason=f"Validator flagged for human review: {validator_explanation}",
+                recommended_next_steps=[
+                    "Manual radiologist review required",
+                    "Check validator flags: " + str(validator_out.get("rules", {}).get("triggered_rule_names", [])),
+                    "Review retrieved historical cases in validator_output"
+                ]
+            ),
+            "trace": [f"FINALIZE: DEFERRED — Validator flagged for human review ({validator_explanation})"]
+        }
+
     # ── FINALIZE_LOW_CONFIDENCE: cap at 0.65 ─────────────────────────────────
     if recommendation == "FINALIZE_LOW_CONFIDENCE":
         confidence = min(confidence, 0.65)
         base_explanation += f" Validator confidence reduced: {validator_explanation}"
+
+    # ── REPRODUCIBILITY HASH ──────────────────────────────────────────────────
+    # SHA-256 fingerprint of everything that influenced this diagnosis.
+    # FDA 21 CFR Part 11 compliant: proves provenance, not bit-exact reproduction.
+    repro_hash = None
+    try:
+        import hashlib, json as _json
+        h = hashlib.sha256()
+
+        # 1. Image bytes (all views)
+        for img_path in (state.get("image_paths") or []):
+            try:
+                with open(img_path, "rb") as f:
+                    h.update(f.read())
+            except OSError:
+                h.update(img_path.encode())  # fallback: hash path string
+
+        # 2. Patient identity
+        h.update((state.get("patient_id") or "").encode())
+
+        # 3. FHIR context snapshot (sorted keys for determinism)
+        fhir = state.get("current_fhir")
+        if fhir:
+            h.update(_json.dumps(fhir, sort_keys=True, default=str).encode())
+
+        # 4. Model + config versions
+        from app.config import settings as _cfg
+        config_sig = {
+            "ENABLE_LLM_CRITIC": getattr(_cfg, "ENABLE_LLM_CRITIC", None),
+            "MAX_DEBATE_ROUNDS": getattr(_cfg, "MAX_DEBATE_ROUNDS", None),
+            "MOCK_MODELS": getattr(_cfg, "MOCK_MODELS", None),
+            "model": "medgemma-4b-it|chexbert-v1.0|sentence-transformers-all-MiniLM-L6-v2",
+        }
+        h.update(_json.dumps(config_sig, sort_keys=True).encode())
+
+        repro_hash = h.hexdigest()
+        print(f"[FINALIZE] Reproducibility hash: {repro_hash[:16]}...")
+    except Exception as e:
+        print(f"[FINALIZE] Hash generation failed (non-critical): {e}")
 
     final = FinalDiagnosis(
         diagnosis=diagnosis_text,
         calibrated_confidence=confidence,
         deferred=False,
         explanation=base_explanation,
+        reproducibility_hash=repro_hash,
         recommended_next_steps=[
             "Confirm with clinical correlation",
             "Consider follow-up imaging if symptoms persist"
         ]
     )
 
-    trace_entry = f"FINALIZE: {diagnosis_text[:80] if diagnosis_text else 'None'}... (confidence={confidence:.2%}, validator={recommendation})"
+    trace_entry = f"FINALIZE: {diagnosis_text[:80] if diagnosis_text else 'None'}... (confidence={confidence:.2%}, validator={recommendation}, hash={repro_hash[:8] if repro_hash else 'n/a'})"
+
+    # Track diagnostic metrics
+    if _HAS_MONITORING:
+        from monitoring.metrics import track_diagnosis
+        try:
+            track_diagnosis(
+                confidence=confidence,
+                uncertainty=state.get('current_uncertainty', 0.5),
+                deferred=False,
+                debate_rounds=len(debate.rounds) if debate else 0,
+            )
+        except Exception:
+            pass
+
     return {
         "final_diagnosis": final,
         "trace": [trace_entry]
     }
+
+
+def human_review_node(state: VerifaiState) -> dict:
+    """
+    Human-in-the-Loop Node.
+    Gathers the outputs from the workflow (Diagnosis, Citations, Heatmaps, Context)
+    and yields them to the human via a LangGraph interrupt().
+    If the human rejects and provides context, we loop back to the Critic.
+    """
+    print("\n" + "="*60)
+    print("[WORKFLOW] Starting Human Review Node")
+    print("="*60)
+
+    final = state.get("final_diagnosis")
+    rad = state.get("radiologist_output")
+    lit = state.get("literature_output")
+    hist = state.get("historian_output")
+    session_id = state.get("_session_id", "unknown_session")
+
+    # Compile presentation data
+    data_to_human = {
+        "session_id": session_id,
+        "diagnosis": final.diagnosis if final else None,
+        "confidence": final.calibrated_confidence if final else max(0.0, 1.0 - state.get("current_uncertainty", 0.5)),
+        "deferred": final.deferred if final else False,
+        "explanation": final.explanation if final else "",
+        "heatmap_paths": rad.heatmap_paths if rad and getattr(rad, "heatmap_paths", None) else {},
+    }
+
+    if lit and hasattr(lit, "citations"):
+        data_to_human["literature_citations"] = [{"title": c.title, "url": c.url} for c in lit.citations]
+    elif isinstance(lit, str):
+         data_to_human["literature_summary"] = lit
+
+    if hist and hasattr(hist, "supporting_facts"):
+         data_to_human["historical_supporting"] = [f.description for f in hist.supporting_facts]
+         data_to_human["historical_contradicting"] = [f.description for f in getattr(hist, "contradicting_facts", [])]
+
+    # Interrupt the graph and wait for human response
+    print("[WORKFLOW] Halting for Human Review...")
+    response = interrupt(data_to_human)
+
+    # Response schema expected from human:
+    # {"action": "approve" | "reject", "feedback": str, "correct_diagnosis": str (optional)}
+    
+    if not isinstance(response, dict):
+        response = {"action": "approve", "feedback": str(response)}
+
+    action = response.get("action", "approve").lower()
+    
+    if action == "reject":
+        print("[WORKFLOW] Human rejected the diagnosis. Restarting workflow via Critic...")
+        
+        # Build DoctorFeedback for reprocessing
+        df = DoctorFeedback(
+            feedback_id=1, # Mock ID, normally generated by DB
+            original_session_id=session_id,
+            feedback_type='rejection',
+            doctor_notes=response.get("feedback", "Human rejected the diagnosis without specifics."),
+            correct_diagnosis=response.get("correct_diagnosis", None)
+        )
+        
+        return {
+             "doctor_feedback": df,
+             "is_feedback_iteration": True,
+             "trace": [f"HUMAN REVIEW: Rejected diagnosis. Feedback: {df.doctor_notes[:100]}"]
+        }
+    else:
+        print("[WORKFLOW] Human approved the diagnosis.")
+        # If approved, just pass through and end
+        return {
+            "trace": ["HUMAN REVIEW: Approved diagnosis."]
+        }
 
 
 def route_after_debate(state: VerifaiState) -> str:
@@ -533,6 +745,17 @@ def route_after_validator(state: VerifaiState) -> str:
     FLAG_FOR_HUMAN) is stored in state and consumed by finalize_node.
     """
     return "finalize"
+
+
+def route_after_human_review(state: VerifaiState) -> str:
+    """
+    Routes based on the result of the human review.
+    If the human rejected (is_feedback_iteration=True), loop back to Critic.
+    Otherwise, END workflow.
+    """
+    if state.get("is_feedback_iteration", False):
+         return "critic_feedback"
+    return "end"
 
 
 def should_start_from_critic(state: VerifaiState) -> str:
@@ -620,8 +843,19 @@ def build_workflow() -> StateGraph:
         {"finalize": "finalize"}
     )
 
-    # Finalize → END
-    graph.add_edge("finalize", END)
+    # Finalize → Human Review
+    graph.add_edge("finalize", "human_review")
+    graph.add_node("human_review", human_review_node)
+
+    # Human Review → Conditional END or Critic Feedback
+    graph.add_conditional_edges(
+        "human_review",
+        route_after_human_review,
+        {
+             "end": END,
+             "critic_feedback": "critic_feedback"
+        }
+    )
 
     return graph
 
@@ -670,10 +904,7 @@ def build_workflow() -> StateGraph:
 
 # === Compile Workflows ===
 
-# Use debate workflow by default
+# Use debate workflow by default with memory saver for check-pointing
+memory = MemorySaver()
 workflow = build_workflow()
-app = workflow.compile()
-
-# # Legacy workflow available if needed
-# legacy_workflow = build_legacy_workflow()
-# legacy_app = legacy_workflow.compile()
+app = workflow.compile(checkpointer=memory)

@@ -38,8 +38,7 @@ class FHIRClient:
         self.faiss_path = os.path.join(self.root_dir, FAISS_FILENAME)
         self.mapping_path = os.path.join(self.root_dir, MAPPING_FILENAME)
         
-        # Connect to DuckDB
-        self.con = duckdb.connect(self.db_path)
+        self.con = duckdb.connect(self.db_path, read_only=True)
         
         # Load FAISS Resources (Lazy load or eager? Eager for now)
         self.index = None
@@ -109,14 +108,14 @@ class FHIRClient:
 
     def _fetch_candidates_sql(self, patient_id: str) -> List[Dict]:
         """
-        Fetch all potentially relevant resources for the patient from DuckDB.
+        Fetch potentially relevant historical resources across ALL patients 
+        to build global disease pattern recognition context.
         """
         query = """
             SELECT id, resourceType, primary_code, normalized_summary, event_time, raw_json
             FROM fhir_resources
-            WHERE patient_ref = ?
         """
-        rows = self.con.execute(query, [patient_id]).fetchall()
+        rows = self.con.execute(query).fetchall()
         
         results = []
         for r in rows:
@@ -204,9 +203,61 @@ class FHIRClient:
                     "_relevance_score": c.get("score"),
                     "_summary": c.get("normalized_summary")
                 }
-                evidence["documents"].append(doc_entry)
-                
         return evidence
+
+    def filter_current_fhir(self, current_fhir: dict, hypothesis: str, top_k: int = 5) -> str:
+        """
+        Extracts all textual values from the current_fhir dictionary, embeds them,
+        ranks them against the hypothesis, and returns the top_k most relevant chunks.
+        """
+        if not current_fhir or not hypothesis or not self.embedder:
+            return json.dumps(current_fhir, indent=2)[:2000] if current_fhir else "No current FHIR data."
+
+        # Recursively extract strings from the JSON
+        def extract_strings(obj):
+            strings = []
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    # Exclude structural/metadata keys that dilute semantic meaning
+                    if k.lower() in ["id", "reference", "system", "version", "url"]:
+                        continue
+                    strings.extend(extract_strings(v))
+            elif isinstance(obj, list):
+                for item in obj:
+                    strings.extend(extract_strings(item))
+            elif isinstance(obj, str):
+                s = obj.strip()
+                # Only keep meaningful chunks
+                if len(s) > 10 and not s.isdigit() and not s.startswith("http"):
+                    strings.append(s)
+            return strings
+
+        chunks = list(set(extract_strings(current_fhir))) # deduplicate
+        
+        if not chunks:
+            return "No meaningful text found in current FHIR report."
+
+        # 1. Embed hypothesis
+        hyp_vec = self.embedder.encode(
+            [hypothesis],
+            convert_to_numpy=True,
+            normalize_embeddings=True
+        )[0]
+        
+        # 2. Embed chunks
+        chunk_vecs = self.embedder.encode(
+            chunks,
+            convert_to_numpy=True,
+            normalize_embeddings=True
+        )
+        
+        # 3. Compute similarity and sort
+        scores = chunk_vecs @ hyp_vec
+        scored_chunks = sorted(zip(chunks, scores), key=lambda x: x[1], reverse=True)
+        
+        # 4. Take top K and format
+        top_chunks = [f"[Score: {score:.2f}] {chunk}" for chunk, score in scored_chunks[:top_k]]
+        return "\n".join(top_chunks)
 
     def _empty_evidence(self):
         return {

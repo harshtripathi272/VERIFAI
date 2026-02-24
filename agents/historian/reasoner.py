@@ -7,6 +7,7 @@ from app.shared_model_loader import load_shared_medgemma, get_inference_lock
 from utils.inference import extract_json
 from langchain_core.output_parsers import PydanticOutputParser
 from graph.state import HistorianOutput, HistorianFact
+from .fhir_client import fhir_client
 
 # Thread-safe singleton pattern - now using shared loader
 processor = None
@@ -96,9 +97,10 @@ def reason_over_fhir(hypothesis: str, evidence: dict, current_fhir: dict = None)
     current_fhir_summary = "No current FHIR report provided."
     if current_fhir:
         try:
+            current_fhir_summary = fhir_client.filter_current_fhir(current_fhir, hypothesis, top_k=5)
+        except Exception as e:
+            print(f"[Historian] Filtering failed, falling back to JSON dump: {e}")
             current_fhir_summary = json.dumps(current_fhir, indent=2)[:2000]
-        except Exception:
-            current_fhir_summary = str(current_fhir)[:2000]
 
     prompt = f"""
 You are a senior clinical historian assisting a radiologist.
@@ -143,19 +145,17 @@ Schema:
 }}
 CRITICAL REASONING RULES:
 
-1. Evidence may support ONLY hypotheses that are explicitly diagnosed or clearly indicated.
-2. If evidence is nonspecific (e.g., atelectasis), it MUST NOT strongly support multiple competing diagnoses.
-3. If a finding could be caused by many conditions and no specific confirmation exists,
-   classify it as weak support (+0.1) or neutral (0.0).
-4. Do NOT assign +0.3 unless the diagnosis is explicitly confirmed in the record.
-5. If evidence is an alternative explanation for the hypothesis, classify as contradiction.
+1. You MUST extract AT LEAST ONE supporting or contradicting fact if ANY relevant information is present in the historical or current report, even if it is indirect or weak evidence.
+2. If the evidence is nonspecific, you can assign it as weak support (+0.1) but YOU MUST STILL EXTRACT IT AS A FACT in the "supporting_facts" or "contradicting_facts" arrays.
+3. Do NOT leave both arrays empty unless the reports are completely blank. The Critic Agent relies on these facts.
+4. If a finding could be caused by many conditions, use the global historical context patterns to justify extracting it as a supporting fact.
+5. If evidence is an alternative explanation for the hypothesis, classify as a contradiction.
 
 Rules:
 - DO NOT create a field called "resource_id"
 - DO NOT combine type and ID
 - fhir_resource_id must contain ONLY the UUID
 - fact_type must be either "supporting" or "contradicting"
-- If no evidence, return empty arrays
 - Return ONLY valid JSON
 """
 

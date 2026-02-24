@@ -94,7 +94,8 @@ class CriticModel:
         current_uncertainty: float,
         chexbert_output=None,   # ✅ NEW
         historian_output=None,
-        literature_output=None
+        literature_output=None,
+        doctor_feedback=None    # ✅ NEW: Human in the loop context
         ) -> tuple[bool, list[str], str | None, float]:
 
         """
@@ -427,7 +428,8 @@ class CriticModel:
                     impression=impression,
                     kle_uncertainty=current_uncertainty,  # param name kept for LLM critic compat
                     historian_output=historian_output,
-                    literature_output=literature_output
+                    literature_output=literature_output,
+                    doctor_feedback=doctor_feedback
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(

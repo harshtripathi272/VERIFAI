@@ -36,9 +36,9 @@ const agents = [
     color: "#FFD740",
   },
   {
-    icon: Brain,
-    name: "Chief",
-    desc: "MedGemma 27B arbiter. Resolves conflicts through multi-round debate and consensus building.",
+    icon: ShieldCheck,
+    name: "Validator",
+    desc: "Final arbiter. Reviews evidence density, debate consensus, and safety to finalize or defer diagnosis to human review.",
     color: "#E040FB",
   },
 ];
@@ -141,9 +141,9 @@ export default function Home() {
             { step: "01", label: "Diagnosis", detail: "Radiologist generates findings and impressions from imaging", color: "#00E5FF" },
             { step: "02", label: "Labeling", detail: "CheXbert extracts 14 structured pathology conditions", color: "#64FFDA" },
             { step: "03", label: "Evidence", detail: "Historian and Literature agents gather context in parallel", color: "#7C4DFF" },
-            { step: "04", label: "Critique", detail: "Critic validates consistency and flags contradictions", color: "#FFD740" },
+            { step: "04", label: "Critique", detail: "Critic validates consistency, flags contradictions, and triggers Debate", color: "#FFD740" },
             { step: "05", label: "Debate", detail: "Multi-round consensus building between all agents", color: "#FF6E40" },
-            { step: "06", label: "Verdict", detail: "Final diagnosis with calibrated confidence and evidence packet", color: "#E040FB" },
+            { step: "06", label: "Verdict", detail: "Validator evaluates confidence, safety, and consensus to finalize or request Human Review.", color: "#E040FB" },
           ].map((item) => (
             <div key={item.step} className="flex items-start gap-6 mb-8 relative group">
               <div

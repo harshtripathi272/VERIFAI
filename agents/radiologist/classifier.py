@@ -126,9 +126,12 @@ def load_medsiglip_classifier(checkpoint_path: str, base_model_name: str = "goog
     print(f"[Classifier] Loading MedSigLIP checkpoint from {checkpoint_path}...")
     checkpoint = torch.load(checkpoint_path, map_location=device)
     
-    # 1. Load Base Vision Model
+    # 1. Load Base Vision Model (Must use eager attention for LRP attention map extraction)
     print(f"[Classifier] Loading base vision model: {base_model_name}")
-    vision_model = SiglipVisionModel.from_pretrained(base_model_name)
+    vision_model = SiglipVisionModel.from_pretrained(
+        base_model_name,
+        attn_implementation="eager"
+    )
     
     # 2. Reconstruct Wrapper
     num_classes = checkpoint.get("num_classes", 14)

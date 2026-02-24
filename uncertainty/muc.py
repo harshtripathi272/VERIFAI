@@ -25,22 +25,23 @@ References:
 """
 
 import math
+from collections import Counter
 import numpy as np
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SCALING FACTORS — per agent (configurable)
+# SCALING FACTORS — LEGACY (trace display only, NOT used in formula)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 SCALING_FACTORS = {
-    "chexbert":    0.15,  # Structured label verification
-    "historian":   0.12,  # Clinical history evidence
-    "literature":  0.10,  # Published evidence
-    "critic":      0.10,  # Overconfidence check
-    "debate":      0.18,  # Multi-agent consensus (highest weight)
-    "validator":   0.08,  # Final rules/entity check
+    "chexbert":    0.20,  # [MARS] Deterministic, structured extraction — high semantic validity
+    "historian":   0.15,  # [Agentic Uncertainty] Patient-specific EHR grounding
+    "literature":  0.10,  # [Agentic Uncertainty] General medical evidence
+    "critic":      0.10,  # Safety gating limit
+    "debate":      0.25,  # [Dempster-Shafer] Resolves K-conflict for 3 agents; highest mass capacity
+    "validator":   0.15,  # Terminal bounding check against absolute rules
 }
 
 
@@ -100,18 +101,36 @@ def compute_ig(
     alignment_score = max(0.0, min(1.0, alignment_score))
     system_uncertainty = max(0.0, min(1.0, system_uncertainty))
 
-    # Look up scaling factor
-    sf = scaling_factor if scaling_factor is not None else SCALING_FACTORS.get(agent_name, 0.10)
+    # Legacy scaling factor — trace display only, NOT used in formula
+    sf = scaling_factor if scaling_factor is not None else SCALING_FACTORS.get(agent_name, 0.0)
 
-    # Core formula — BIDIRECTIONAL
     agent_confidence = 1.0 - agent_uncertainty
     direction = (alignment_score - 0.5) * 2.0  # maps [0,1] → [-1,+1]
-    ig = agent_confidence * direction * sf
-    # ig > 0 when alignment > 0.5 → uncertainty DECREASES
-    # ig < 0 when alignment < 0.5 → uncertainty INCREASES
 
-    # Update system uncertainty (clamped to [0.05, 0.95])
-    new_uncertainty = max(0.05, min(0.95, system_uncertainty - ig))
+    # === BAYESIAN LOG-ODDS UPDATE ===
+    # Ref: Zhang et al., "Agentic UQ", arXiv:2601.15703, Eq. 5-6
+    # P(V_t|h_t) = c_t * P(V_{t-1}|h_{t-1}) — multiplicative
+    # Implemented via logit transform for numerical stability
+    eps = 1e-7
+    U = max(eps, min(1 - eps, system_uncertainty))
+    log_odds = math.log(U / (1 - U))
+
+    # Evidence strength = agent confidence * |direction|
+    # Agent confidence IS the natural weight — no scaling factor needed
+    evidence_strength = agent_confidence * abs(direction)
+
+    # Confirming -> decrease log-odds -> decrease uncertainty
+    # Contradicting -> increase log-odds -> increase uncertainty
+    # Neutral (direction=0) -> evidence_strength=0 -> no change
+    sign = -1.0 if direction >= 0 else 1.0
+    log_odds_new = log_odds + sign * evidence_strength
+
+    # Back to probability via sigmoid
+    new_uncertainty = 1.0 / (1.0 + math.exp(-log_odds_new))
+    new_uncertainty = max(0.05, min(0.95, new_uncertainty))
+
+    # Effective IG for trace compatibility (positive = uncertainty decreased)
+    ig = system_uncertainty - new_uncertainty
 
     return IGResult(
         agent_name=agent_name,
@@ -232,13 +251,18 @@ def compute_chexbert_uncertainty(labels: Dict[str, str]) -> float:
     if not labels:
         return 0.8  # No labels = high uncertainty
 
-    total = len(labels)
-    uncertain_count = sum(1 for s in labels.values() if s == "uncertain")
-    not_mentioned = sum(1 for s in labels.values() if s == "not_mentioned")
+    # Shannon entropy of label distribution, normalized by H_max
+    # Ref: Shannon, "A Mathematical Theory of Communication", 1948
+    # If all labels agree (e.g. all "present") -> H=0 -> low uncertainty
+    # If evenly split across categories -> H=H_max -> high uncertainty
+    category_counts = Counter(labels.values())
+    total = sum(category_counts.values())
+    categories = ["present", "absent", "uncertain", "not_mentioned"]
 
-    # Uncertainty = fraction of ambiguous labels
-    ambiguous = uncertain_count + (not_mentioned * 0.3)  # not_mentioned is mild uncertainty
-    uncertainty = ambiguous / total
+    probs = [category_counts.get(cat, 0) / total for cat in categories]
+    H = -sum(p * math.log(p + 1e-10) for p in probs if p > 0)
+    H_max = math.log(len(categories))  # log(4)
+    uncertainty = H / H_max if H_max > 0 else 0.0
 
     return max(0.05, min(0.95, uncertainty))
 
@@ -457,13 +481,19 @@ def compute_critic_alignment(
     """
     alignment = safety_score
 
-    # Massive penalty for overconfidence
+    # Overconfidence = Critic CONTRADICTS the system's confidence level
+    # Semantically: "despite appearing safe, this is overconfident"
+    # So we FLIP alignment (high safety -> low alignment = contradiction)
     if is_overconfident:
-        alignment *= 0.5
+        alignment = 1.0 - alignment
 
-    # Penalty per concern flag (diminishing)
-    flag_penalty = min(0.3, concern_flag_count * 0.08)
-    alignment = max(0.05, alignment - flag_penalty)
+    # Log-diminishing flag penalty (information-theoretic):
+    # First flag is most informative, each subsequent adds less
+    # penalty = log(1+n) / log(1+N_max), where N_max=10
+    # Ref: Shannon information -- diminishing marginal information
+    if concern_flag_count > 0:
+        flag_penalty = math.log1p(concern_flag_count) / math.log1p(10)
+        alignment = max(0.05, alignment * (1.0 - flag_penalty * 0.5))
 
     return max(0.05, min(0.95, alignment))
 
@@ -657,22 +687,36 @@ def compute_validator_uncertainty(
     return max(0.05, min(0.95, uncertainty))
 
 
-def compute_validator_alignment(recommendation: str) -> float:
+def compute_validator_alignment(recommendation: str, entity_f1: float = 0.5) -> float:
     """
-    Compute validator alignment from recommendation.
+    Validator alignment from discrete decision + continuous Entity F1.
+
+    Base alignment uses ordinal quantile midpoints (3 categories
+    uniformly partitioning [0,1]):
+        FINALIZE -> upper quartile midpoint = 0.75
+        FINALIZE_LOW_CONFIDENCE -> middle = 0.50
+        FLAG_FOR_HUMAN -> lower quartile midpoint = 0.25
+
+    Entity F1 provides continuous refinement within each category.
 
     Args:
         recommendation: FINALIZE, FINALIZE_LOW_CONFIDENCE, or FLAG_FOR_HUMAN
+        entity_f1: RadGraph entity F1 score [0, 1] for refinement
 
     Returns:
         Alignment in [0, 1]
     """
-    alignment_map = {
-        "FINALIZE": 0.95,
-        "FINALIZE_LOW_CONFIDENCE": 0.55,
-        "FLAG_FOR_HUMAN": 0.15,
+    # Ordinal quantile midpoints (defensible: 3 categories in [0,1])
+    base_map = {
+        "FINALIZE": 0.75,
+        "FINALIZE_LOW_CONFIDENCE": 0.50,
+        "FLAG_FOR_HUMAN": 0.25,
     }
-    return alignment_map.get(recommendation, 0.50)
+    base = base_map.get(recommendation, 0.50)
+
+    # Continuous refinement from Entity F1 (centered at 0.5, +/-0.20)
+    refinement = (entity_f1 - 0.5) * 0.4
+    return max(0.05, min(0.95, base + refinement))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

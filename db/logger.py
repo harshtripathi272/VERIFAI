@@ -29,13 +29,14 @@ class AgentLogger:
     outputs, and trace entries into structured SQL tables.
     """
 
-    def __init__(self, session_id: str = None, image_path: str = "", patient_id: str = None, workflow_type: str = "debate"):
+    def __init__(self, session_id: str = None, image_paths: list = None, views: list = None, patient_id: str = None, workflow_type: str = "debate"):
         """
         Initialize logger and create a workflow session.
         
         Args:
             session_id: Unique session ID. Auto-generated if not provided.
-            image_path: Path to the input X-ray image.
+            image_paths: List of paths to the input X-ray images.
+            views: List of corresponding views.
             patient_id: Optional FHIR patient ID.
             workflow_type: 'debate' or 'legacy'.
         """
@@ -45,10 +46,10 @@ class AgentLogger:
         self.session_id = session_id or str(uuid.uuid4())
         
         # Normalize image_path to string if it's a list
-        if isinstance(image_path, list):
-            self.image_path = ", ".join(image_path)
+        if isinstance(image_paths, list):
+            self.image_path = ", ".join(image_paths)
         else:
-            self.image_path = image_path
+            self.image_path = image_paths or ""
             
         self.patient_id = patient_id
         self.workflow_type = workflow_type
@@ -69,37 +70,50 @@ class AgentLogger:
 
     def _start_invocation(self, conn, agent_name: str, input_summary: str = None) -> int:
         """Record the start of an agent invocation. Returns invocation_id."""
-        cursor = conn.execute(
-            """INSERT INTO agent_invocations 
-               (session_id, agent_name, started_at, status, input_summary)
-               VALUES (?, ?, ?, 'running', ?)""",
-            (self.session_id, agent_name, datetime.utcnow().isoformat(), input_summary)
-        )
-        self._agent_count += 1
-        return cursor.lastrowid
+        try:
+            cursor = conn.execute(
+                """INSERT INTO agent_invocations 
+                   (session_id, agent_name, started_at, status, input_summary)
+                   VALUES (?, ?, ?, 'running', ?)""",
+                (self.session_id, agent_name, datetime.utcnow().isoformat(), input_summary)
+            )
+            self._agent_count += 1
+            return cursor.lastrowid
+        except Exception as e:
+            print(f"[DB LOG ERROR] Failed to start invocation for {agent_name}: {e}")
+            return -1
 
     def _complete_invocation(self, conn, invocation_id: int, status: str,
                               output_summary: str = None, trace_entries: list = None,
                               error_message: str = None, started_at: float = None):
         """Mark an agent invocation as complete."""
-        duration_ms = int((time.time() - started_at) * 1000) if started_at else None
-        conn.execute(
-            """UPDATE agent_invocations 
-               SET completed_at=?, duration_ms=?, status=?, output_summary=?, 
-                   trace_entries=?, error_message=?
-               WHERE invocation_id=?""",
-            (datetime.utcnow().isoformat(), duration_ms, status,
-             output_summary, json.dumps(trace_entries or []),
-             error_message, invocation_id)
-        )
+        if invocation_id == -1:
+            return
+            
+        try:
+            duration_ms = int((time.time() - started_at) * 1000) if started_at else None
+            conn.execute(
+                """UPDATE agent_invocations 
+                   SET completed_at=?, duration_ms=?, status=?, output_summary=?, 
+                       trace_entries=?, error_message=?
+                   WHERE invocation_id=?""",
+                (datetime.utcnow().isoformat(), duration_ms, status,
+                 output_summary, json.dumps(trace_entries or []),
+                 error_message, invocation_id)
+            )
+        except Exception as e:
+            print(f"[DB LOG ERROR] Failed to complete invocation {invocation_id}: {e}")
 
     def _log_trace_entries(self, conn, agent_name: str, entries: list):
         """Insert trace entries into the flat trace_log table."""
-        for entry in (entries or []):
-            conn.execute(
-                "INSERT INTO trace_log (session_id, agent_name, entry) VALUES (?, ?, ?)",
-                (self.session_id, agent_name, entry)
-            )
+        try:
+            for entry in (entries or []):
+                conn.execute(
+                    "INSERT INTO trace_log (session_id, agent_name, entry) VALUES (?, ?, ?)",
+                    (self.session_id, agent_name, entry)
+                )
+        except Exception as e:
+            print(f"[DB LOG ERROR] Failed to log trace entries for {agent_name}: {e}")
 
     def _safe_json(self, obj) -> str:
         """Safely serialize an object to JSON string."""
@@ -132,7 +146,7 @@ class AgentLogger:
         with get_db() as conn:
             inv_id = self._start_invocation(
                 conn, "radiologist",
-                input_summary=json.dumps({"image_path": state.get("image_path", "")})
+                input_summary=json.dumps({"image_paths": state.get("image_paths", [])})
             )
 
             try:
@@ -141,16 +155,16 @@ class AgentLogger:
                     num_samples = getattr(settings, 'KLE_NUM_SAMPLES', 5)
                     
                     # Ensure image_path from state is also normalized
-                    image_path_state = state.get("image_path", "")
-                    if isinstance(image_path_state, list):
-                        image_path_state = ", ".join(image_path_state)
+                    image_paths_state = state.get("image_paths", [])
+                    if isinstance(image_paths_state, list):
+                        image_paths_state = ", ".join(image_paths_state)
 
                     conn.execute(
                         """INSERT INTO radiologist_logs 
                            (session_id, invocation_id, image_path, findings_text,
                             impression_text, kle_uncertainty, num_samples)
                            VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                        (self.session_id, inv_id, image_path_state,
+                        (self.session_id, inv_id, image_paths_state,
                          rad_output.findings, rad_output.impression,
                          kle_uncertainty, num_samples)
                     )

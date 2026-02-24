@@ -66,7 +66,8 @@ def critic_node(state: VerifaiState) -> dict:
         current_uncertainty=current_uncertainty,
         chexbert_output=chexbert_output,   # ✅ NEW
         historian_output=hist_output,
-        literature_output=lit_output
+        literature_output=lit_output,
+        doctor_feedback=doctor_feedback
     )
     
     # Unpack result

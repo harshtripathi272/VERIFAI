@@ -113,10 +113,10 @@ def historian_node(state: VerifaiState) -> dict:
     # Validate Inputs
     # -------------------------------------------------------
 
-    if not patient_id:
+    if (not patient_id or patient_id == "N/A") and not current_fhir:
         return {
             "historian_output": None,
-            "trace": ["HISTORIAN: Missing patient_id"]
+            "trace": ["HISTORIAN: Missing patient_id and no current FHIR report provided"]
         }
 
     if not rad_output:
@@ -179,7 +179,7 @@ def historian_node(state: VerifaiState) -> dict:
         try:
             # 🔥 Hypothesis-specific hybrid retrieval
             evidence = fhir_client.fetch_evidence_hybrid(
-                patient_id,
+                patient_id or "global_pattern",
                 hypothesis_name
             )
         except Exception as e:
