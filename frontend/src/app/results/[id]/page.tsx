@@ -1,10 +1,31 @@
 "use client";
-import { useState, useEffect } from "react";
-import { CheckCircle2, AlertTriangle, FileText, ImageIcon, BookOpen, Activity, User, ShieldAlert, ChevronLeft, Download, Loader2, Shield, BarChart3, ExternalLink, AlertCircle, XCircle } from "lucide-react";
+import { useState, useEffect, useRef } from "react";
+import { CheckCircle2, AlertTriangle, FileText, ImageIcon, BookOpen, Activity, User, ShieldAlert, ChevronLeft, Download, Loader2, Shield, BarChart3, ExternalLink, AlertCircle, XCircle, Radio } from "lucide-react";
 import { cn } from "@/lib/utils";
 import Link from "next/link";
 import { GradientText } from "@/components/GradientText";
 import { checkWorkflowStatus, submitHumanFeedback, getSafetyReport, getEvidenceReportUrl, WorkflowStatusResponse, SafetyReportResponse } from "@/lib/api";
+
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1";
+
+interface AgentEvent {
+  agent: string;
+  status: string;
+  message: string;
+  timestamp: string;
+  data: Record<string, any>;
+}
+
+const AGENT_ICONS: Record<string, string> = {
+  system: "🔗",
+  radiologist: "🩻",
+  chexbert: "🏷️",
+  evidence: "📚",
+  critic: "🔍",
+  debate: "⚖️",
+  validator: "✅",
+  finalize: "📋",
+};
 
 export default function ResultsPage({ params }: { params: { id: string } }) {
   const [activeTab, setActiveTab] = useState("visual");
@@ -14,32 +35,70 @@ export default function ResultsPage({ params }: { params: { id: string } }) {
   const [isSubmittingFeedback, setIsSubmittingFeedback] = useState(false);
   const [feedbackText, setFeedbackText] = useState("");
   const [correctDx, setCorrectDx] = useState("");
+  const [liveEvents, setLiveEvents] = useState<AgentEvent[]>([]);
+  const [sseConnected, setSseConnected] = useState(false);
+  const feedRef = useRef<HTMLDivElement>(null);
 
-  // Polling Effect
+  // SSE Live Feed + Polling Fallback
   useEffect(() => {
     let intervalId: NodeJS.Timeout;
+    let es: EventSource | null = null;
 
+    // Start SSE connection
+    try {
+      es = new EventSource(`${API_BASE_URL}/workflows/${params.id}/stream`);
+      
+      es.onopen = () => setSseConnected(true);
+      
+      es.onmessage = (e) => {
+        try {
+          const event: AgentEvent = JSON.parse(e.data);
+          setLiveEvents((prev) => [...prev, event]);
+          
+          // Auto-scroll feed
+          setTimeout(() => {
+            feedRef.current?.scrollTo({ top: feedRef.current.scrollHeight, behavior: "smooth" });
+          }, 100);
+
+          // When workflow completes, fetch final status
+          if (event.status === "workflow_complete" || event.status === "workflow_error") {
+            es?.close();
+            setSseConnected(false);
+            // Fetch final result
+            setTimeout(async () => {
+              const data = await checkWorkflowStatus(params.id);
+              setWorkflowInfo(data);
+            }, 500);
+          }
+        } catch {}
+      };
+
+      es.onerror = () => {
+        setSseConnected(false);
+        es?.close();
+      };
+    } catch {
+      // SSE not available, fall back to polling only
+    }
+
+    // Polling fallback (runs alongside SSE but less frequently)
     const poll = async () => {
       try {
         const data = await checkWorkflowStatus(params.id);
         setWorkflowInfo(data);
-
-        // Stop polling if completed or failed
         if (data.status === "completed" || data.status === "failed") {
           clearInterval(intervalId);
         }
-      } catch (err) {
-        console.error("Polling error:", err);
-      }
+      } catch {}
     };
 
-    // Initial fetch
     poll();
+    intervalId = setInterval(poll, 5000);
 
-    // Poll every 3 seconds if not completed/failed
-    intervalId = setInterval(poll, 3000);
-
-    return () => clearInterval(intervalId);
+    return () => {
+      clearInterval(intervalId);
+      es?.close();
+    };
   }, [params.id]);
 
   // Fetch safety report when workflow completes or is suspended
@@ -95,6 +154,58 @@ export default function ResultsPage({ params }: { params: { id: string } }) {
       <Loader2 className="w-12 h-12 text-[#00E5FF] animate-spin" />
       <h2 className="text-2xl font-semibold text-white/80">Analyzing Study...</h2>
       <p className="text-white/40">The Multi-Agent Pipeline is evaluating the case.</p>
+
+      {/* Live Agent Feed */}
+      {liveEvents.length > 0 && (
+        <div className="w-full max-w-lg mt-6">
+          <div className="flex items-center gap-2 mb-3">
+            <Radio className={cn("w-4 h-4", sseConnected ? "text-green-400 animate-pulse" : "text-white/30")} />
+            <span className="text-xs font-mono text-white/50 uppercase tracking-wider">
+              Live Agent Feed {sseConnected ? "• Connected" : ""}
+            </span>
+          </div>
+          <div
+            ref={feedRef}
+            className="bg-black/40 border border-white/10 rounded-xl p-4 max-h-72 overflow-y-auto space-y-2 scrollbar-thin scrollbar-thumb-white/10"
+          >
+            {liveEvents.map((event, i) => (
+              <div
+                key={i}
+                className={cn(
+                  "flex items-start gap-3 py-2 px-3 rounded-lg text-sm transition-all duration-300",
+                  event.status === "started" && "bg-[#00E5FF]/5 border-l-2 border-[#00E5FF]/50",
+                  event.status === "completed" && "bg-green-500/5 border-l-2 border-green-500/50",
+                  event.status === "workflow_complete" && "bg-purple-500/10 border-l-2 border-purple-400/50",
+                  event.status === "connected" && "bg-white/5 border-l-2 border-white/20",
+                  event.status === "error" && "bg-red-500/10 border-l-2 border-red-500/50",
+                )}
+              >
+                <span className="text-lg mt-0.5 shrink-0">{AGENT_ICONS[event.agent] || "🔹"}</span>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium text-white/90 capitalize">{event.agent}</span>
+                    <span className={cn(
+                      "text-[10px] px-1.5 py-0.5 rounded-full font-mono uppercase",
+                      event.status === "started" && "bg-[#00E5FF]/20 text-[#00E5FF]",
+                      event.status === "completed" && "bg-green-500/20 text-green-400",
+                      event.status === "workflow_complete" && "bg-purple-500/20 text-purple-300",
+                      event.status === "connected" && "bg-white/10 text-white/50",
+                      event.status === "error" && "bg-red-500/20 text-red-400",
+                    )}>
+                      {event.status === "workflow_complete" ? "done" : event.status}
+                    </span>
+                  </div>
+                  <p className="text-white/50 text-xs mt-0.5 truncate">{event.message}</p>
+                </div>
+                <span className="text-[10px] text-white/20 font-mono shrink-0 mt-1">
+                  {new Date(event.timestamp).toLocaleTimeString()}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="flex gap-2 text-[10px] text-[#00E5FF]/70 bg-[#00E5FF]/10 px-3 py-1 rounded-full font-mono uppercase tracking-widest mt-8">
         <span className="w-1.5 h-1.5 rounded-full bg-[#00E5FF] animate-ping inline-block mt-[2px]"></span>
         Session {params.id}

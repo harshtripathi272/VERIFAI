@@ -19,6 +19,9 @@ try:
 except ImportError:
     PAST_MISTAKES_API_AVAILABLE = False
 
+# Import SSE streaming router
+from app.streaming import streaming_router
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -48,6 +51,7 @@ app.add_middleware(
 
 # Include API routes
 app.include_router(router, prefix="/api/v1")
+app.include_router(streaming_router, prefix="/api/v1")
 
 # Include past mistakes router if available
 if PAST_MISTAKES_API_AVAILABLE:
