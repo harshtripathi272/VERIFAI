@@ -1,6 +1,6 @@
 "use client";
 import { useState, useEffect } from "react";
-import { Activity, BarChart3, Shield, Clock, AlertTriangle, CheckCircle2, ArrowUpRight, RefreshCw, Loader2 } from "lucide-react";
+import { Activity, BarChart3, Shield, Clock, AlertTriangle, CheckCircle2, ArrowUpRight, RefreshCw, Loader2, ChevronLeft } from "lucide-react";
 import { cn } from "@/lib/utils";
 import Link from "next/link";
 import { GradientText } from "@/components/GradientText";
@@ -62,7 +62,14 @@ export default function ObservabilityPage() {
       {/* Header */}
       <div className="flex justify-between items-start mb-10">
         <div>
-          <div className="inline-flex items-center gap-2 px-3 py-1 mb-4 rounded-full border border-[#E040FB]/20 bg-[#E040FB]/[0.04] text-[11px] text-[#E040FB] uppercase tracking-[0.15em] font-medium">
+          <Link
+            href="/diagnose"
+            className="inline-flex items-center gap-2 px-3 py-1.5 mb-6 text-sm text-white/50 hover:text-white transition-colors bg-white/5 hover:bg-white/10 rounded-lg border border-white/10"
+          >
+            <ChevronLeft className="w-4 h-4" />
+            Back to Workspace
+          </Link>
+          <div className="flex items-center gap-2 px-3 py-1 mb-4 rounded-full border border-[#E040FB]/20 bg-[#E040FB]/[0.04] text-[11px] text-[#E040FB] uppercase tracking-[0.15em] font-medium w-fit">
             <span className="relative flex h-1.5 w-1.5">
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#E040FB] opacity-75"></span>
               <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-[#E040FB]"></span>
@@ -301,7 +308,7 @@ function HistogramCard({ title, data, unit, multiplier, color }: {
       </p>
       <div className="flex gap-3 text-[10px] text-white/30">
         <span>n={data.count}</span>
-        {data.p50 !== undefined && <span>p50={( data.p50 * multiplier).toFixed(0)}{unit}</span>}
+        {data.p50 !== undefined && <span>p50={(data.p50 * multiplier).toFixed(0)}{unit}</span>}
         {data.p95 !== undefined && <span>p95={(data.p95 * multiplier).toFixed(0)}{unit}</span>}
       </div>
     </div>

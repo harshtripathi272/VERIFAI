@@ -37,6 +37,7 @@ export default function ResultsPage({ params }: { params: { id: string } }) {
   const [correctDx, setCorrectDx] = useState("");
   const [liveEvents, setLiveEvents] = useState<AgentEvent[]>([]);
   const [sseConnected, setSseConnected] = useState(false);
+  const [sseTrigger, setSseTrigger] = useState(0);
   const feedRef = useRef<HTMLDivElement>(null);
 
   // SSE Live Feed + Polling Fallback
@@ -47,14 +48,14 @@ export default function ResultsPage({ params }: { params: { id: string } }) {
     // Start SSE connection
     try {
       es = new EventSource(`${API_BASE_URL}/workflows/${params.id}/stream`);
-      
+
       es.onopen = () => setSseConnected(true);
-      
+
       es.onmessage = (e) => {
         try {
           const event: AgentEvent = JSON.parse(e.data);
           setLiveEvents((prev) => [...prev, event]);
-          
+
           // Auto-scroll feed
           setTimeout(() => {
             feedRef.current?.scrollTo({ top: feedRef.current.scrollHeight, behavior: "smooth" });
@@ -70,7 +71,7 @@ export default function ResultsPage({ params }: { params: { id: string } }) {
               setWorkflowInfo(data);
             }, 500);
           }
-        } catch {}
+        } catch { }
       };
 
       es.onerror = () => {
@@ -89,7 +90,7 @@ export default function ResultsPage({ params }: { params: { id: string } }) {
         if (data.status === "completed" || data.status === "failed") {
           clearInterval(intervalId);
         }
-      } catch {}
+      } catch { }
     };
 
     poll();
@@ -99,7 +100,20 @@ export default function ResultsPage({ params }: { params: { id: string } }) {
       clearInterval(intervalId);
       es?.close();
     };
-  }, [params.id]);
+  }, [params.id, sseTrigger]);
+
+  // Hydrate Live Events from the backend trace if available (for handling tab switch/navigation)
+  useEffect(() => {
+    if (workflowInfo?.current_state?.trace && liveEvents.length === 0) {
+      const traceEvents = workflowInfo.current_state.trace.map((msg: string) => ({
+        agent: msg.includes(":") ? msg.split(":")[0].toLowerCase().trim() : "system",
+        status: "info",
+        message: msg,
+        timestamp: new Date().toISOString()
+      }));
+      setLiveEvents(traceEvents);
+    }
+  }, [workflowInfo?.current_state?.trace]);
 
   // Fetch safety report when workflow completes or is suspended
   useEffect(() => {
@@ -133,6 +147,9 @@ export default function ResultsPage({ params }: { params: { id: string } }) {
         const data = await checkWorkflowStatus(params.id);
         setWorkflowInfo(data);
         setIsSubmittingFeedback(false);
+        if (action === "reject") {
+          setSseTrigger(prev => prev + 1);
+        }
       }, 1500);
     } catch (err) {
       console.error(err);
@@ -149,8 +166,7 @@ export default function ResultsPage({ params }: { params: { id: string } }) {
     { id: "audit", label: "Audit Trail", icon: ShieldAlert },
   ];
 
-  const renderLoadingState = () => {
-    return (
+  const renderLoadingState = () => (
     <div className="flex flex-col items-center justify-center min-h-[60vh] space-y-6">
       <Loader2 className="w-12 h-12 text-[#00E5FF] animate-spin" />
       <h2 className="text-2xl font-semibold text-white/80">Analyzing Study...</h2>
@@ -212,19 +228,19 @@ export default function ResultsPage({ params }: { params: { id: string } }) {
         Session {params.id}
       </div>
     </div>
-    );
-  };
+  );
 
-
-  if (!workflowInfo || workflowInfo.status === "running") {
+  if (!workflowInfo) {
     return <div className="max-w-7xl mx-auto px-6 py-8">{renderLoadingState()}</div>;
   }
+
+  const isRunning = workflowInfo.status === "running";
 
   // --- Real Logic variables for completed or suspended --- //
   let finalDx = "Pending Diagnosis";
   let confidence = 0;
   let uncertainty = 0;
-  let evidence = null;
+  let evidence: any = null;
 
   if (workflowInfo.status === "completed" && workflowInfo.final_result) {
     finalDx = workflowInfo.final_result.diagnosis || "Undetermined";
@@ -234,6 +250,24 @@ export default function ResultsPage({ params }: { params: { id: string } }) {
     finalDx = workflowInfo.pending_review_data.diagnosis;
     confidence = Math.round(workflowInfo.pending_review_data.confidence * 100);
     evidence = workflowInfo.pending_review_data.evidence;
+  } else if (isRunning && workflowInfo.current_state) {
+    const cs = workflowInfo.current_state;
+    if (cs.radiologist?.impression) {
+      finalDx = cs.radiologist.impression.split(".")[0];
+    } else {
+      finalDx = "Analyzing Study...";
+    }
+    evidence = {
+      visual: cs.radiologist ? { findings: cs.radiologist.findings, impression: cs.radiologist.impression } : null,
+      clinical: cs.historian ? {
+        supporting_facts: cs.historian.supporting_facts,
+        contradicting_facts: cs.historian.contradicting_facts,
+        summary: cs.historian.clinical_summary
+      } : null,
+      literature: cs.literature ? {
+        citations: cs.literature.citations || []
+      } : null
+    };
   }
 
   // Safety helpers
@@ -272,7 +306,7 @@ export default function ResultsPage({ params }: { params: { id: string } }) {
         </div>
       </div>
 
-      {workflowInfo.status === "suspended" && (
+      {workflowInfo!.status === "suspended" && (
         <div className="mb-8 p-5 rounded-2xl border-2 border-[#00E5FF]/40 bg-[#00E5FF]/[0.02] shadow-[0_0_30px_rgba(0,229,255,0.05)] animate-fadeInUp">
           <div className="flex items-center gap-3 mb-4">
             <span className="relative flex h-3 w-3">
@@ -331,7 +365,7 @@ export default function ResultsPage({ params }: { params: { id: string } }) {
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#00E5FF] opacity-75"></span>
               <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-[#00E5FF]"></span>
             </span>
-            Study {params.id.slice(0, 8)} &bull; {workflowInfo.status === "completed" ? "Finalized" : "Pending Review"}
+            Study {params.id.slice(0, 8)} &bull; {workflowInfo!.status === "completed" ? "Finalized" : "Pending Review"}
           </div>
           <h1 className="text-3xl md:text-5xl font-[var(--font-outfit)] font-bold text-white/90 leading-tight">
             <GradientText colors={["#00E5FF", "#64FFDA", "#00E5FF"]}>{finalDx}</GradientText>
@@ -369,6 +403,35 @@ export default function ResultsPage({ params }: { params: { id: string } }) {
               <strong>{cf.condition}</strong> [{cf.urgency}] — {cf.action}
             </p>
           ))}
+        </div>
+      )}
+
+      {/* If Running, Show the Live Event Feed Above Layout */}
+      {isRunning && (
+        <div className="mb-8 p-6 rounded-2xl border border-[#00E5FF]/20 bg-black/40 shadow-inner">
+          <h3 className="text-[#00E5FF] font-semibold flex items-center gap-2 mb-4">
+            <Loader2 className="w-5 h-5 animate-spin" /> Live Agent Pipeline
+          </h3>
+          <div
+            ref={feedRef}
+            className="bg-black/60 rounded-xl p-4 max-h-64 overflow-y-auto space-y-2 scrollbar-thin scrollbar-thumb-white/10"
+          >
+            {liveEvents.length === 0 && <p className="text-white/30 text-sm py-4 text-center">Awaiting agent updates or polling backend...</p>}
+            {liveEvents.map((event, i) => (
+              <div key={i} className="flex items-start gap-3 py-2 px-3 rounded-lg text-sm bg-white/5 border-l-2 border-[#00E5FF]/30">
+                <span className="text-lg mt-0.5 shrink-0">{AGENT_ICONS[event.agent] || "🔹"}</span>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium text-white/90 capitalize">{event.agent}</span>
+                    <span className="text-[10px] px-1.5 py-0.5 rounded-full font-mono uppercase bg-[#00E5FF]/20 text-[#00E5FF]">
+                      {event.status === "workflow_complete" ? "done" : event.status}
+                    </span>
+                  </div>
+                  <p className="text-white/50 text-xs mt-0.5">{event.message}</p>
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 
@@ -452,8 +515,8 @@ export default function ResultsPage({ params }: { params: { id: string } }) {
                   <div>
                     <p className="text-[11px] uppercase tracking-[0.15em] text-white/25 mb-3">Original DICOM</p>
                     <div className="aspect-[4/3] bg-black/40 rounded-xl border border-white/[0.04] relative flex items-center justify-center overflow-hidden">
-                      {workflowInfo.current_state?.image_path ? (
-                        <img src={`http://localhost:8000/${workflowInfo.current_state.image_path}`} alt="Original View" className="object-contain w-full h-full" />
+                      {workflowInfo!.current_state?.image_path ? (
+                        <img src={`http://localhost:8000/${workflowInfo!.current_state.image_path}`} alt="Original View" className="object-contain w-full h-full" />
                       ) : (
                         <div className="w-full h-full bg-gradient-to-br from-slate-700/40 via-slate-800/60 to-black" />
                       )}
@@ -464,24 +527,24 @@ export default function ResultsPage({ params }: { params: { id: string } }) {
                       Visual Heatmap
                     </p>
                     <div className="aspect-[4/3] bg-black/40 rounded-xl border border-[#00E5FF]/10 relative flex items-center justify-center overflow-hidden glow-cyan">
-                      {workflowInfo.current_state?.radiologist?.heatmap_paths && Object.keys(workflowInfo.current_state.radiologist.heatmap_paths).length > 0 ? (
+                      {workflowInfo!.current_state?.radiologist?.heatmap_paths && Object.keys(workflowInfo!.current_state.radiologist.heatmap_paths).length > 0 ? (
                         <img
-                          src={`http://localhost:8000/${Object.values(workflowInfo.current_state.radiologist.heatmap_paths)[0]}`}
+                          src={`http://localhost:8000/${Object.values(workflowInfo!.current_state.radiologist.heatmap_paths)[0]}`}
                           alt="Heatmap"
                           className="object-contain w-full h-full mix-blend-screen"
                         />
-                      ) : workflowInfo.current_state?.image_path ? (
-                        <img src={`http://localhost:8000/${workflowInfo.current_state.image_path}`} alt="Original View Fallback" className="object-contain w-full h-full opacity-50 grayscale" />
+                      ) : workflowInfo!.current_state?.image_path ? (
+                        <img src={`http://localhost:8000/${workflowInfo!.current_state.image_path}`} alt="Original View Fallback" className="object-contain w-full h-full opacity-50 grayscale" />
                       ) : (
                         <div className="w-full h-full bg-gradient-to-br from-slate-700/40 via-slate-800/60 to-black" />
                       )}
                     </div>
                   </div>
                 </div>
-                {workflowInfo.current_state?.radiologist?.findings && (
+                {workflowInfo!.current_state?.radiologist?.findings && (
                   <div className="bg-[#00E5FF]/[0.04] border border-[#00E5FF]/10 rounded-xl p-4 text-[13px] text-[#00E5FF]/70 flex items-start gap-3">
                     <CheckCircle2 className="h-4 w-4 shrink-0 text-[#00E5FF] mt-0.5" />
-                    <div>{workflowInfo.current_state.radiologist.findings}</div>
+                    <div>{workflowInfo!.current_state.radiologist.findings}</div>
                   </div>
                 )}
               </div>
@@ -491,12 +554,12 @@ export default function ResultsPage({ params }: { params: { id: string } }) {
               <div className="space-y-4">
                 <h3 className="text-sm font-semibold text-white/70 mb-3">Clinical Evidence Summary</h3>
                 <div className="text-sm text-white/60 bg-black/20 p-4 rounded-lg border border-white/[0.03] leading-relaxed">
-                  {workflowInfo.current_state?.historian?.clinical_summary || "No clinical summary available yet."}
+                  {workflowInfo!.current_state?.historian?.clinical_summary || "No clinical summary available yet."}
                 </div>
 
                 <h3 className="text-sm font-semibold text-green-400 mt-6 mb-3">Supporting Facts</h3>
-                {workflowInfo.current_state?.historian?.supporting_facts?.length > 0 ? (
-                  workflowInfo.current_state.historian.supporting_facts.map((fact: any, i: number) => (
+                {workflowInfo!.current_state?.historian?.supporting_facts?.length > 0 ? (
+                  workflowInfo!.current_state.historian.supporting_facts.map((fact: any, i: number) => (
                     <div key={`supp-${i}`} className="rounded-xl border border-white/[0.04] bg-black/20 p-4 border-l-2 border-l-green-400/40 transition-colors hover:bg-black/40">
                       <div className="text-sm text-white/60 leading-relaxed">{fact.description}</div>
                       <div className="text-[11px] text-white/30 font-mono mt-3 inline-block bg-white/[0.05] px-2 py-0.5 rounded">
@@ -509,8 +572,8 @@ export default function ResultsPage({ params }: { params: { id: string } }) {
                 )}
 
                 <h3 className="text-sm font-semibold text-red-500 mt-6 mb-3">Contradicting Facts</h3>
-                {workflowInfo.current_state?.historian?.contradicting_facts?.length > 0 ? (
-                  workflowInfo.current_state.historian.contradicting_facts.map((fact: any, i: number) => (
+                {workflowInfo!.current_state?.historian?.contradicting_facts?.length > 0 ? (
+                  workflowInfo!.current_state.historian.contradicting_facts.map((fact: any, i: number) => (
                     <div key={`cont-${i}`} className="rounded-xl border border-white/[0.04] bg-black/20 p-4 border-l-2 border-l-red-500/40 transition-colors hover:bg-black/40">
                       <div className="text-sm text-white/60 leading-relaxed">{fact.description}</div>
                       <div className="text-[11px] text-white/30 font-mono mt-3 inline-block bg-white/[0.05] px-2 py-0.5 rounded">
@@ -526,8 +589,8 @@ export default function ResultsPage({ params }: { params: { id: string } }) {
 
             {activeTab === "literary" && (
               <div className="space-y-4">
-                {workflowInfo.current_state?.literature?.citations && workflowInfo.current_state.literature.citations.length > 0 ? (
-                  workflowInfo.current_state.literature.citations.map((c: any, i: number) => (
+                {workflowInfo!.current_state?.literature?.citations && workflowInfo!.current_state.literature.citations.length > 0 ? (
+                  workflowInfo!.current_state.literature.citations.map((c: any, i: number) => (
                     <div key={i} className="rounded-xl border border-white/[0.04] bg-black/20 p-5 hover:border-[#00E5FF]/10 transition-colors cursor-pointer group">
                       <h4 className="text-sm font-semibold text-white/80 mb-2 group-hover:text-[#00E5FF] transition-colors">
                         {c.title}
@@ -661,49 +724,84 @@ export default function ResultsPage({ params }: { params: { id: string } }) {
             )}
 
             {activeTab === "audit" && (
-              <div className="space-y-5">
-                {/* Reproducibility Hash Banner */}
-                {workflowInfo.final_result?.reproducibility_hash && (
-                  <div className="rounded-xl border border-[#00E5FF]/15 bg-[#00E5FF]/[0.03] p-4">
-                    <div className="flex items-center gap-2 mb-2">
-                      <Shield className="h-4 w-4 text-[#00E5FF]" />
-                      <span className="text-[11px] font-semibold uppercase tracking-widest text-[#00E5FF]">
-                        Reproducibility Hash
-                      </span>
-                      <span className="text-[10px] bg-[#00E5FF]/10 text-[#00E5FF]/70 px-1.5 py-0.5 rounded font-mono">
-                        SHA-256 · FDA 21 CFR Part 11
-                      </span>
-                    </div>
-                    <p className="text-[11px] text-white/30 mb-2">
-                      Fingerprint of: X-ray pixels + patient FHIR context + model versions + config
-                    </p>
-                    <div
-                      className="font-mono text-[11px] text-[#00E5FF]/80 bg-black/40 rounded-lg px-4 py-2.5 break-all cursor-pointer hover:bg-black/60 transition-colors"
-                      title="Click to copy"
-                      onClick={() => navigator.clipboard?.writeText(workflowInfo.final_result.reproducibility_hash)}
-                    >
-                      {workflowInfo.final_result.reproducibility_hash}
-                    </div>
-                    <p className="text-[10px] text-white/20 mt-1.5">Click to copy</p>
+              <div className="space-y-6">
+                <div>
+                  <p className="text-[11px] uppercase tracking-[0.15em] text-white/40 mb-3 font-semibold ml-1">Execution Trace</p>
+                  <div className="space-y-3 relative pl-8 mt-2">
+                    <div className="absolute left-3 top-0 bottom-0 w-px bg-gradient-to-b from-[#00E5FF]/30 via-white/5 to-transparent" />
+                    {(workflowInfo!.current_state?.trace || workflowInfo!.final_result?.trace || [])?.map((traceStr: string, index: number) => (
+                      <div key={index} className="relative flex items-start gap-4 group">
+                        <div
+                          className="absolute -left-5 w-6 h-6 rounded-full border-2 flex items-center justify-center bg-[#050507] z-10 group-hover:scale-110 transition-transform cursor-pointer"
+                          style={{ borderColor: `#00E5FF50` }}
+                        >
+                          <Activity className="h-3 w-3 text-[#00E5FF]" />
+                        </div>
+                        <div className="rounded-xl border border-white/[0.04] bg-black/20 p-4 flex-1 group-hover:border-white/[0.08] transition-colors">
+                          <p className="text-[13px] text-white/40 leading-relaxed">{traceStr}</p>
+                        </div>
+                      </div>
+                    ))}
                   </div>
-                )}
+                </div>
 
-                {/* Trace Timeline */}
-                <div className="relative pl-8">
-                  <div className="absolute left-3 top-0 bottom-0 w-px bg-gradient-to-b from-[#00E5FF]/30 via-white/5 to-transparent" />
-                  {(workflowInfo.status === "completed" ? workflowInfo.final_result?.trace : [])?.map((traceStr: string, index: number) => (
-                    <div key={index} className="relative flex items-start gap-4 group mb-5">
-                      <div
-                        className="absolute -left-5 w-6 h-6 rounded-full border-2 flex items-center justify-center bg-[#050507] z-10 group-hover:scale-110 transition-transform"
-                        style={{ borderColor: `#00E5FF50` }}
-                      >
-                        <Activity className="h-3 w-3 text-[#00E5FF]" />
-                      </div>
-                      <div className="rounded-xl border border-white/[0.04] bg-black/20 p-4 flex-1 group-hover:border-white/[0.08] transition-colors">
-                        <p className="text-[13px] text-white/40 leading-relaxed">{traceStr}</p>
-                      </div>
+                {/* Raw Output Dumps */}
+                <div className="grid grid-cols-1 gap-4 pt-6 mt-6 border-t border-white/5">
+                  <p className="text-[14px] uppercase tracking-[0.15em] text-white/60 font-semibold mb-2">Raw Agent Outputs</p>
+
+                  {workflowInfo?.current_state?.radiologist && (
+                    <div className="rounded-xl border border-blue-500/10 bg-blue-500/[0.02] overflow-hidden">
+                      <div className="bg-blue-500/10 px-4 py-2 text-xs font-mono text-blue-400 font-semibold border-b border-blue-500/10">Radiologist Component</div>
+                      <pre className="p-4 text-[11px] text-white/50 font-mono overflow-x-auto whitespace-pre-wrap">
+                        {JSON.stringify(workflowInfo.current_state.radiologist, null, 2)}
+                      </pre>
                     </div>
-                  ))}
+                  )}
+
+                  {workflowInfo?.current_state?.chexbert && (
+                    <div className="rounded-xl border border-indigo-500/10 bg-indigo-500/[0.02] overflow-hidden">
+                      <div className="bg-indigo-500/10 px-4 py-2 text-xs font-mono text-indigo-400 font-semibold border-b border-indigo-500/10">CheXbert Pathologies</div>
+                      <pre className="p-4 text-[11px] text-white/50 font-mono overflow-x-auto whitespace-pre-wrap">
+                        {JSON.stringify(workflowInfo.current_state.chexbert, null, 2)}
+                      </pre>
+                    </div>
+                  )}
+
+                  {workflowInfo?.current_state?.historian && (
+                    <div className="rounded-xl border border-emerald-500/10 bg-emerald-500/[0.02] overflow-hidden">
+                      <div className="bg-emerald-500/10 px-4 py-2 text-xs font-mono text-emerald-400 font-semibold border-b border-emerald-500/10">Historian Inference</div>
+                      <pre className="p-4 text-[11px] text-white/50 font-mono overflow-x-auto whitespace-pre-wrap">
+                        {JSON.stringify(workflowInfo.current_state.historian, null, 2)}
+                      </pre>
+                    </div>
+                  )}
+
+                  {workflowInfo?.current_state?.literature && (
+                    <div className="rounded-xl border border-yellow-500/10 bg-yellow-500/[0.02] overflow-hidden">
+                      <div className="bg-yellow-500/10 px-4 py-2 text-xs font-mono text-yellow-400 font-semibold border-b border-yellow-500/10">Literature Agent</div>
+                      <pre className="p-4 text-[11px] text-white/50 font-mono overflow-x-auto whitespace-pre-wrap">
+                        {JSON.stringify(workflowInfo.current_state.literature, null, 2)}
+                      </pre>
+                    </div>
+                  )}
+
+                  {workflowInfo?.current_state?.critic && (
+                    <div className="rounded-xl border border-pink-500/10 bg-pink-500/[0.02] overflow-hidden">
+                      <div className="bg-pink-500/10 px-4 py-2 text-xs font-mono text-pink-400 font-semibold border-b border-pink-500/10">Critic Evaluation</div>
+                      <pre className="p-4 text-[11px] text-white/50 font-mono overflow-x-auto whitespace-pre-wrap">
+                        {JSON.stringify(workflowInfo.current_state.critic, null, 2)}
+                      </pre>
+                    </div>
+                  )}
+
+                  {workflowInfo?.current_state?.debate && (
+                    <div className="rounded-xl border border-orange-500/10 bg-orange-500/[0.02] overflow-hidden">
+                      <div className="bg-orange-500/10 px-4 py-2 text-xs font-mono text-orange-400 font-semibold border-b border-orange-500/10">Debate Orchestrator</div>
+                      <pre className="p-4 text-[11px] text-white/50 font-mono overflow-x-auto whitespace-pre-wrap">
+                        {JSON.stringify(workflowInfo.current_state.debate, null, 2)}
+                      </pre>
+                    </div>
+                  )}
                 </div>
               </div>
             )}
