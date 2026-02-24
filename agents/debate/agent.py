@@ -113,21 +113,34 @@ class DebateOrchestrator:
             hist_impact = last_round.historian_response.confidence_impact if last_round.historian_response else 0
             lit_impact = last_round.literature_response.confidence_impact if last_round.literature_response else 0
             
+            # Use the round number to cycle through different types of follow-up challenges
+            round_num = len(previous_rounds) + 1
+            
             if hist_impact + lit_impact > 0.1:
                 # Evidence was strong, reduce challenge intensity but ask for specificity
+                if round_num % 2 == 0:
+                    challenge_msg = f"Historian noted: '{hist_snippet}...'. While supportive, please verify if secondary disease patterns in the patient's history uniquely confirm this."
+                else:
+                    challenge_msg = f"The historical evidence ('{hist_snippet[:40]}...') aligns well. Literature, are there any recent studies documenting rare contra-indications for this specific presentation?"
+                
                 return DebateArgument(
                     agent="critic",
                     position="challenge",
-                    argument=f"Historian noted: '{hist_snippet}...'. While supportive, please verify if secondary disease patterns in the patient's history uniquely confirm this.",
+                    argument=challenge_msg,
                     confidence_impact=-0.02,
                     evidence_refs=["reduced_challenge_intensity"]
                 )
             else:
                 # Evidence was weak, maintain challenge and push back
+                if round_num % 2 == 0:
+                    challenge_msg = f"Historian's previous claim ('{hist_snippet}...') is insufficient to resolve uncertainty. Are there definitive prior reports or contradicting differentials?"
+                else:
+                    challenge_msg = f"The provided evidence remains weak. We must consider alternative diagnoses. What other pathologies present with these exact visual findings?"
+                    
                 return DebateArgument(
                     agent="critic",
                     position="challenge",
-                    argument=f"Historian's previous claim ('{hist_snippet}...') is insufficient to resolve uncertainty. Are there definitive prior reports or contradicting differentials?",
+                    argument=challenge_msg,
                     confidence_impact=-0.08,
                     evidence_refs=["maintained_challenge"]
                 )
@@ -264,28 +277,43 @@ class DebateOrchestrator:
         
         if evidence_strength == "high" or len(high_evidence) >= 2:
             cite_text = "; ".join([f"{c.authors[0] if c.authors else 'Unknown'} et al. ({c.year})" for c in citations[:3]])
+            if round_num > 1:
+                base_msg = f"{prefix}Reaffirming strong literature support: {cite_text}. No contra-indications found in the retrieved cohort."
+            else:
+                base_msg = f"{prefix}Strong literature support: {cite_text}. {citations[0].relevance_summary[:150] if citations else ''}"
+                
             return DebateArgument(
                 agent="literature",
                 position="support",
-                argument=f"Strong literature support: {cite_text}. {citations[0].relevance_summary[:150] if citations else ''}",
+                argument=base_msg,
                 confidence_impact=0.12,
                 evidence_refs=[c.pmid for c in citations[:3]]
             )
         elif evidence_strength == "medium":
+            if round_num > 1:
+                base_msg = f"{prefix}The {len(citations)} retrieved studies continue to offer moderate support, but lack definitive randomized trial data for this edge case."
+            else:
+                base_msg = f"{prefix}Moderate literature support from {len(citations)} studies."
+                
             return DebateArgument(
                 agent="literature",
                 position="support",
-                argument=f"Moderate literature support from {len(citations)} studies.",
+                argument=base_msg,
                 confidence_impact=0.06,
                 evidence_refs=[c.pmid for c in citations[:3]]
             )
         else:
+            if round_num > 1:
+                base_msg = f"{prefix}Literature evidence remains limited. The queried references do not strongly distinguish between the primary and secondary differentials."
+            else:
+                base_msg = f"{prefix}Limited literature evidence. Only {len(citations)} marginally relevant studies found."
+                
             return DebateArgument(
                 agent="literature",
                 position="refine",
-                argument=f"Limited literature evidence. Only {len(citations)} marginally relevant studies found.",
+                argument=base_msg,
                 confidence_impact=0.02,
-                evidence_refs=[c.pmid for c in citations[:2]]
+                evidence_refs=[c.pmid for c in citations[:3]]
             )
     
     def _check_consensus(

@@ -543,23 +543,6 @@ def finalize_node(state: VerifaiState) -> dict:
             "trace": ["FINALIZE: No findings to finalize"]
         }
 
-    # ── FLAG_FOR_HUMAN: validator says evidence is weak / critical rule violated ──
-    if recommendation == "FLAG_FOR_HUMAN":
-        return {
-            "final_diagnosis": FinalDiagnosis(
-                diagnosis=debate.consensus_diagnosis if (debate and debate.final_consensus) else rad.impression[:200],
-                calibrated_confidence=0.0,
-                deferred=True,
-                deferral_reason=f"Validator flagged for human review: {validator_explanation}",
-                recommended_next_steps=[
-                    "Manual radiologist review required",
-                    "Check validator flags: " + str(validator_out.get("rules", {}).get("triggered_rule_names", [])),
-                    "Review retrieved historical cases in validator_output"
-                ]
-            ),
-            "trace": [f"FINALIZE: DEFERRED — Validator flagged for human review ({validator_explanation})"]
-        }
-
     # ── Build base confidence ─────────────────────────────────────────────────
     if debate and debate.final_consensus:
         diagnosis_text = debate.consensus_diagnosis
@@ -576,6 +559,23 @@ def finalize_node(state: VerifaiState) -> dict:
             confidence += debate.total_confidence_adjustment
         confidence = max(0.0, min(0.99, confidence))
         base_explanation = f"No debate consensus after {len(debate.rounds) if debate else 0} rounds. Based on radiologist impression with uncertainty={uncertainty:.3f}."
+
+    # ── FLAG_FOR_HUMAN: validator says evidence is weak / critical rule violated ──
+    if recommendation == "FLAG_FOR_HUMAN":
+        return {
+            "final_diagnosis": FinalDiagnosis(
+                diagnosis=diagnosis_text,
+                calibrated_confidence=confidence,
+                deferred=True,
+                deferral_reason=f"Validator flagged for human review: {validator_explanation}",
+                recommended_next_steps=[
+                    "Manual radiologist review required",
+                    "Check validator flags: " + str(validator_out.get("rules", {}).get("triggered_rule_names", [])),
+                    "Review retrieved historical cases in validator_output"
+                ]
+            ),
+            "trace": [f"FINALIZE: DEFERRED — Validator flagged for human review ({validator_explanation})"]
+        }
 
     # ── FINALIZE_LOW_CONFIDENCE: cap at 0.65 ─────────────────────────────────
     if recommendation == "FINALIZE_LOW_CONFIDENCE":

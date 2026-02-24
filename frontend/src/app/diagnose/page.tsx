@@ -197,15 +197,7 @@ export default function DiagnosePage() {
           </div>
         </div>
 
-        <div>
-          <label className="block text-[13px] font-medium text-white/40 mb-2">Clinical Question</label>
-          <textarea
-            placeholder="What specifically should the diagnostic pipeline investigate?"
-            required
-            rows={3}
-            className="w-full bg-white/[0.02] border border-white/[0.06] rounded-xl px-4 py-3 text-sm text-white/90 placeholder:text-white/20 resize-none transition-all duration-200"
-          />
-        </div>
+
 
 
 

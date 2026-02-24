@@ -395,8 +395,7 @@ council = DiagnosticCouncil(
 # Run diagnosis
 result = council.diagnose(
     patient_id="MRN-12345",
-    study_uid="1.2.840.113...",
-    clinical_question="Rule out pneumonia in immunocompromised patient"
+    study_uid="1.2.840.113..."
 )
 
 # Access results

@@ -64,7 +64,7 @@ _SYSTEM_PROMPT = """\
 You are a clinical safety critic reviewing an AI radiology diagnostic report.
 
 You are NOT diagnosing. Your only job is to detect:
-1. Overconfidence relative to uncertainty (KLE score)
+1. Overconfidence relative to uncertainty
 2. Missing reasonable differential diagnoses
 3. Logical gaps between findings and impression
 4. Unjustified certainty given the provided uncertainty score
