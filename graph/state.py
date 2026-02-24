@@ -104,6 +104,7 @@ class LiteratureCitation(BaseModel):
     relevance_summary: str = ""
     evidence_strength: str = Field("low", description="low/medium/high")
     source: str = "pubmed"  # pubmed, europepmc, semanticscholar
+    url: str = ""
 
 
 class LiteratureOutput(BaseModel):

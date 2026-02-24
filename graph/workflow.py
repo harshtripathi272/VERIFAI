@@ -628,7 +628,7 @@ def human_review_node(state: VerifaiState) -> dict:
     data_to_human = {
         "session_id": session_id,
         "diagnosis": final.diagnosis if final else None,
-        "confidence": final.calibrated_confidence if final else 0.0,
+        "confidence": final.calibrated_confidence if final else max(0.0, 1.0 - state.get("current_uncertainty", 0.5)),
         "deferred": final.deferred if final else False,
         "explanation": final.explanation if final else "",
         "heatmap_paths": rad.heatmap_paths if rad and getattr(rad, "heatmap_paths", None) else {},

@@ -396,6 +396,7 @@ async def get_workflow_status(session_id: str):
         return obj
 
     current_state = {
+        "image_path": state_values.get("image_path"),
         "radiologist": try_model_dump(state_values.get("radiologist_output")),
         "chexbert": try_model_dump(state_values.get("chexbert_output")),
         "historian": try_model_dump(state_values.get("historian_output")),

@@ -6,11 +6,14 @@ Main entrypoint for the diagnostic API.
 
 from contextlib import asynccontextmanager
 
+import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
 from app.api import router
+from agents.validator.agent import initialize_validator_tools
 
 # Import past mistakes router
 try:
@@ -29,6 +32,14 @@ async def lifespan(app: FastAPI):
     print(f"[VERIFAI] Starting up (ENV={settings.ENV}, MOCK={settings.MOCK_MODELS})")
     if PAST_MISTAKES_API_AVAILABLE:
         print("[VERIFAI] Past Mistakes API enabled")
+        
+    # Initialize validator models asynchronously
+    if not getattr(settings, "MOCK_MODELS", False):
+        try:
+            initialize_validator_tools()
+        except Exception as e:
+            print(f"[VERIFAI] Failed to initialize validator tools: {e}")
+            
     yield
     print("[VERIFAI] Shutting down...")
 
@@ -48,6 +59,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+os.makedirs("uploads", exist_ok=True)
+app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
 # Include API routes
 app.include_router(router, prefix="/api/v1")

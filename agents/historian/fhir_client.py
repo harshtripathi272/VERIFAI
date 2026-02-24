@@ -38,8 +38,7 @@ class FHIRClient:
         self.faiss_path = os.path.join(self.root_dir, FAISS_FILENAME)
         self.mapping_path = os.path.join(self.root_dir, MAPPING_FILENAME)
         
-        # Connect to DuckDB
-        self.con = duckdb.connect(self.db_path)
+        self.con = duckdb.connect(self.db_path, read_only=True)
         
         # Load FAISS Resources (Lazy load or eager? Eager for now)
         self.index = None
@@ -109,14 +108,14 @@ class FHIRClient:
 
     def _fetch_candidates_sql(self, patient_id: str) -> List[Dict]:
         """
-        Fetch all potentially relevant resources for the patient from DuckDB.
+        Fetch potentially relevant historical resources across ALL patients 
+        to build global disease pattern recognition context.
         """
         query = """
             SELECT id, resourceType, primary_code, normalized_summary, event_time, raw_json
             FROM fhir_resources
-            WHERE patient_ref = ?
         """
-        rows = self.con.execute(query, [patient_id]).fetchall()
+        rows = self.con.execute(query).fetchall()
         
         results = []
         for r in rows:

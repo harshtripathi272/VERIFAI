@@ -19,6 +19,7 @@ from agents.literature.tools import LITERATURE_TOOLS
 from agents.literature.prompt import SYSTEM_PROMPT
 from app.shared_model_loader import load_shared_medgemma, get_inference_lock
 from utils.inference import extract_json
+from graph.state import LiteratureOutput, LiteratureCitation
 
 # === OPTIMIZATION 1: Singleton Model Loader with Thread Safety ===
 _MODEL_CACHE: Optional[tuple] = None
@@ -157,9 +158,7 @@ class MedGemmaAgent:
             if len(unique_results) >= 10:
                 break
         
-        # Format response
-        summary = self._format_literature_summary(unique_results)
-        return summary
+        return unique_results
 
     def _format_literature_summary(self, results: list) -> str:
         """Format literature results into concise summary."""
@@ -182,25 +181,23 @@ class MedGemmaAgent:
         
         return "\n".join(summary_parts)
 
-    def run(self, user_query: str) -> str:
+    def run(self, user_query: str) -> LiteratureOutput:
         """
         Run literature search with optimizations.
-        
-        Strategy (Refactored):
-        1. Run parallel search across all 3 APIs (PubMed, Europe PMC, Semantic Scholar) to retrieve the raw documents.
-        2. Format those documents into a context block.
-        3. Perform a single pass through MedGemma to evaluate the evidence against the clinical findings.
         """
         print("[LiteratureAgent] Fetching raw literature from APIs...")
-        # Get the formatted string of the top papers directly from the APIs
-        literature_context = self.run_parallel_search(user_query)
+        unique_results = self.run_parallel_search(user_query)
         
-        if "No relevant literature found." in literature_context:
-            return "No relevant literature found. Unable to synthesize a conclusion."
-
+        if not unique_results:
+            return LiteratureOutput(
+                citations=[],
+                overall_evidence_strength="No relevant literature found. Unable to synthesize a conclusion."
+            )
+            
+        literature_context = self._format_literature_summary(unique_results)
         print("[LiteratureAgent] Synthesizing findings with MedGemma...")
         
-        # Build a single-shot synthesis prompt
+        # Build synthesis prompt
         synthesis_prompt = f"""
         You are MedGemma, an expert clinical researcher.
         
@@ -221,22 +218,60 @@ class MedGemmaAgent:
         """
 
         try:
-            # Single pass generation
             summary = self._generate(synthesis_prompt)
-            
-            # Combine the raw citations with the AI's thoughts
-            final_output = f"LITERATURE SYNTHESIS:\n{summary.strip()}\n\nSOURCES USED:\n{literature_context}"
-            return final_output
-            
+            final_strength = summary.strip()
         except Exception as e:
             print(f"[LiteratureAgent] Synthesis failed: {e}")
-            print("[LiteratureAgent] Falling back to returning raw API citations...")
-            return literature_context
+            final_strength = "Synthesis failed. Please review the raw citations below."
+
+        citations = []
+        for r in unique_results[:5]:
+            pmid = str(r.get('pmid', ''))
+            
+            # Europe PMC specific fallback
+            if 'pmid' not in r and 'id' in r:
+                pmid = str(r.get('id', ''))
+                
+            authors_list = r.get('authors', [])
+            if not isinstance(authors_list, list):
+                if isinstance(authors_list, str):
+                    authors_list = [authors_list]
+                else:
+                    authors_list = ["Unknown"]
+            elif not authors_list:
+                authors_list = ["Unknown"]
+                
+            # Parse year robustly
+            year_val = r.get('year')
+            try:
+                if year_val:
+                    year_val = int(str(year_val)[:4])
+                else:
+                    year_val = None
+            except:
+                year_val = None
+
+            citations.append(LiteratureCitation(
+                pmid=pmid,
+                title=str(r.get('title', 'Unknown')),
+                authors=authors_list,
+                journal=str(r.get('journal', 'Unknown')),
+                year=year_val,
+                relevance_summary=str(r.get('relevance_summary', str(r.get('snippet', ''))))[:500],
+                evidence_strength=str(r.get('evidence_strength', 'medium')).lower(),
+                source=str(r.get('source', 'unknown')),
+                url=str(r.get('url', f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/" if pmid else ""))
+            ))
+            
+        return LiteratureOutput(
+            citations=citations,
+            overall_evidence_strength=final_strength
+        )
 
 
 # === OPTIMIZATION 6: Query result caching ===
 @lru_cache(maxsize=100)
-def _cached_literature_search(query_hash: str, query: str) -> str:
+def _cached_literature_search(query_hash: str, query: str) -> LiteratureOutput:
     """Cache literature search results."""
     model, processor = load_medgemma()
     agent = MedGemmaAgent(model=model, processor=processor, max_steps=3)
