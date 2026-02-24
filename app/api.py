@@ -341,6 +341,13 @@ async def start_workflow(
     
     session_id = str(uuid.uuid4())
     
+    # Register SSE session for live streaming
+    try:
+        from app.streaming import register_session
+        register_session(session_id)
+    except Exception:
+        pass
+    
     # Launch in background
     background_tasks.add_task(_run_workflow_background, file_paths, views, patient_id, fhir_content, session_id)
     

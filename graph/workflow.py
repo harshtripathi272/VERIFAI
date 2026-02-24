@@ -34,6 +34,21 @@ try:
 except ImportError:
     _HAS_MONITORING = False
 
+# SSE streaming integration
+try:
+    from app.streaming import emit_agent_event as _emit_sse
+    _HAS_SSE = True
+except ImportError:
+    _HAS_SSE = False
+
+def _sse(state, agent, status, data=None, message=""):
+    """Helper to emit SSE event if streaming is available."""
+    if not _HAS_SSE:
+        return
+    sid = state.get("_session_id", "")
+    if sid:
+        _emit_sse(sid, agent, status, data, message)
+
 
 # Import agent nodes
 from agents.radiologist.agent import radiologist_node
@@ -94,19 +109,25 @@ def logged_radiologist_node(state: VerifaiState) -> dict:
     u_in = state.get("current_uncertainty", 0.50)
     print(f"  ⤷ Uncertainty IN  : {u_in:.2%}")
     print("="*60)
+    _sse(state, "radiologist", "started", message="Analyzing chest X-ray with MedGemma...")
     logger = _get_or_create_logger(state)
     result = radiologist_node(state)
     u_out = result.get("current_uncertainty", u_in)
     delta = u_out - u_in
-    print(f"[WORKFLOW] Radiologist completed - Generated {len(result.get('radiologist_output', {}).findings or '')} chars of findings")
+    findings_len = len(result.get('radiologist_output', {}).findings or '')
+    print(f"[WORKFLOW] Radiologist completed - Generated {findings_len} chars of findings")
     print(f"  ⤷ Uncertainty OUT : {u_out:.2%}  (Δ = {delta:+.3f})")
     try:
         logger.log_radiologist(state, result)
     except Exception as e:
         print(f"[DB LOG] Failed to log radiologist: {e}")
-    # Track metrics
     if _HAS_MONITORING:
         _metrics.agent_invocations.labels(agent_name="radiologist", status="success").inc()
+    _sse(state, "radiologist", "completed", {
+        "findings_chars": findings_len,
+        "uncertainty": round(u_out, 4),
+        "delta": round(delta, 4)
+    }, f"Radiologist completed — {findings_len} chars, uncertainty {u_out:.0%}")
     return result
 
 
@@ -117,11 +138,14 @@ def logged_chexbert_node(state: VerifaiState) -> dict:
     u_in = state.get("current_uncertainty", 0.50)
     print(f"  ⤷ Uncertainty IN  : {u_in:.2%}")
     print("="*60)
+    _sse(state, "chexbert", "started", message="Running structured pathology labeling...")
     logger = _get_or_create_logger(state)
     result = chexbert_node(state)
     chex_output = result.get('chexbert_output')
     u_out = result.get("current_uncertainty", u_in)
     delta = u_out - u_in
+    num_present = 0
+    num_uncertain = 0
     if chex_output:
         num_present = sum(1 for s in chex_output.labels.values() if s == "present")
         num_uncertain = sum(1 for s in chex_output.labels.values() if s == "uncertain")
@@ -134,10 +158,13 @@ def logged_chexbert_node(state: VerifaiState) -> dict:
     else:
         print("[WORKFLOW] CheXbert completed - No output")
     print(f"  ⤷ Uncertainty OUT : {u_out:.2%}  (Δ = {delta:+.3f})")
-    # Log trace entries from agent
     for t in result.get("trace", []):
         if "MUC" in t:
             print(f"  {t}")
+    _sse(state, "chexbert", "completed", {
+        "present": num_present, "uncertain": num_uncertain,
+        "uncertainty": round(u_out, 4)
+    }, f"CheXbert — {num_present} present, {num_uncertain} uncertain")
     return result
 
 
@@ -148,6 +175,7 @@ def logged_critic_node(state: VerifaiState) -> dict:
     u_in = state.get("current_uncertainty", 0.50)
     print(f"  ⤷ Uncertainty IN  : {u_in:.2%}")
     print("="*60)
+    _sse(state, "critic", "started", message="MedGemma semantic critic evaluating diagnosis...")
     logger = _get_or_create_logger(state)
     result = critic_node(state)
     critic_output = result.get('critic_output')
@@ -176,6 +204,11 @@ def logged_critic_node(state: VerifaiState) -> dict:
         logger.log_critic(state, result)
     except Exception as e:
         print(f"[DB LOG] Failed to log critic: {e}")
+    _sse(state, "critic", "completed", {
+        "safety_score": critic_output.safety_score if critic_output else 0,
+        "overconfident": critic_output.is_overconfident if critic_output else False,
+        "flags": len(critic_output.concern_flags) if critic_output else 0,
+    }, f"Critic — safety={critic_output.safety_score:.2f}, {len(critic_output.concern_flags)} flags" if critic_output else "Critic completed")
     return result
 
 
@@ -186,6 +219,7 @@ def logged_evidence_gathering_node(state: VerifaiState) -> dict:
     u_in = state.get("current_uncertainty", 0.50)
     print(f"  ⤷ Uncertainty IN  : {u_in:.2%}")
     print("="*60)
+    _sse(state, "evidence", "started", message="Gathering clinical history (FHIR) and literature (PubMed)...")
     logger = _get_or_create_logger(state)
     result = evidence_gathering_node(state)
     # === MUC: Compute IG for Historian ===
@@ -277,6 +311,13 @@ def logged_evidence_gathering_node(state: VerifaiState) -> dict:
         logger.log_evidence_gathering(state, result)
     except Exception as e:
         print(f"[DB LOG] Failed to log evidence_gathering: {e}")
+    hist = result.get('historian_output')
+    lit = result.get('literature_output')
+    _sse(state, "evidence", "completed", {
+        "historian_facts": len(hist.supporting_facts) if hist else 0,
+        "literature_found": lit is not None,
+        "uncertainty": round(u_current, 4),
+    }, f"Evidence gathered — {len(hist.supporting_facts) if hist else 0} clinical facts, literature {'found' if lit else 'unavailable'}")
     return result
 
 
@@ -287,6 +328,7 @@ def logged_debate_node(state: VerifaiState) -> dict:
     u_in = state.get("current_uncertainty", 0.50)
     print(f"  ⤷ Uncertainty IN  : {u_in:.2%}")
     print("="*60)
+    _sse(state, "debate", "started", message="Multi-agent debate starting — Critic vs Evidence Team...")
     logger = _get_or_create_logger(state)
     result = debate_node(state)
     debate_output = result.get('debate_output')
@@ -303,6 +345,11 @@ def logged_debate_node(state: VerifaiState) -> dict:
         logger.log_debate(state, result)
     except Exception as e:
         print(f"[DB LOG] Failed to log debate: {e}")
+    _sse(state, "debate", "completed", {
+        "rounds": len(debate_output.rounds) if debate_output else 0,
+        "consensus": debate_output.final_consensus if debate_output else False,
+        "confidence": round(debate_output.consensus_confidence, 3) if debate_output else 0,
+    }, f"Debate — {len(debate_output.rounds) if debate_output else 0} rounds, {'consensus reached' if debate_output and debate_output.final_consensus else 'no consensus'}")
     return result
 
 
@@ -318,6 +365,7 @@ def logged_validator_node(state: VerifaiState) -> dict:
     else:
         print("[WORKFLOW] Validator mode: ESCALATION (max rounds exceeded)")
     print("="*60)
+    _sse(state, "validator", "started", message="Validating diagnosis with RadGraph + Rules Engine...")
     result = validator_node(state)
     # === MUC: Compute Validator IG ===
     vout = result.get("validator_output") or {}
@@ -356,6 +404,10 @@ def logged_validator_node(state: VerifaiState) -> dict:
 
     # Store updated uncertainty
     result["current_uncertainty"] = val_ig.system_uncertainty_after
+    _sse(state, "validator", "completed", {
+        "recommendation": recommendation,
+        "uncertainty": round(val_ig.system_uncertainty_after, 4),
+    }, f"Validator — {recommendation}, uncertainty {val_ig.system_uncertainty_after:.0%}")
     return result
 
 
@@ -366,6 +418,7 @@ def logged_finalize_node(state: VerifaiState) -> dict:
     u_in = state.get("current_uncertainty", 0.50)
     print(f"  ⤷ Uncertainty IN  : {u_in:.2%}")
     print("="*60)
+    _sse(state, "finalize", "started", message="Generating final diagnosis...")
     logger = _get_or_create_logger(state)
     result = finalize_node(state)
     final_dx = result.get("final_diagnosis")
@@ -383,6 +436,14 @@ def logged_finalize_node(state: VerifaiState) -> dict:
         _cleanup_logger(logger.session_id)
     except Exception as e:
         print(f"[DB LOG] Failed to log finalize: {e}")
+    if final_dx:
+        _sse(state, "finalize", "workflow_complete", {
+            "diagnosis": final_dx.diagnosis[:120] if final_dx.diagnosis else None,
+            "confidence": round(final_dx.calibrated_confidence, 3),
+            "deferred": final_dx.deferred,
+        }, f"Diagnosis: {final_dx.diagnosis[:60] if final_dx.diagnosis else 'None'} ({final_dx.calibrated_confidence:.0%})")
+    else:
+        _sse(state, "finalize", "workflow_complete", {}, "Workflow completed")
     return result
 
 
