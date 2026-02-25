@@ -118,6 +118,7 @@ def logged_radiologist_node(state: VerifaiState) -> dict:
     findings_len = len(result.get('radiologist_output', {}).findings or '')
     print(f"[WORKFLOW] Radiologist completed - Generated {findings_len} chars of findings")
     print(f"  ⤷ Uncertainty OUT : {u_out:.2%}  (Δ = {delta:+.3f})")
+    result["uncertainty_history"] = [{"agent": "radiologist", "system_uncertainty": round(u_out, 4)}]
     try:
         logger.log_radiologist(state, result)
     except Exception as e:
@@ -163,6 +164,7 @@ def logged_chexbert_node(state: VerifaiState) -> dict:
     for t in result.get("trace", []):
         if "MUC" in t:
             print(f"  {t}")
+    result["uncertainty_history"] = [{"agent": "chexbert", "system_uncertainty": round(u_out, 4)}]
     _sse(state, "chexbert", "completed", {
         "present": num_present, "uncertain": num_uncertain,
         "uncertainty": round(u_out, 4)
@@ -203,6 +205,7 @@ def logged_critic_node(state: VerifaiState) -> dict:
     else:
         print("[WORKFLOW] Critic completed - No output")
     print(f"  ⤷ Uncertainty OUT : {u_out:.2%}  (Δ = {delta:+.3f})")
+    result["uncertainty_history"] = [{"agent": "critic", "system_uncertainty": round(u_out, 4)}]
     try:
         logger.log_critic(state, result)
     except Exception as e:
@@ -309,6 +312,7 @@ def logged_evidence_gathering_node(state: VerifaiState) -> dict:
 
     # Store updated uncertainty in result
     result["current_uncertainty"] = u_current
+    result["uncertainty_history"] = [{"agent": "evidence", "system_uncertainty": round(u_current, 4)}]
     print(f"  Uncertainty OUT : {u_current:.2%}  (Δ = {u_current - u_in:+.3f})")
 
     try:
@@ -346,6 +350,7 @@ def logged_debate_node(state: VerifaiState) -> dict:
         print(f"  Confidence   : {debate_output.consensus_confidence:.2%}")
         print(f"  Total Δ      : {debate_output.total_confidence_adjustment:+.3f}")
     print(f"  ⤷ Uncertainty OUT : {u_out:.2%}  (Δ = {delta:+.3f})")
+    result["uncertainty_history"] = [{"agent": "debate", "system_uncertainty": round(u_out, 4)}]
     try:
         logger.log_debate(state, result)
     except Exception as e:
@@ -410,6 +415,7 @@ def logged_validator_node(state: VerifaiState) -> dict:
 
     # Store updated uncertainty
     result["current_uncertainty"] = val_ig.system_uncertainty_after
+    result["uncertainty_history"] = [{"agent": "validator", "system_uncertainty": round(val_ig.system_uncertainty_after, 4)}]
     _sse(state, "validator", "completed", {
         "recommendation": recommendation,
         "uncertainty": round(val_ig.system_uncertainty_after, 4),

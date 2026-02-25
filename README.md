@@ -279,7 +279,35 @@ Doctor approves or rejects with feedback. Rejected cases re-enter the pipeline a
 
 ---
 
-## Prerequisites
+## System Entropy Cascade (Monotonic Uncertainty Cascade — MUC)
+
+Every agent updates a single global value `current_uncertainty ∈ [0.05, 0.95]` using Bayesian log-odds. This is the authoritative system entropy — it is **not** per-agent; it cascades across the entire pipeline.
+
+**Core update rule:**
+
+```
+IG(k) = α · confidence(k) + β · alignment(k) + γ · direction(k)
+U_sys(k) = clamp( U_sys(k-1) − IG(k), 0.05, 0.95 )
+```
+
+`U_sys` starts at 1.0 (maximum uncertainty) and decreases as each agent provides confirming evidence. Contradictions (direction = −1) or low confidence reduce IG, keeping entropy high.
+
+| Agent | Confidence Signal | Alignment Signal | Notes |
+|-------|-------------------|------------------|-------|
+| Radiologist | Token KLE score | MedSigLIP class prob | Initializes cascade |
+| CheXbert | Label Shannon entropy | % matching Radiologist | Label cross-check |
+| Historian | FHIR fact consensus | Supporting vs. contradicting | Raises U if contradictions found |
+| Literature | Evidence rating | Paper stance vs. impression | Multi-DB citation |
+| Critic | Safety score | Certainty-uncertainty gap | Past mistakes penalty |
+| Debate | Dempster-Shafer mass | Consensus reached? | DS fusion per round |
+| Validator | CXR-RePaiR similarity | RadGraph entity match | Final gate |
+
+**Uncertainty history in LLM prompts** — The last **2** `{agent, system_uncertainty}` values are injected into the LLM Critic and Historian prompts. If the latest value is _higher_ than the previous (i.e. entropy increased), a ⚠️ spike warning is added: `"System uncertainty INCREASED after '{agent}' — investigate contradictions from that stage."` This tells the LLM to look specifically at which agent's output raised doubt.
+
+**Uncertainty graph in UI** — The results page renders a live SVG line chart of `uncertainty_history` (X = agent names, Y = entropy 0–1) so clinicians can see how confidence evolved over the pipeline.
+
+---
+
 
 | Requirement | Minimum | Recommended |
 |-------------|---------|-------------|

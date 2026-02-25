@@ -288,7 +288,8 @@ def _run_workflow_background(file_paths: List[str], views: List[str], patient_id
             "final_diagnosis": None,
             "trace": [f"[INIT] Processing async, Patient: {patient_id or 'N/A'}"],
             "is_feedback_iteration": False,
-            "doctor_feedback": None
+            "doctor_feedback": None,
+            "uncertainty_history": []
         }
         
         # Thread config for memory checkpointer
@@ -390,7 +391,8 @@ async def get_workflow_status(session_id: str):
         "critic": try_model_dump(state_values.get("critic_output")),
         "debate": try_model_dump(state_values.get("debate_output")),
         "routing": state_values.get("routing_decision"),
-        "trace": state_values.get("trace", [])
+        "trace": state_values.get("trace", []),
+        "uncertainty_history": state_values.get("uncertainty_history", [])
     }
 
     # If the graph is not running and has next tasks, it's either suspended or interrupted

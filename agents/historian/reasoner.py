@@ -81,7 +81,7 @@ def summarize_fhir_evidence(evidence: dict) -> str:
     return "\n".join(lines) if lines else "No relevant historical records found."
 
 
-def reason_over_fhir(hypothesis: str, evidence: dict, current_fhir: dict = None) -> HistorianOutput:
+def reason_over_fhir(hypothesis: str, evidence: dict, current_fhir: dict = None, uncertainty_history: list = None) -> HistorianOutput:
 
     if settings.MOCK_MODELS:
         return HistorianOutput(
@@ -113,7 +113,22 @@ Historical FHIR Context (Patient's past patterns for this hypothesis):
 
 Current Patient FHIR Report (Latest data):
 {current_fhir_summary}
+"""    
+    # === Uncertainty spike: compact with reasoning guidance ===
+    if uncertainty_history and len(uncertainty_history) >= 2:
+        prev_u = uncertainty_history[-2]["system_uncertainty"]
+        latest_u = uncertainty_history[-1]["system_uncertainty"]
+        if latest_u > prev_u:
+            spike_agent = uncertainty_history[-1]["agent"]
+            prompt += (
+                f"\n⚠️ SPIKE: System entropy rose after '{spike_agent}' ({prev_u:.3f}→{latest_u:.3f}). "
+                "Reasoning: that agent's output contradicted the hypothesis, increasing doubt. "
+                "Action: (1) prioritize searching for contradicting FHIR facts that explain the spike, "
+                "(2) do NOT leave contradicting_facts empty if spike is present, "
+                "(3) lean confidence_adjustment negative.\n"
+            )
 
+    prompt += f"""
 Task:
 Determine whether the combination of historical patterns and the current report SUPPORTS or CONTRADICTS the hypothesis. Use the historical context to interpret the current report.
 

@@ -27,6 +27,75 @@ const AGENT_ICONS: Record<string, string> = {
   finalize: "📋",
 };
 
+// === Uncertainty Cascade Graph Component ===
+// Pure SVG — no external chart library.
+// Data points: { agent: string, system_uncertainty: number }[]
+function UncertaintyGraph({ data }: { data: { agent: string; system_uncertainty: number }[] }) {
+  if (!data || data.length === 0) return null;
+  const W = 520;
+  const H = 120;
+  const PAD_L = 38;
+  const PAD_R = 16;
+  const PAD_T = 12;
+  const PAD_B = 36;
+  const chartW = W - PAD_L - PAD_R;
+  const chartH = H - PAD_T - PAD_B;
+  const n = data.length;
+  // Each data point maps to an x-position
+  const xOf = (i: number) => PAD_L + (n === 1 ? chartW / 2 : (i / (n - 1)) * chartW);
+  // Y-axis: 0 at bottom, 1.0 at top
+  const yOf = (u: number) => PAD_T + chartH * (1 - Math.max(0, Math.min(1, u)));
+  // Build polyline points string
+  const points = data.map((d, i) => `${xOf(i)},${yOf(d.system_uncertainty)}`).join(" ");
+  // Y-axis gridlines at 0.25, 0.5, 0.75, 1.0
+  const gridYs = [0.25, 0.5, 0.75, 1.0];
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ maxHeight: 130 }}>
+      {/* Grid lines */}
+      {gridYs.map((g) => (
+        <g key={g}>
+          <line
+            x1={PAD_L} y1={yOf(g)} x2={W - PAD_R} y2={yOf(g)}
+            stroke="rgba(255,255,255,0.06)" strokeWidth={1}
+          />
+          <text x={PAD_L - 4} y={yOf(g) + 4} textAnchor="end" fontSize={9} fill="rgba(255,255,255,0.25)">
+            {g.toFixed(2)}
+          </text>
+        </g>
+      ))}
+      {/* Uncertainty line */}
+      <polyline
+        points={points}
+        fill="none"
+        stroke="#00E5FF"
+        strokeWidth={1.5}
+        strokeLinejoin="round"
+        strokeLinecap="round"
+        opacity={0.85}
+      />
+      {/* Dots + agent labels */}
+      {data.map((d, i) => (
+        <g key={i}>
+          <circle cx={xOf(i)} cy={yOf(d.system_uncertainty)} r={3} fill="#00E5FF" opacity={0.9} />
+          <text
+            x={xOf(i)} y={H - 4}
+            textAnchor={i === 0 ? "start" : i === n - 1 ? "end" : "middle"}
+            fontSize={9} fill="rgba(255,255,255,0.35)"
+          >
+            {d.agent}
+          </text>
+          <text
+            x={xOf(i)} y={yOf(d.system_uncertainty) - 7}
+            textAnchor="middle" fontSize={9} fill="rgba(0,229,255,0.7)"
+          >
+            {d.system_uncertainty.toFixed(3)}
+          </text>
+        </g>
+      ))}
+    </svg>
+  );
+}
+
 export default function ResultsPage({ params }: { params: { id: string } }) {
   const [activeTab, setActiveTab] = useState("visual");
   const [workflowInfo, setWorkflowInfo] = useState<WorkflowStatusResponse | null>(null);
@@ -264,6 +333,12 @@ export default function ResultsPage({ params }: { params: { id: string } }) {
 
   const isRunning = workflowInfo.status === "running";
 
+  // Uncertainty history from state (rolling last-2, shown as full list from current_state)
+  const uncertaintyHistory: { agent: string; system_uncertainty: number }[] =
+    workflowInfo?.current_state?.uncertainty_history ||
+    workflowInfo?.final_result?.uncertainty_history ||
+    [];
+
   // --- Real Logic variables for completed or suspended --- //
   let finalDx = "Pending Diagnosis";
   let confidence = 0;
@@ -498,7 +573,18 @@ export default function ResultsPage({ params }: { params: { id: string } }) {
         </div>
       )}
 
-      {/* If Running, Show the Live Event Feed Above Layout */}
+      {/* === System Entropy Cascade Chart === */}
+      {uncertaintyHistory.length > 0 && (
+        <div className="mb-8 rounded-2xl border border-white/[0.06] bg-white/[0.02] p-6 animate-fadeInUp-delay-1">
+          <div className="flex items-center gap-2 mb-5">
+            <Activity className="h-4 w-4 text-[#00E5FF]" />
+            <h3 className="text-sm font-semibold text-white/70 uppercase tracking-[0.12em]">System Entropy Cascade</h3>
+            <span className="ml-auto text-[11px] text-white/25">per-agent MUC update</span>
+          </div>
+          <UncertaintyGraph data={uncertaintyHistory} />
+        </div>
+      )}
+
       {isRunning && (
         <div className="mb-8 p-6 rounded-2xl border border-[#00E5FF]/20 bg-black/40 shadow-inner">
           <h3 className="text-[#00E5FF] font-semibold flex items-center gap-2 mb-4">

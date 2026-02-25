@@ -153,7 +153,8 @@ class MedGemmaCritic:
         uncertainty: float,
         historian_output=None,
         literature_output=None,
-        doctor_feedback=None
+        doctor_feedback=None,
+        uncertainty_history: list = None,
     ) -> str:
         """Build a minimal user prompt — only the essentials the model needs.
         
@@ -194,6 +195,24 @@ class MedGemmaCritic:
 
         if context_notes:
             parts.append("Context: " + "; ".join(context_notes) + ".")
+
+        # === System Uncertainty History (compact + reasoning) ===
+        if uncertainty_history and len(uncertainty_history) >= 1:
+            hist_str = " → ".join(f"{e['agent']}={e['system_uncertainty']:.3f}" for e in uncertainty_history[-2:])
+            parts.append(f"Entropy cascade: {hist_str}")
+            # Spike: latest > previous → tell model HOW to reason about it
+            if len(uncertainty_history) >= 2:
+                prev_u = uncertainty_history[-2]["system_uncertainty"]
+                latest_u = uncertainty_history[-1]["system_uncertainty"]
+                if latest_u > prev_u:
+                    spike_agent = uncertainty_history[-1]["agent"]
+                    parts.append(
+                        f"⚠️ SPIKE: Entropy rose after '{spike_agent}' ({prev_u:.3f}→{latest_u:.3f}). "
+                        "Reasoning: that agent's output contradicted the hypothesis, increasing system doubt. "
+                        "Action: (1) raise semantic_risk_score proportionally, "
+                        "(2) check if '{spike_agent}' findings conflict with the impression — if so, note in justification_gap, "
+                        "(3) consider adding differentials that explain the contradiction."
+                    )
 
         if doctor_feedback:
             parts.append("\n=========================================")
@@ -292,9 +311,10 @@ class MedGemmaCritic:
         findings: str,
         impression: str,
         kle_uncertainty: float,
-        historian_output=None,  # NEW: Clinical history context
-        literature_output=None,  # NEW: Literature evidence
-        doctor_feedback=None     # NEW: Human-in-the-loop context
+        historian_output=None,
+        literature_output=None,
+        doctor_feedback=None,
+        uncertainty_history: list = None,
     ) -> Optional[LLMCriticOutput]:
         """
         Run semantic critique on a radiology report with enriched context.
@@ -333,7 +353,8 @@ class MedGemmaCritic:
         try:
             user_prompt = self._build_user_prompt(
                 findings, impression, kle_uncertainty,
-                historian_output, literature_output, doctor_feedback
+                historian_output, literature_output, doctor_feedback,
+                uncertainty_history,
             )
             raw_output = self._run_inference(user_prompt)
             print(raw_output)
