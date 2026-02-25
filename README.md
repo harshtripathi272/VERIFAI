@@ -187,7 +187,7 @@ VERIFAI/
 │   ├── api.py                   # REST endpoints (start, status, resume, SSE)
 │   ├── config.py                # Settings (models, thresholds, feature flags)
 │   ├── streaming.py             # SSE event bus + streaming endpoint
-│   ├── shared_model_loader.py   # Thread-safe MedGemma singleton (27GB→9GB VRAM)
+│   ├── shared_model_loader.py   # Thread-safe MedGemma singleton (27GB→12GB VRAM)
 │   └── past_mistakes_routes.py  # Past mistakes CRUD API endpoints
 │
 ├── frontend/                    # Next.js 15 dashboard
