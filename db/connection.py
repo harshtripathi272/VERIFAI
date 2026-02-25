@@ -43,7 +43,8 @@ CREATE TABLE IF NOT EXISTS workflow_sessions (
     was_deferred        INTEGER DEFAULT 0,
     deferral_reason     TEXT,
     total_agents_invoked INTEGER DEFAULT 0,
-    error_message       TEXT
+    error_message       TEXT,
+    uncertainty_cascade TEXT                     -- JSON array: [{agent, system_uncertainty}, ...] full MUC cascade audit trail
 );
 
 -- ============================================================
@@ -358,6 +359,19 @@ def init_db(db_path: str = None):
             
             # Create all indexes
             conn.executescript(INDEXES_SQL)
+
+            # ── Migrations for existing DBs ──────────────────────────────
+            # Idempotent: ALTER TABLE is wrapped in try/except since SQLite
+            # has no IF NOT EXISTS for columns prior to v3.37.
+            try:
+                conn.execute(
+                    "ALTER TABLE workflow_sessions ADD COLUMN "
+                    "uncertainty_cascade TEXT"
+                )
+                conn.commit()
+                print("[VERIFAI DB] Migration: added 'uncertainty_cascade' column")
+            except Exception:
+                pass  # column already exists — no-op
             
             conn.commit()
             print(f"[VERIFAI DB] Database initialized at: {path}")

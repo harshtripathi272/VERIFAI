@@ -481,6 +481,8 @@ class AgentLogger:
         t0 = time.time()
         final_dx = result.get("final_diagnosis")
         trace = result.get("trace", [])
+        # Persist the full uncertainty cascade for the audit trail
+        uncertainty_cascade = state.get("uncertainty_cascade") or state.get("uncertainty_history", [])
 
         with get_db() as conn:
             inv_id = self._start_invocation(conn, "finalize")
@@ -502,6 +504,16 @@ class AgentLogger:
                                            output_summary=self._safe_json(final_dx),
                                            trace_entries=trace, started_at=t0)
                 self._log_trace_entries(conn, "finalize", trace)
+
+                # Write uncertainty cascade to workflow_sessions immediately (non-critical)
+                if uncertainty_cascade:
+                    try:
+                        conn.execute(
+                            "UPDATE workflow_sessions SET uncertainty_cascade=? WHERE session_id=?",
+                            (json.dumps(uncertainty_cascade, default=str), self.session_id)
+                        )
+                    except Exception as uc_err:
+                        print(f"[DB LOG] Could not write uncertainty_cascade: {uc_err}")
 
             except Exception as e:
                 self._complete_invocation(conn, inv_id, "error",
