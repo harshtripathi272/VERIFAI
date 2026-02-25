@@ -92,10 +92,11 @@ class CriticModel:
         findings: str,
         impression: str,
         current_uncertainty: float,
-        chexbert_output=None,   # ✅ NEW
+        chexbert_output=None,
         historian_output=None,
         literature_output=None,
-        doctor_feedback=None    # ✅ NEW: Human in the loop context
+        doctor_feedback=None,
+        uncertainty_history: list = None,
         ) -> tuple[bool, list[str], str | None, float]:
 
         """
@@ -426,10 +427,11 @@ class CriticModel:
                 llm_output = medgemma_critic.critique(
                     findings=findings,
                     impression=impression,
-                    kle_uncertainty=current_uncertainty,  # param name kept for LLM critic compat
+                    kle_uncertainty=current_uncertainty,
                     historian_output=historian_output,
                     literature_output=literature_output,
-                    doctor_feedback=doctor_feedback
+                    doctor_feedback=doctor_feedback,
+                    uncertainty_history=uncertainty_history,
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(

@@ -64,10 +64,11 @@ def critic_node(state: VerifaiState) -> dict:
         findings=findings,
         impression=impression,
         current_uncertainty=current_uncertainty,
-        chexbert_output=chexbert_output,   # ✅ NEW
+        chexbert_output=chexbert_output,
         historian_output=hist_output,
         literature_output=lit_output,
-        doctor_feedback=doctor_feedback
+        doctor_feedback=doctor_feedback,
+        uncertainty_history=state.get("uncertainty_history", []),
     )
     
     # Unpack result

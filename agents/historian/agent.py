@@ -194,7 +194,8 @@ def historian_node(state: VerifaiState) -> dict:
         reasoning_output = reason_over_fhir(
             hypothesis=hypothesis_name,
             evidence=evidence,
-            current_fhir=current_fhir
+            current_fhir=current_fhir,
+            uncertainty_history=state.get("uncertainty_history", []),
         )
 
         # ---------------------------------------------------

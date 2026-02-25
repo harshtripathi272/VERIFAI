@@ -16,6 +16,13 @@ def append_trace(left: list[str], right: list[str]) -> list[str]:
     return left + right
 
 
+def rolling_uncertainty_history(left: list, right: list) -> list:
+    """Reducer: merges and keeps only last 2 system uncertainty entries.
+    Each entry: {"agent": str, "system_uncertainty": float}
+    """
+    combined = (left if isinstance(left, list) else []) + (right if isinstance(right, list) else [])
+    return combined[-2:]  # Always keep max 2 most recent
+
 
 # DOMAIN MODELS (Pydantic for validation)
 class VisualFinding(BaseModel):
@@ -209,6 +216,9 @@ class VerifaiState(TypedDict):
     # radiologist_kle_uncertainty is a legacy alias kept solely for DB logger
     # compatibility (column name in radiologist_logs / critic_logs is unchanged)
     radiologist_kle_uncertainty: Optional[float]  # Legacy alias — DB compat only
+    # Rolling window of last 2 system uncertainty values (agent name + value)
+    # Used by LLM agent prompts for spike detection and by the UI for the entropy graph
+    uncertainty_history: Annotated[List[dict], rolling_uncertainty_history]
     
     # === Final Result ===
     final_diagnosis: Optional[FinalDiagnosis]
