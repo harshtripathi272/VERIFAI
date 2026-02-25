@@ -129,7 +129,7 @@ VERIFAI orchestrates **multiple specialized AI agents** through a LangGraph stat
 - **LRP Heatmaps** — Transformer explainability via Chefer et al. (CVPR 2021) Layer-wise Relevance Propagation adapted for SigLIP
 - **Observability Dashboard** — Prometheus-style metrics (latency, confidence, safety scores)
 - **Evidence Report Generator** — Rich HTML reports with citations, heatmaps, and audit trail
-- **Edge Deployable** — Runs on a single consumer GPU (12 GB+ VRAM) with optional 4-bit quantization
+- **Edge Deployable** — Runs on a single consumer GPU (12-16 GB VRAM) with optional 4-bit quantization
 
 ---
 
@@ -258,7 +258,7 @@ Retrieves patient history from FHIR bundles, identifies supporting and contradic
 Searches 3 databases for relevant evidence. Adaptive rate limiter respects NCBI's 3 req/sec policy. Returns ranked citations with evidence strength via shared MedGemma.
 
 **5. Critic** — `Rule-based linguistic analysis` + `Historian/Literature challenge` + `Past Mistakes DuckDB` + *(optional)* `LLM Semantic Critic`
-Runs 4-stage adversarial evaluation: (1) compares linguistic certainty vs. KLE uncertainty, (2) penalizes unaddressed contradicting FHIR facts, (3) flags omitted differentials from literature, (4) retrieves similar past diagnostic errors from DuckDB/Supabase (HNSW vector search + neural re-ranking). Doctor-rejected diagnoses are auto-inserted into this database for future retrieval. Optional 5th stage uses MedGemma for deeper semantic analysis.
+Runs 4-stage adversarial evaluation: (1) compares linguistic certainty vs. KLE uncertainty, (2) penalizes unaddressed contradicting FHIR facts, (3) flags omitted differentials from literature, (4) retrieves similar past diagnostic errors from DuckDB/Supabase (HNSW vector search + neural re-ranking). Doctor-rejected diagnoses (where agents might have hallucinated) are auto-inserted into this database for future retrieval so that the system learns from its mistakes. Optional 5th stage uses MedGemma for deeper semantic analysis.
 
 **6. Debate** — `Dempster-Shafer fusion` + `LangGraph` orchestration
 Up to 3 rounds of structured debate between Critic, Historian, and Literature. Each round adjusts uncertainty via Dempster-Shafer evidence fusion until consensus or max rounds.
@@ -283,7 +283,7 @@ Doctor approves or rejects with feedback. Rejected cases re-enter the pipeline a
 |-------------|---------|-------------|
 | **Python** | 3.10 | 3.10 |
 | **CUDA** | 12.1 | 12.6 |
-| **GPU VRAM** | 12 GB | 24+ GB |
+| **GPU VRAM** | 12-16 GB | 24+ GB |
 | **RAM** | 16 GB | 32 GB |
 | **Disk** | 20 GB (models) | 50 GB |
 | **Node.js** | 18 | 20+ |
@@ -482,7 +482,7 @@ python qlora_medgemma.py \
 - **Dataset:** MIMIC-CXR JSONL with multi-view support (`<PA>`, `<AP>`, `<LATERAL>` tokens)
 - **Output:** Structured JSON (`{"findings": "...", "impression": "..."}`) via chat template
 
-**Requirements:** 12 GB+ VRAM (4-bit base + LoRA adapters + activations)
+**Requirements:** 12-16 GB VRAM (4-bit base + LoRA adapters + activations)
 
 **Dataset format:** Directory containing subdirectories per patient, each with:
 - `study1/` containing `.jpg` chest X-ray images
