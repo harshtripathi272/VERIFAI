@@ -243,49 +243,36 @@ VERIFAI/
 
 ---
 
-## Deep Dive: How Key Systems Work
+## Deep Dive: Agent Pipeline & Tools
 
-### Critic: 4-Stage Adversarial Evaluation + Past Mistakes Tool
+**1. Radiologist** — `MedGemma 4B-IT` (4-bit NF4 quantized) + `MedSigLIP` classifier + `Chefer LRP` heatmaps
+Generates structured JSON (`{findings, impression}`) from CXR images using MedGemma VLM with custom `StopOnCloseBrace` stopping criteria. Separately, a fine-tuned MedSigLIP classifier (frozen SigLIP backbone + trainable head) predicts 14 disease probabilities. For classes > 0.5, Layer-wise Relevance Propagation (Chefer CVPR 2021) generates attribution heatmaps overlaid on the CXR. Multi-view support via `<PA>`, `<AP>`, `<LATERAL>` tokens.
 
-The Critic agent (`agents/critic/model.py`) runs a **4-stage pipeline** to detect overconfidence and hallucinations:
+**2. CheXbert** — `CheXbert BERT` model
+Extracts 14 structured pathology labels (present/absent/uncertain) from the Radiologist's free-text report. Acts as an independent cross-check — catches text hallucinations the VLM might produce.
 
-1. **Rule-Based Linguistic Analysis** — Regex-based detection of high-certainty phrases ("definite", "diagnostic of") vs. hedging language ("possible", "may", "consider"). Compares linguistic certainty score against KLE epistemic uncertainty to flag overconfidence.
+**3. Historian** — `FHIR R4 client` + `DuckDB` + `FAISS` vector search + `Clinical Reasoner`
+Retrieves patient history from FHIR bundles, identifies supporting and contradicting clinical facts, and synthesizes a clinical reasoning summary via shared MedGemma.
 
-2. **Historian Challenge** — When FHIR patient history contains contradicting clinical facts (e.g., no prior lung disease but impression says "chronic pneumonia"), the Critic applies proportional safety penalties (5% per contradiction, capped at 20%).
+**4. Literature** — `PubMed E-Utilities` + `Europe PMC REST` + `Semantic Scholar API` + `Rate Limiter`
+Searches 3 databases for relevant evidence. Adaptive rate limiter respects NCBI's 3 req/sec policy. Returns ranked citations with evidence strength via shared MedGemma.
 
-3. **Literature Challenge** — When published evidence suggests alternative diagnoses but the impression omits differentials, the Critic flags the gap.
+**5. Critic** — `Rule-based linguistic analysis` + `Historian/Literature challenge` + `Past Mistakes DuckDB` + *(optional)* `LLM Semantic Critic`
+Runs 4-stage adversarial evaluation: (1) compares linguistic certainty vs. KLE uncertainty, (2) penalizes unaddressed contradicting FHIR facts, (3) flags omitted differentials from literature, (4) retrieves similar past diagnostic errors from DuckDB/Supabase (HNSW vector search + neural re-ranking). Doctor-rejected diagnoses are auto-inserted into this database for future retrieval. Optional 5th stage uses MedGemma for deeper semantic analysis.
 
-4. **Past Mistakes Memory Retrieval** — The Critic queries a DuckDB database (with HNSW vector index) or Supabase pgvector to find historically similar diagnostic errors. This is how the model learns from its mistakes:
-   - When a doctor **rejects** a diagnosis during Human-in-the-Loop review, the rejected diagnosis is **automatically inserted** into the past mistakes database (`db/auto_detect_mistakes.py`).
-   - On subsequent cases, the Critic generates a case embedding via SentenceTransformers, then retrieves the top-K most similar past mistakes using hybrid search (structured field filtering + cosine similarity).
-   - Results are **neurally re-ranked** (`db/rerank_mistakes.py`) using temporal decay (recent mistakes weighted higher), clinical relevance scoring, and optionally MedGemma semantic analysis.
-   - If high-severity past mistakes are found (severity ≥ 4), the Critic **forces overconfidence=true** and applies significant safety penalties.
+**6. Debate** — `Dempster-Shafer fusion` + `LangGraph` orchestration
+Up to 3 rounds of structured debate between Critic, Historian, and Literature. Each round adjusts uncertainty via Dempster-Shafer evidence fusion until consensus or max rounds.
 
-Optional **Stage 5: MedGemma LLM Semantic Critic** (`agents/critic/llm_critic.py`) — gated behind `ENABLE_LLM_CRITIC` feature flag, only runs when uncertainty > 0.3 or rule-based analysis already flagged overconfidence. Uses shared MedGemma to detect justification gaps, missing differentials, and semantic risk.
+**7. Validator** — `CXR-RePaiR` (MedSigLIP FAISS retrieval) + `RadGraph` NLP entity matching + `Rules Engine`
+Three-layer quality gate: (1) visual retrieval of similar historical CXRs from MIMIC-CXR FAISS index, (2) RadGraph extracts clinical entities and compares against retrieved reports, (3) clinical rules engine checks for critical finding patterns. Outputs: `FINALIZE` / `FINALIZE_LOW_CONFIDENCE` / `FLAG_FOR_HUMAN`.
 
-### LRP Heatmaps: Chefer et al. (CVPR 2021)
+**8. Finalize** — `SHA-256` reproducibility hash + `Pydantic` models
+Builds final diagnosis with confidence score and a cryptographic hash of (image + FHIR + config) for audit trail.
 
-Heatmaps are generated using **Layer-wise Relevance Propagation**, NOT Grad-CAM++. The implementation (`agents/radiologist/lrp.py`) adapts Chefer et al.'s transformer attribution:
+**9. Human Review** — `LangGraph interrupt()` + `Past Mistakes auto-insertion`
+Doctor approves or rejects with feedback. Rejected cases re-enter the pipeline at the Critic node with full context preserved. Rejected diagnoses are automatically saved to the Past Mistakes database for future learning.
 
-1. Forward pass through frozen MedSigLIP with `output_attentions=True` (requires `attn_implementation="eager"`)
-2. Backward pass to compute gradients of the target class logit w.r.t. attention maps
-3. Iterative relevance propagation through transformer layers using attention × gradient products
-4. Final heatmap computed as column mean of the accumulated relevance matrix
-5. Resized to 448×448, colored with Jet colormap, overlaid on original CXR (50% blend)
-
-Heatmaps are generated only for classes with probability > 0.5 from the MedSigLIP classifier.
-
-### Shared Model Loader: 27 GB → 9 GB VRAM
-
-Three agents (Historian, Literature, LLM Critic) all use MedGemma 4B for text inference. Without sharing, this would load 3 copies (~27 GB). The `shared_model_loader.py` implements a **thread-safe singleton** with double-checked locking, reducing total VRAM to ~9 GB. A global inference lock ensures only one agent calls `model.generate()` at a time.
-
-### MedGemma Radiologist: Structured JSON Generation
-
-The Radiologist loads MedGemma in 4-bit NF4 quantization (BitsAndBytes) with custom stopping criteria:
-- A `StopOnCloseBrace` callback monitors decoded output and halts generation at the first `}` character
-- Post-generation safety truncation ensures output ends at the last `}`
-- Robust JSON extraction (`utils/inference.py`) handles malformed LLM output
-- Multi-view support via special tokens (`<PA>`, `<AP>`, `<LATERAL>`) embedded in the prompt
+**Cross-cutting: Shared Model Loader** — Historian, Literature, and LLM Critic share a single MedGemma 4B instance via thread-safe singleton (`shared_model_loader.py`), reducing VRAM from ~27 GB to ~9 GB.
 
 
 ---
@@ -477,14 +464,14 @@ VERIFAI includes a QLoRA fine-tuning pipeline for adapting MedGemma to generate 
 Memory-efficient fine-tuning using 4-bit NF4 quantization + Low-Rank Adaptation via `SFTTrainer`:
 
 ```bash
-# Overfit sanity check (50 samples x 5 epochs — verifies training works)
-python qlora_medgemma.py --mode overfit
-
-# Full training (all studies, 1 epoch)
-python qlora_medgemma.py --mode full
-
-# Custom run
-python qlora_medgemma.py --mode full --epochs 3 --version v2 --max_images 2
+python qlora_medgemma.py \
+  --dataset_path ../dataset/med/official_data_iccv_final \
+  --output_dir ../dataset/med/fine_tuned_model/v1 \
+  --num_epochs 3 \
+  --batch_size 2 \
+  --learning_rate 2e-4 \
+  --lora_rank 16 \
+  --lora_alpha 32
 ```
 
 **Training Details:**
