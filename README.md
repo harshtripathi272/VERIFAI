@@ -11,6 +11,8 @@
 
 > **A multi-agent AI system for chest X-ray interpretation that produces clinically trustworthy, evidence-backed diagnoses with built-in safety guardrails, adversarial debate, and human-in-the-loop review.**
 
+![VERIFAI Thumbnail](assets/thumbnail.png)
+
 VERIFAI orchestrates **multiple specialized AI agents** through a LangGraph state machine to analyze chest X-rays, cross-reference medical literature, debate diagnostic uncertainty, and produce FDA-traceable diagnoses — all runnable on a **single consumer GPU (12 GB+ VRAM)**.
 
 ---
