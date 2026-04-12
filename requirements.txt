@@ -1,82 +1,87 @@
 # ============================================================
-# VERIFAI - Stable Requirements (CUDA 12.6 Compatible)
-# Python 3.10
+# VERIFAI - Stable Requirements (Refined)
+# Python 3.10 + CUDA 12.x
 # ============================================================
 
 # ----------------------------
-# Core ML & CV
+# Core ML / HF
 # ----------------------------
-torch>=2.5.1
-torchvision>=0.20.1
-torchaudio>=2.5.1
-opencv-python>=4.10.0
-prometheus-client>=0.21.1
-transformers==4.47.1
-accelerate>=1.1.0
+transformers>=4.49.0
+accelerate>=1.1.0,<2
 trl==0.12.0
 peft==0.14.0
 bitsandbytes>=0.45.0
-tokenizers>=0.21.0
 
+tokenizers>=0.21.0,<0.22
 
 # ----------------------------
 # HF Ecosystem
 # ----------------------------
-huggingface-hub==0.36.2
-datasets==3.4.1
-safetensors==0.7.0
+huggingface-hub>=0.36.2,<1
+datasets>=3.4.1,<4
+safetensors>=0.4.5,<1
 
 # ----------------------------
-# Numerical
+# Numerical (avoid hard pin conflicts)
 # ----------------------------
-numpy==1.26.4
-scikit-learn==1.4.2
 sentence-transformers==2.7.0
-scipy==1.15.3
 
 # ----------------------------
-# API / Web
+# Vision
 # ----------------------------
-fastapi==0.115.6
-uvicorn[standard]==0.34.0
-streamlit==1.41.1
-pydantic==2.10.4
-pydantic-settings==2.2.1
-python-multipart==0.0.18
-pillow==11.0.0
-python-dotenv==1.0.1
+opencv-python>=4.10.0
+pillow>=10.0,<12
 
 # ----------------------------
-# LangChain
+# API / Backend
 # ----------------------------
-langchain==0.3.14
-langgraph==0.2.60
-langsmith==0.1.147
+fastapi>=0.115,<1
+uvicorn[standard]>=0.34,<1
+streamlit>=1.41,<2
+
+pydantic>=2.10,<3
+pydantic-settings>=2.2,<3
+
+python-multipart>=0.0.18
+python-dotenv>=1.0.1
 
 # ----------------------------
-# Medical / Retrieval
+# LangChain (keep aligned)
 # ----------------------------
-biopython==1.83
-fhir.resources==7.1.0
-lxml==5.1.0
-beautifulsoup4==4.12.3
-duckdb==0.10.0
-faiss-gpu==1.7.2
+langchain>=0.3.14,<0.4
+langgraph>=0.2.60,<0.3
+langsmith>=0.1.147,<0.2
+
+# ----------------------------
+# Data / Parsing
+# ----------------------------
+biopython>=1.83
+fhir.resources>=7.1.0
+
+lxml>=5.1.0
+beautifulsoup4>=4.12.3
+
+duckdb>=0.10.0
 
 # ----------------------------
 # Supabase
 # ----------------------------
-supabase==2.28.0
-postgrest==2.28.0
+supabase>=2.28.0,<3
+postgrest>=2.28.0,<3
 
 # ----------------------------
 # NLP / Validation
 # ----------------------------
-nltk==3.8.1
+nltk>=3.8.1
 radgraph
 
 # ----------------------------
-# Stability Pins
+# Monitoring
+# ----------------------------
+prometheus-client>=0.21.1
+
+# ----------------------------
+# Stability
 # ----------------------------
 packaging>=23,<25
 async-timeout>=4,<5
@@ -85,4 +90,4 @@ requests>=2.32.2,<3
 # ----------------------------
 # Dev
 # ----------------------------
-pytest==8.2.0
+pytest>=8.2,<9

@@ -63,7 +63,7 @@ def _load_models():
     _llm = AutoModelForImageTextToText.from_pretrained(
         settings.MEDGEMMA_4B_MODEL,
         quantization_config=bnb_config,
-        device_map="auto",
+        device_map={"": device},
         torch_dtype=compute_dtype,
         token=settings.HUGGINGFACE_TOKEN
     )
@@ -84,7 +84,10 @@ def _load_models():
     
     # 3. Load Independent MedSigLIP Classifier
     print(f"[Radiologist] Loading MedSigLIP Classifier...")
-    _siglip_processor = AutoImageProcessor.from_pretrained(settings.MEDSIGLIP_BASE_MODEL)
+    _siglip_processor = AutoImageProcessor.from_pretrained(
+        settings.MEDSIGLIP_BASE_MODEL,
+        token=settings.HUGGINGFACE_TOKEN
+    )
     
     try:
         _classifier_model = load_medsiglip_classifier(

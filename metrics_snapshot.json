@@ -1,0 +1,127 @@
+{
+  "system": {
+    "active_workflows": 0.0,
+    "total_workflows": 1.0,
+    "deferrals": 1.0,
+    "critical_findings": 0.0,
+    "workflow_duration": {
+      "count": 1,
+      "sum": 0.0001,
+      "mean": 0.0001,
+      "p50": 0.0001,
+      "p95": 0.0001,
+      "p99": 0.0001
+    }
+  },
+  "agents": {
+    "duration": {
+      "agent_name=\"radiologist\"": {
+        "count": 1,
+        "sum": 18.6808,
+        "mean": 18.6808,
+        "p50": 18.6808,
+        "p95": 18.6808,
+        "p99": 18.6808
+      },
+      "agent_name=\"chexbert\"": {
+        "count": 1,
+        "sum": 19.1612,
+        "mean": 19.1612,
+        "p50": 19.1612,
+        "p95": 19.1612,
+        "p99": 19.1612
+      },
+      "agent_name=\"evidence\"": {
+        "count": 1,
+        "sum": 45.8176,
+        "mean": 45.8176,
+        "p50": 45.8176,
+        "p95": 45.8176,
+        "p99": 45.8176
+      },
+      "agent_name=\"critic\"": {
+        "count": 1,
+        "sum": 29.8841,
+        "mean": 29.8841,
+        "p50": 29.8841,
+        "p95": 29.8841,
+        "p99": 29.8841
+      },
+      "agent_name=\"debate\"": {
+        "count": 1,
+        "sum": 0.0016,
+        "mean": 0.0016,
+        "p50": 0.0016,
+        "p95": 0.0016,
+        "p99": 0.0016
+      },
+      "agent_name=\"validator\"": {
+        "count": 1,
+        "sum": 0.2234,
+        "mean": 0.2234,
+        "p50": 0.2234,
+        "p95": 0.2234,
+        "p99": 0.2234
+      },
+      "agent_name=\"finalize\"": {
+        "count": 1,
+        "sum": 0.0001,
+        "mean": 0.0001,
+        "p50": 0.0001,
+        "p95": 0.0001,
+        "p99": 0.0001
+      }
+    },
+    "invocations": {
+      "agent_name=\"radiologist\",status=\"success\"": 3.0,
+      "agent_name=\"chexbert\",status=\"success\"": 2.0,
+      "agent_name=\"evidence\",status=\"success\"": 1.0,
+      "agent_name=\"critic\",status=\"success\"": 2.0,
+      "agent_name=\"debate\",status=\"success\"": 2.0,
+      "agent_name=\"validator\",status=\"success\"": 2.0,
+      "agent_name=\"finalize\",status=\"success\"": 2.0,
+      "agent_name=\"historian\",status=\"success\"": 1.0,
+      "agent_name=\"literature\",status=\"success\"": 1.0
+    },
+    "information_gain": {}
+  },
+  "diagnostics": {
+    "confidence": {
+      "count": 1,
+      "sum": 0.98,
+      "mean": 0.98,
+      "p50": 0.98,
+      "p95": 0.98,
+      "p99": 0.98
+    },
+    "uncertainty": {
+      "count": 1,
+      "sum": 0.3722,
+      "mean": 0.3722,
+      "p50": 0.3722,
+      "p95": 0.3722,
+      "p99": 0.3722
+    },
+    "debate_rounds": {
+      "count": 1,
+      "sum": 1,
+      "mean": 1,
+      "p50": 1,
+      "p95": 1,
+      "p99": 1
+    },
+    "safety_score": {
+      "count": 1,
+      "sum": 0.98,
+      "mean": 0.98,
+      "p50": 0.98,
+      "p95": 0.98,
+      "p99": 0.98
+    }
+  },
+  "safety": {
+    "flags": {},
+    "errors": {}
+  },
+  "_saved_at": "2026-04-12T23:00:05.583349+00:00"
+}

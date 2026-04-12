@@ -65,10 +65,14 @@ def initialize_validator_tools(vision_encoder=None, image_processor=None):
             vision_encoder = SiglipVisionModel.from_pretrained(
                 model_name,
                 torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+                token=settings.HUGGINGFACE_TOKEN
             ).to(device)
             vision_encoder.eval()
 
-            image_processor = AutoImageProcessor.from_pretrained(model_name)
+            image_processor = AutoImageProcessor.from_pretrained(
+                model_name,
+                token=settings.HUGGINGFACE_TOKEN
+            )
             print("[Validator] ✓ MedSigLIP auto-loaded")
         except Exception as e:
             print(f"[Validator] ✗ Failed to auto-load MedSigLIP: {e}")

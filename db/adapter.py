@@ -18,8 +18,7 @@ from app.config import settings
 
 def get_logger(session_id: str = None, image_paths: list = None, views: list = None, patient_id: str = None, workflow_type: str = "debate"):
     """
-    Get the Supabase logger instance.
-    SQLite fallback has been removed.
+    Get the appropriate logger instance (Supabase or SQLite).
     
     Args:
         session_id: Unique session ID (auto-generated if not provided)
@@ -29,14 +28,24 @@ def get_logger(session_id: str = None, image_paths: list = None, views: list = N
         workflow_type: 'debate' or 'legacy'
     
     Returns:
-        AgentLogger instance (Supabase)
+        AgentLogger instance
     """
-    try:
-        from db.supabase_logger import AgentLogger
-        return AgentLogger(session_id, image_paths, views, patient_id, workflow_type)
-    except ImportError as e:
-        print(f"[DB Adapter] ERROR: Supabase not available: {e}")
-        raise RuntimeError("Supabase must be installed and configured.")
+    db_mode = getattr(settings, "DATABASE_MODE", "supabase").lower()
+    
+    if db_mode == "sqlite":
+        try:
+            from db.logger import AgentLogger
+            return AgentLogger(session_id, image_paths, views, patient_id, workflow_type)
+        except ImportError as e:
+            print(f"[DB Adapter] ERROR: SQLite logger not available: {e}")
+            raise
+    else:
+        try:
+            from db.supabase_logger import AgentLogger
+            return AgentLogger(session_id, image_paths, views, patient_id, workflow_type)
+        except ImportError as e:
+            print(f"[DB Adapter] ERROR: Supabase not available: {e}")
+            raise RuntimeError("Supabase must be installed and configured for cloud mode.")
 
 
 def check_database_health() -> dict:
