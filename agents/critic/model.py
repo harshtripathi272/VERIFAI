@@ -258,7 +258,7 @@ class CriticModel:
                     chexbert_labels_dict = chexbert_output.labels
                 
                 disease_type = self._extract_disease_type(impression, chexbert_labels_dict)
-                print("HISTORY DEBUG — disease_type:", disease_type)
+                logger.debug("[CRITIC] disease_type=%s", disease_type)
 
                 # Generate current case summary and embedding
                 current_summary = generate_case_summary(

@@ -324,38 +324,44 @@ class DebateOrchestrator:
     ) -> tuple[bool, float]:
         """
         Check if the round reached consensus.
-        
+
+        Consensus rules (priority order):
+        1. Guard: all-zero/neutral round -> NOT consensus (forces substantive debate)
+        2. Evidence team both support AND critic not strongly challenging -> consensus
+        3. All impacts aligned (all >= 0 or all <= 0) AND |total| > MIN_IMPACT -> consensus
+        4. Max disagreement between any two agents <= consensus_threshold -> consensus
+
         Returns: (consensus_reached, net_confidence_delta)
         """
-        # Calculate net impact
-        total_impact = (
-            critic_arg.confidence_impact +
-            historian_arg.confidence_impact +
-            literature_arg.confidence_impact
-        )
-        
-        # Check for strong disagreement
-        positions = [critic_arg.position, historian_arg.position, literature_arg.position]
-        
-        # Consensus if all support or all refine in same direction
+        impacts = [
+            critic_arg.confidence_impact,
+            historian_arg.confidence_impact,
+            literature_arg.confidence_impact,
+        ]
+        total_impact = sum(impacts)
+
+        # Rule 0 (Guard): pure-neutral round -> never consensus
+        MIN_SUBSTANTIVE_IMPACT = 0.02
+        if all(abs(i) < MIN_SUBSTANTIVE_IMPACT for i in impacts):
+            return False, total_impact
+
+        # Rule 1: Evidence team both support AND critic conceding
         if historian_arg.position == "support" and literature_arg.position == "support":
-            if critic_arg.confidence_impact > -0.05:  # Critic not strongly challenging
+            if critic_arg.confidence_impact > -0.05:
                 return True, total_impact
-        
-        # Check if confidence impacts are aligned
-        impacts = [critic_arg.confidence_impact, historian_arg.confidence_impact, literature_arg.confidence_impact]
-        
-        # If all positive or all negative (aligned)
+
+        # Rule 2: All aligned AND meaningful net movement
         if all(i >= 0 for i in impacts) or all(i <= 0 for i in impacts):
-            return True, total_impact
-        
-        # Check disagreement magnitude
+            if abs(total_impact) >= MIN_SUBSTANTIVE_IMPACT:
+                return True, total_impact
+
+        # Rule 3: Disagreement within threshold
         max_disagreement = max(impacts) - min(impacts)
         if max_disagreement <= self.consensus_threshold:
             return True, total_impact
-        
+
         return False, total_impact
-    
+
     def run_debate(
         self,
         radiologist_output,

@@ -233,6 +233,103 @@ def generate_findings(
         }
 
 
+def generate_findings_sampled(
+    image_paths,
+    views=None,
+    do_sample: bool = True,
+    temperature: float = 0.7,
+) -> dict:
+    """
+    Temperature-sampled variant of generate_findings for KLE uncertainty estimation.
+
+    Identical to generate_findings but uses do_sample=True + temperature to
+    produce semantically diverse outputs. Used by the radiologist agent to
+    generate N impressions that are fed to compute_semantic_uncertainty (KLE).
+
+    Args:
+        image_paths: List of image file paths
+        views: List of view tags (AP/PA/LATERAL)
+        do_sample: If True, use temperature sampling (diversity); else greedy
+        temperature: Sampling temperature (0.7 gives moderate diversity)
+
+    Returns:
+        dict with "findings" and "impression" keys
+    """
+    from transformers import StoppingCriteria, StoppingCriteriaList
+    from utils.inference import extract_json
+
+    _load_models()
+
+    if isinstance(image_paths, str):
+        image_paths = [image_paths]
+    if views is None:
+        views = ["AP"] * len(image_paths)
+
+    loaded_images = []
+    for path in image_paths:
+        try:
+            img = Image.open(path).convert("RGB")
+            loaded_images.append(img)
+        except Exception as e:
+            return {"findings": f"Error loading image: {e}", "impression": "Error."}
+
+    if not loaded_images:
+        return {"findings": "No valid images.", "impression": "Error."}
+
+    view_tokens = " | ".join([f"<{v}>" for v in views])
+    user_content = []
+    for img in loaded_images:
+        user_content.append({"type": "image", "image": img})
+    user_content.append({"type": "text", "text": f"\nViews: {view_tokens}\n\n{INSTRUCTION}"})
+
+    messages = [{"role": "user", "content": user_content}]
+    dtype = next(_llm.parameters()).dtype
+    inputs = _processor.apply_chat_template(
+        messages,
+        add_generation_prompt=True,
+        tokenize=True,
+        return_dict=True,
+        return_tensors="pt"
+    ).to(_llm.device, dtype=dtype)
+
+    class StopOnCloseBrace(StoppingCriteria):
+        def __init__(self, tokenizer):
+            self.tokenizer = tokenizer
+        def __call__(self, input_ids, scores, **kwargs):
+            decoded = self.tokenizer.decode(input_ids[0], skip_special_tokens=True)
+            return decoded.strip().endswith("}")
+
+    stopping_criteria = StoppingCriteriaList([StopOnCloseBrace(_processor.tokenizer)])
+
+    gen_kwargs = dict(
+        max_new_tokens=300,
+        do_sample=do_sample,
+        eos_token_id=_processor.tokenizer.eos_token_id,
+        pad_token_id=_processor.tokenizer.eos_token_id,
+        stopping_criteria=stopping_criteria,
+    )
+    if do_sample:
+        gen_kwargs["temperature"] = temperature
+
+    try:
+        with torch.inference_mode():
+            output_ids = _llm.generate(**inputs, **gen_kwargs)
+    except Exception as e:
+        return {"findings": f"Generation failed: {e}", "impression": "Error."}
+
+    input_len = inputs["input_ids"].shape[-1]
+    generated_ids = output_ids[:, input_len:]
+    generated_text = _processor.decode(generated_ids[0], skip_special_tokens=True).strip()
+    if "}" in generated_text:
+        generated_text = generated_text[:generated_text.rfind("}") + 1]
+
+    try:
+        data = extract_json(generated_text)
+        return {"findings": data.get("findings", ""), "impression": data.get("impression", "")}
+    except Exception:
+        return {"findings": "Failed to parse JSON.", "impression": generated_text[:500]}
+
+
 def analyze_disease(image_path: str) -> dict:
     """Classify diseases and generate heatmaps using MedSigLIP and Chefer LRP."""
     _load_models()

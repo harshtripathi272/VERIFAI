@@ -113,9 +113,17 @@ def chexbert_node(state: VerifaiState) -> dict:
         if filtered_labels:
             trace.append(f"Labels: {', '.join(filtered_labels.keys())}")
 
+        # Propagate uncertainty_history
+        uncertainty_history = list(state.get("uncertainty_history", []))
+        uncertainty_history.append({
+            "agent": "chexbert",
+            "system_uncertainty": ig.system_uncertainty_after,
+        })
+
         return {
             "chexbert_output": output,
             "current_uncertainty": ig.system_uncertainty_after,
+            "uncertainty_history": uncertainty_history,
             "trace": trace
         }
     except Exception as e:
