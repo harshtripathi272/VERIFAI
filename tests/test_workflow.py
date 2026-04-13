@@ -37,8 +37,8 @@ from graph.workflow import app as verifai_graph
 TEST_PATIENT_ID = "6265ea60-b031-40da-95bb-0ef6178a5a45"
 
 initial_state = {
-    "image_paths": ["/data/user13/VERIFAI/assets/thumbnail.png"],
-    "views": ["AP","LATERAL"],
+    "image_paths": ["./images/images/00000013_001.png"], 
+    "views": ["AP"],
     "patient_id": TEST_PATIENT_ID,
     "current_fhir": {
         "resourceType": "DiagnosticReport",

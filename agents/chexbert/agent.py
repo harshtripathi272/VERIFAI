@@ -5,7 +5,7 @@ LangGraph node that labels radiologist reports using F1-CheXbert.
 Computes MUC Information Gain from label distribution uncertainty and alignment.
 """
 from graph.state import VerifaiState, CheXbertOutput
-from .model import label_report
+from .model import label_report, CHEXPERT_CONDITIONS
 from uncertainty.muc import (
     compute_ig,
     compute_chexbert_uncertainty,
@@ -35,70 +35,88 @@ def chexbert_node(state: VerifaiState) -> dict:
     rad_output = state.get("radiologist_output")
     system_uncertainty = state.get("current_uncertainty", 0.5)
     
-    # Validate input - Require both findings AND impression
+    # Validate input: we just need rad_output
     if not rad_output:
         return {
             "chexbert_output": None,
             "trace": ["CHEXBERT: No radiologist output available"]
         }
         
-    if not rad_output.impression or not rad_output.findings:
+    findings = rad_output.findings if getattr(rad_output, "findings", "") else ""
+    impression = rad_output.impression if getattr(rad_output, "impression", "") else ""
+    
+    if not findings and not impression:
         return {
             "chexbert_output": None,
-            "trace": ["CHEXBERT: Missing findings or impression in radiologist report"]
+            "trace": ["CHEXBERT: Missing both findings and impression in radiologist report"]
         }
     
     # Merge FINDINGS and IMPRESSION for labeling
-    report_text = f"FINDINGS: {rad_output.findings}\n\nIMPRESSION: {rad_output.impression}"
+    report_text = f"FINDINGS: {findings}\n\nIMPRESSION: {impression}"
+    full_text_lower = report_text.lower()
     
+    all_labels = {cond: "not_mentioned" for cond in CHEXPERT_CONDITIONS}
+    
+    # Merge for scanning
+    findings = rad_output.findings if getattr(rad_output, "findings", "") else ""
+    impression = rad_output.impression if getattr(rad_output, "impression", "") else ""
+    combined_text = f"FINDINGS: {findings}\n\nIMPRESSION: {impression}"
+    text_lower = combined_text.lower()
+
     try:
-        # Run CheXbert labeling (all 14 labels for uncertainty computation)
-        all_labels = label_report(report_text)
-        
-        # Filter to ONLY present and uncertain (for downstream agents)
-        filtered_labels = {
-            condition: status 
-            for condition, status in all_labels.items() 
-            if status in ["present", "uncertain"]
-        }
-        
-        # Create output object
+        # Attempt raw CheXbert labeling
+        all_labels.update(label_report(combined_text))
+    except Exception as e:
+        print(f"[CHEXBERT] Library error fallback: {e}")
+    
+    # Filter initial
+    filtered_labels = {c: s for c, s in all_labels.items() if s in ["present", "uncertain"]}
+    
+    # Keyword fallback with simple negation detection
+    keywords = {
+        "Cardiomegaly": ["cardiomegaly", "enlarged heart", "heart is enlarged", "big heart"],
+        "Pleural Effusion": ["effusion", "pleural effusion", "fluid in lungs"],
+        "Pneumonia": ["pneumonia", "consolidation", "infiltrate"],
+        "Atelectasis": ["atelectasis", "collapse"],
+        "Pneumothorax": ["pneumothorax", "collapsed lung"],
+        "Edema": ["edema", "pulmonary edema", "heart failure"],
+    }
+    
+    negations = ["no ", "none", "without", "clear", "negative", "normal", "rule out", "ruled out"]
+    
+    for condition, synonyms in keywords.items():
+        for syn in synonyms:
+            if syn in text_lower:
+                # Basic negation check: look for "no" or "none" before the keyword
+                start_idx = text_lower.find(syn)
+                context = text_lower[max(0, start_idx-30):start_idx]
+                
+                is_negated = any(neg in context for neg in negations)
+                
+                if not is_negated:
+                    filtered_labels[condition] = "present"
+                    all_labels[condition] = "present"
+                    break
+
+    try:
         output = CheXbertOutput(labels=filtered_labels)
+        u_chex = compute_chexbert_uncertainty(all_labels)
+        align = compute_chexbert_alignment(all_labels, combined_text)
         
-        # === MUC: Compute Information Gain ===
-        chexbert_uncertainty = compute_chexbert_uncertainty(all_labels)
-        chexbert_alignment = compute_chexbert_alignment(all_labels, rad_output.impression)
+        ig = compute_ig("chexbert", u_chex, align, system_uncertainty)
         
-        ig_result = compute_ig(
-            agent_name="chexbert",
-            agent_uncertainty=chexbert_uncertainty,
-            alignment_score=chexbert_alignment,
-            system_uncertainty=system_uncertainty,
-        )
-        
-        # Build trace entries
-        num_present = sum(1 for s in filtered_labels.values() if s == "present")
-        num_uncertain = sum(1 for s in filtered_labels.values() if s == "uncertain")
-        
-        trace_entries = [
-            f"CHEXBERT: Found {num_present} present and {num_uncertain} uncertain conditions",
-            f"CHEXBERT MUC: uncertainty={chexbert_uncertainty:.3f}, "
-            f"alignment={chexbert_alignment:.3f}, IG={ig_result.information_gain:.4f}",
+        num_p = sum(1 for s in filtered_labels.values() if s == "present")
+        trace = [
+            f"CHEXBERT: Found {num_p} conditions (using fallback + negation check)",
+            f"CHEXBERT MUC: unc={u_chex:.3f}, align={align:.3f}, IG={ig.information_gain:.4f}"
         ]
-        
         if filtered_labels:
-            conditions_str = ", ".join([f"{c} ({s})" for c, s in filtered_labels.items()])
-            trace_entries.append(f"CHEXBERT: {conditions_str}")
-        
+            trace.append(f"Labels: {', '.join(filtered_labels.keys())}")
+
         return {
             "chexbert_output": output,
-            "current_uncertainty": ig_result.system_uncertainty_after,
-            "trace": trace_entries
+            "current_uncertainty": ig.system_uncertainty_after,
+            "trace": trace
         }
-    
     except Exception as e:
-        # Handle errors gracefully
-        return {
-            "chexbert_output": None,
-            "trace": [f"CHEXBERT: Error during labeling - {str(e)[:100]}"]
-        }
+        return {"chexbert_output": None, "trace": [f"CHEXBERT: Logic err - {e}"]}

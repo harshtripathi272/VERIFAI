@@ -11,6 +11,21 @@ Prerequisites:
 
 import sys
 from typing import TYPE_CHECKING, Dict, Any, Tuple, Set, List
+from transformers import BertTokenizer
+try:
+    from transformers.tokenization_utils_tokenizers import TokenizersBackend
+except ImportError:
+    TokenizersBackend = None
+
+# Monkey-patch for transformers 5.x compatibility
+for cls in [BertTokenizer, TokenizersBackend]:
+    if cls and not hasattr(cls, "encode_plus"):
+        def encode_plus_patch(self, *args, **kwargs):
+            if args and isinstance(args[0], list):
+                return {"input_ids": self.convert_tokens_to_ids(args[0])}
+            return self(*args, **kwargs)
+        cls.encode_plus = encode_plus_patch
+        print(f"[RadGraph] Patched {cls.__name__}.encode_plus for transformers 5.x compatibility")
 
 if TYPE_CHECKING:
     from graph.state import VerifaiState
