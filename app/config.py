@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     
     # === Model Paths (HAI-DEF Models) ===
     MEDSIGLIP_BASE_MODEL: str = "google/medsiglip-448" 
-    MEDSIGLIP_WEIGHTS_PATH : str = "../output/medsiglip_full_model.pt" 
+    MEDSIGLIP_WEIGHTS_PATH : str = "/data/user13/VERIFAI/medsiglip_full_model.pt" 
     MEDGEMMA_4B_MODEL: str = "google/medgemma-1.5-4b-it"
     #MEDGEMMA_27B_MODEL: str = "google/medgemma-27b-it"
     
@@ -112,6 +112,10 @@ class Settings(BaseSettings):
     
     # Automatically restart from critic when feedback is provided
     FEEDBACK_RESTART_FROM_CRITIC: bool = bool(os.getenv("FEEDBACK_RESTART_FROM_CRITIC", "True"))
+    
+    # === DATABASE MODE ===
+    # Set to 'supabase' for cloud, 'sqlite' for local
+    DATABASE_MODE: str = os.getenv("DATABASE_MODE", "supabase")
     
     # === Mock Mode ===
     # Enable to run without downloading large models (~50GB+)

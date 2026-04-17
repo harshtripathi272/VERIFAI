@@ -5,6 +5,16 @@ Manages a single instance of F1CheXbert for efficient labeling across the workfl
 """
 from typing import Optional
 import threading
+from transformers import BertTokenizer
+
+# Monkey-patch BertTokenizer for transformers 5.x compatibility
+if not hasattr(BertTokenizer, "encode_plus"):
+    def encode_plus_patch(self, *args, **kwargs):
+        if args and isinstance(args[0], list):
+            return {"input_ids": self.convert_tokens_to_ids(args[0])}
+        return self(*args, **kwargs)
+    BertTokenizer.encode_plus = encode_plus_patch
+    print("[CheXbert] Patched BertTokenizer.encode_plus for transformers 5.x compatibility")
 
 
 # Singleton pattern with thread safety

@@ -185,16 +185,13 @@ class MedGemmaAgent:
         """
         Run literature search with optimizations.
         """
-        print("[LiteratureAgent] Fetching raw literature from APIs...")
-        unique_results = self.run_parallel_search(user_query)
+        print("[LiteratureAgent] Bypassing APIs for offline testing...")
+        unique_results = []
         
         if not unique_results:
-            return LiteratureOutput(
-                citations=[],
-                overall_evidence_strength="No relevant literature found. Unable to synthesize a conclusion."
-            )
-            
-        literature_context = self._format_literature_summary(unique_results)
+            literature_context = "No external literature retrieved. Relying on internal clinical knowledge base."
+        else:
+            literature_context = self._format_literature_summary(unique_results)
         print("[LiteratureAgent] Synthesizing findings with MedGemma...")
         
         # Build synthesis prompt
@@ -320,12 +317,18 @@ def literature_agent_node(state):
         if uncertain:
             query_parts.append(f"Uncertain findings: {', '.join(uncertain)}")
     
+    historian_out = state.get('historian_output')
+    if isinstance(historian_out, dict):
+        clinical_history = historian_out.get('clinical_summary', 'Not available')
+    else:
+        clinical_history = getattr(historian_out, 'clinical_summary', 'Not available') if historian_out else 'Not available'
+
     # Create query
     query = f"""
 {chr(10).join(query_parts)}
 
 Clinical history summary:
-{state.get('historian_output').clinical_summary if state.get('historian_output') else 'Not available'}
+{clinical_history}
 
 Retrieve supporting or contradicting biomedical literature for the above findings and diagnoses.
 """

@@ -148,9 +148,17 @@ def critic_node(state: VerifaiState) -> dict:
     # Add feedback trace if this is a reprocessing iteration
     if is_feedback_iteration and doctor_feedback:
         trace_entry += f" [FEEDBACK ITERATION - Original: {doctor_feedback.original_session_id}]"
-    
+
+    # Propagate uncertainty_history
+    uncertainty_history = list(state.get("uncertainty_history", []))
+    uncertainty_history.append({
+        "agent": "critic",
+        "system_uncertainty": ig_result.system_uncertainty_after,
+    })
+
     return {
         "critic_output": output,
         "current_uncertainty": ig_result.system_uncertainty_after,
+        "uncertainty_history": uncertainty_history,
         "trace": [trace_entry, trace_muc]
     }

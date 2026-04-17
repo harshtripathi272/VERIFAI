@@ -115,7 +115,8 @@ def logged_radiologist_node(state: VerifaiState) -> dict:
         result = radiologist_node(state)
     u_out = result.get("current_uncertainty", u_in)
     delta = u_out - u_in
-    findings_len = len(result.get('radiologist_output', {}).findings or '')
+    rad_out = result.get('radiologist_output')
+    findings_len = len(rad_out.findings) if rad_out and hasattr(rad_out, 'findings') and rad_out.findings else 0
     print(f"[WORKFLOW] Radiologist completed - Generated {findings_len} chars of findings")
     print(f"  ⤷ Uncertainty OUT : {u_out:.2%}  (Δ = {delta:+.3f})")
     result["uncertainty_history"] = [{"agent": "radiologist", "system_uncertainty": round(u_out, 4)}]

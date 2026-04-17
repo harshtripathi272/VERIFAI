@@ -4,6 +4,11 @@ import re
 from graph.state import VerifaiState, HistorianOutput, HistorianFact
 from .fhir_client import fhir_client
 from .reasoner import reason_over_fhir
+from uncertainty.muc import (
+    compute_ig,
+    compute_historian_uncertainty,
+    compute_historian_alignment,
+)
 import logging
 
 logger = logging.getLogger("historian")
@@ -28,7 +33,7 @@ def log_retrieved_evidence(hypothesis: str, evidence: dict, top_k: int = 3):
 
     for category in ["conditions", "observations", "documents"]:
         items = evidence.get(category, [])
-        logger.info(f"{category.upper()} count: {len(items)}")
+        logger.debug(f"{category.upper()} count: {len(items)}")
 
         for i, item in enumerate(items[:top_k]):
             score = item.get("_relevance_score", "N/A")
@@ -37,11 +42,11 @@ def log_retrieved_evidence(hypothesis: str, evidence: dict, top_k: int = 3):
             if isinstance(summary, str):
                 summary = summary[:150].replace("\n", " ")
 
-            logger.info(
+            logger.debug(
                 f"  {i+1}. score={score} | {summary}"
             )
 
-    logger.info("==========================================\n")
+    logger.debug("==========================================")
 
 
 
@@ -243,7 +248,39 @@ def historian_node(state: VerifaiState) -> dict:
         f"HISTORIAN: Total Δconfidence={output.confidence_adjustment:+.2f}"
     )
 
+    # === MUC: Compute Information Gain for Historian ===
+    system_uncertainty = state.get("current_uncertainty", 0.5)
+    h_unc = compute_historian_uncertainty(
+        supporting_count=len(all_supporting),
+        contradicting_count=len(all_contradicting),
+    )
+    h_align = compute_historian_alignment(
+        supporting_count=len(all_supporting),
+        contradicting_count=len(all_contradicting),
+        confidence_adjustment=net_confidence_adjustment,
+    )
+    ig_result = compute_ig(
+        agent_name="historian",
+        agent_uncertainty=h_unc,
+        alignment_score=h_align,
+        system_uncertainty=system_uncertainty,
+    )
+    trace.append(
+        f"HISTORIAN MUC: unc={h_unc:.3f}, align={h_align:.3f}, "
+        f"IG={ig_result.information_gain:.4f}, "
+        f"U: {system_uncertainty:.4f} -> {ig_result.system_uncertainty_after:.4f}"
+    )
+
+    # Append to uncertainty_history
+    uncertainty_history = list(state.get("uncertainty_history", []))
+    uncertainty_history.append({
+        "agent": "historian",
+        "system_uncertainty": ig_result.system_uncertainty_after,
+    })
+
     return {
         "historian_output": output,
+        "current_uncertainty": ig_result.system_uncertainty_after,
+        "uncertainty_history": uncertainty_history,
         "trace": trace
     }

@@ -65,8 +65,8 @@ def test_literature_agent():
     )
     
     print("\nInput State:")
-    print(f"  Patient ID: {state.patient_id}")
-    print(f"  Image Path: {state.image_path}")
+    print(f"  Patient ID: {state.get('patient_id')}")
+    print(f"  Image Path: {state.get('image_path')}")
     print(f"\nRadiologist Findings Preview: {radiologist_output.findings[:100]}...")
     print(f"\nRadiologist Impression: {radiologist_output.impression[:100]}...")
     print(f"\nCheXbert Labels: {chexbert_output.labels}")

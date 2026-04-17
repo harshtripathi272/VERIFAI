@@ -11,7 +11,11 @@ Validator:  Retrieval/RadGraph tools may be unavailable (no vision encoder passe
 LLM Critic: forced ON via settings override.
 """
 
+import sys
 import os
+
+# Add project root to path for imports
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # ── 1. Force settings overrides BEFORE any VERIFAI module is imported ────────
 os.environ["ENABLE_LLM_CRITIC"] = "true"      # Enable MedGemma semantic critic
@@ -33,8 +37,8 @@ from graph.workflow import app as verifai_graph
 TEST_PATIENT_ID = "6265ea60-b031-40da-95bb-0ef6178a5a45"
 
 initial_state = {
-    "image_paths": ["../dataset/med/official_data_iccv_final/files/p10/p10010440/s56908581/0cadb1ed-80bd62aa-8d4563e1-2289ab1f-5be0b197.jpg","../dataset/med/official_data_iccv_final/files/p10/p10010440/s56908581/e0ceccb1-efe6919f-2b3c8cd2-c087f0b0-3d3adc66.jpg"],
-    "views": ["AP","LATERAL"],
+    "image_paths": ["./images/images/00000013_001.png"], 
+    "views": ["AP"],
     "patient_id": TEST_PATIENT_ID,
     "current_fhir": {
         "resourceType": "DiagnosticReport",

@@ -16,3 +16,6 @@ agents/radiologist/CheXpert_Dataset
 
 .radgraph
 /uploads
+medsiglip_full_model.pt
+/images
+*.csv
