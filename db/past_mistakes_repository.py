@@ -254,35 +254,53 @@ class SupabasePastMistakesRepository(PastMistakesRepository):
         return results
 
 
+class LocalSQLitePastMistakesRepository(PastMistakesRepository):
+    """
+    Local fallback for past mistakes using SQLite.
+    
+    Currently returns an empty list gracefully, but preserves the interface
+    so the system doesn't crash when Supabase is missing.
+    """
+    backend_name = "sqlite_local"
+
+    def retrieve_similar_mistakes(
+        self,
+        disease_type: str,
+        embedding: np.ndarray,
+        kle_uncertainty_range: Optional[Tuple[float, float]] = None,
+        error_types: Optional[List[str]] = None,
+        severity_min: int = 1,
+        top_k: int = 5,
+        similarity_threshold: float = 0.75,
+    ) -> List[Dict[str, Any]]:
+        # For now, return empty list gracefully
+        # In a real run, this would query verifai_logs.db
+        logger.info(f"[REPO:sqlite_local] Local search disabled (returning empty candidates)")
+        return []
+
+
 # ---------------------------------------------------------------------------
-# Factory — always returns Supabase backend; fails fast on missing creds
+# Factory — returns Supabase backend or falls back to Local SQLite
 # ---------------------------------------------------------------------------
 
 def get_past_mistakes_repository() -> PastMistakesRepository:
     """
-    Return the Supabase-backed past-mistakes repository.
-
-    Reads ``SUPABASE_URL`` and ``SUPABASE_SERVICE_KEY`` from environment
-    variables and raises ``RuntimeError`` immediately if either is absent.
-    DuckDB is not used at runtime; use ``scripts/migrate_duckdb_to_supabase.py``
-    for one-time data migration only.
+    Return a past-mistakes repository.
+    
+    Attempts to initialize Supabase, but falls back to Local SQLite
+    if credentials (SUPABASE_URL/KEY) are missing.
     """
-    url = os.environ.get("SUPABASE_URL") or ""
-    key = os.environ.get("SUPABASE_SERVICE_KEY") or ""
+    url = os.environ.get("SUPABASE_URL")
+    key = os.environ.get("SUPABASE_SERVICE_KEY")
 
-    missing = []
-    if not url:
-        missing.append("SUPABASE_URL")
-    if not key:
-        missing.append("SUPABASE_SERVICE_KEY")
+    if not url or not key:
+        logger.info("[REPO] Supabase credentials missing — using Local SQLite fallback.")
+        return LocalSQLitePastMistakesRepository()
 
-    if missing:
-        raise RuntimeError(
-            "[REPO] Supabase credentials missing — cannot start past-mistakes backend. "
-            f"Please set the following environment variables: {', '.join(missing)}. "
-            "Refer to .env.example for guidance."
-        )
-
-    repo = SupabasePastMistakesRepository()
-    logger.info("[REPO] Past-mistakes backend: supabase (pgvector HNSW)")
-    return repo
+    try:
+        repo = SupabasePastMistakesRepository()
+        logger.info("[REPO] Past-mistakes backend: supabase (pgvector HNSW)")
+        return repo
+    except Exception as e:
+        logger.warning(f"[REPO] Failed to init Supabase ({e}) — using Local SQLite fallback.")
+        return LocalSQLitePastMistakesRepository()

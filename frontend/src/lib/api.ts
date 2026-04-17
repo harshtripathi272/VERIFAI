@@ -12,6 +12,7 @@ export interface WorkflowStatusResponse {
     current_state?: any;
     pending_review_data?: any;
     final_result?: any;
+    error_message?: string;
 }
 
 export async function uploadAndStartWorkflow(

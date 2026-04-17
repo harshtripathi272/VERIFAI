@@ -33,10 +33,6 @@ def _load_embedding_model():
         if _embedding_model is not None:
             return
 
-        if settings.MOCK_MODELS:
-            print("[KLE] Running in MOCK mode - no embedding model loaded")
-            return
-
         try:
             from sentence_transformers import SentenceTransformer
             print(f"[KLE] Loading embedding model: {settings.TEXT_EMBEDDING_MODEL}")

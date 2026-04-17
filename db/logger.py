@@ -55,10 +55,10 @@ class AgentLogger:
         self.workflow_type = workflow_type
         self._agent_count = 0
 
-        # Create session row
+        # Create session row (use INSERT OR IGNORE to handle resume scenarios)
         with get_db() as conn:
             conn.execute(
-                """INSERT INTO workflow_sessions 
+                """INSERT OR IGNORE INTO workflow_sessions 
                    (session_id, image_path, patient_id, workflow_type, status, started_at)
                    VALUES (?, ?, ?, ?, 'running', ?)""",
                 (self.session_id, self.image_path, patient_id, workflow_type, datetime.utcnow().isoformat())

@@ -11,6 +11,7 @@ import os
 import shutil
 import uuid
 from typing import Optional, Any
+import threading
 
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Query
 from pydantic import BaseModel
@@ -47,6 +48,26 @@ from fastapi.responses import PlainTextResponse, HTMLResponse
 router = APIRouter()
 
 
+# In-memory workflow failure registry so UI can render explicit errors.
+_workflow_failures: dict[str, str] = {}
+_workflow_failures_lock = threading.Lock()
+
+
+def _set_workflow_failure(session_id: str, message: str) -> None:
+    with _workflow_failures_lock:
+        _workflow_failures[session_id] = message
+
+
+def _clear_workflow_failure(session_id: str) -> None:
+    with _workflow_failures_lock:
+        _workflow_failures.pop(session_id, None)
+
+
+def _get_workflow_failure(session_id: str) -> str | None:
+    with _workflow_failures_lock:
+        return _workflow_failures.get(session_id)
+
+
 
 # RESPONSE MODELS
 class HealthResponse(BaseModel):
@@ -79,6 +100,7 @@ class WorkflowStatusResponse(BaseModel):
     current_state: dict[str, Any] | None = None
     pending_review_data: dict[str, Any] | None = None
     final_result: dict[str, Any] | None = None
+    error_message: str | None = None
 
 
 class HumanReviewRequest(BaseModel):
@@ -267,6 +289,11 @@ def _run_workflow_background(file_paths: List[str], views: List[str], patient_id
     """Background task to execute the graph."""
     metrics.start_workflow(session_id)
     try:
+        _clear_workflow_failure(session_id)
+
+        if settings.MOCK_MODELS:
+            raise RuntimeError("Workflow aborted: MOCK_MODELS is enabled. Set MOCK_MODELS=False to run real models.")
+
         initial_state: VerifaiState = {
             "_session_id": session_id,
             "image_paths": file_paths,
@@ -298,8 +325,16 @@ def _run_workflow_background(file_paths: List[str], views: List[str], patient_id
         # This will run until it hits the `interrupt()` in `human_review_node`,
         # at which point it suspends and saves state to MemorySaver
         graph_app.invoke(initial_state, config=config)
+        _clear_workflow_failure(session_id)
         
     except Exception as e:
+        err_msg = str(e)
+        _set_workflow_failure(session_id, err_msg)
+        try:
+            from app.streaming import emit_agent_event
+            emit_agent_event(session_id, "system", "workflow_error", data={"error": err_msg}, message=err_msg)
+        except Exception:
+            pass
         print(f"[BACKGROUND] Workflow {session_id} failed: {e}")
     finally:
         # We deliberately DO NOT delete file_path here because the workflow is suspended.
@@ -370,8 +405,16 @@ async def get_workflow_status(session_id: str):
     """
     config = {"configurable": {"thread_id": session_id}}
     state_snapshot = graph_app.get_state(config)
+    failure_message = _get_workflow_failure(session_id)
     
     if not state_snapshot or not state_snapshot.created_at:
+        if failure_message:
+            return WorkflowStatusResponse(
+                session_id=session_id,
+                status="failed",
+                current_state={"trace": [f"[ERROR] {failure_message}"]},
+                error_message=failure_message,
+            )
         return WorkflowStatusResponse(session_id=session_id, status="not_found")
     
     # Extract current state for live mirroring on frontend
@@ -394,6 +437,16 @@ async def get_workflow_status(session_id: str):
         "trace": state_values.get("trace", []),
         "uncertainty_history": state_values.get("uncertainty_history", [])
     }
+
+    if failure_message:
+        trace = current_state.get("trace", []) or []
+        current_state["trace"] = trace + [f"[ERROR] {failure_message}"]
+        return WorkflowStatusResponse(
+            session_id=session_id,
+            status="failed",
+            current_state=current_state,
+            error_message=failure_message,
+        )
 
     # If the graph is not running and has next tasks, it's either suspended or interrupted
     if not state_snapshot.next:
@@ -526,6 +579,7 @@ def _resume_workflow_background(session_id: str, req: HumanReviewRequest, config
              print(f"[VERIFAI] Warning: Failed to record mistake to DB: {e}")
 
     try:
+        _clear_workflow_failure(session_id)
         payload = {
              "action": req.action,
              "feedback": req.feedback,
@@ -582,8 +636,16 @@ def _resume_workflow_background(session_id: str, req: HumanReviewRequest, config
                   
         # Mark workflow ended in global metrics to trigger observability flush    
         metrics.end_workflow(session_id)
+        _clear_workflow_failure(session_id)
              
     except Exception as e:
+        err_msg = str(e)
+        _set_workflow_failure(session_id, err_msg)
+        try:
+            from app.streaming import emit_agent_event as _emit_sse
+            _emit_sse(session_id, "system", "workflow_error", {"error": err_msg}, err_msg)
+        except Exception:
+            pass
         structured_logger.log("error", "Background workflow block failed.",
                               session_id=session_id, error=str(e))
 

@@ -89,7 +89,7 @@ def chexbert_node(state: VerifaiState) -> dict:
             if syn in text_lower:
                 # Basic negation check: look for "no" or "none" before the keyword
                 start_idx = text_lower.find(syn)
-                context = text_lower[max(0, start_idx-30):start_idx]
+                context = text_lower[max(0, start_idx-60):start_idx]
                 
                 is_negated = any(neg in context for neg in negations)
                 

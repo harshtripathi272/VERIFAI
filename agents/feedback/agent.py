@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 
 from graph.state import VerifaiState, CriticOutput, DoctorFeedback
 from db.adapter import get_logger
+from db.supabase_logger import AgentLogger  # For static methods
 
 
 class FeedbackReprocessingInput(BaseModel):
@@ -63,7 +64,7 @@ def capture_doctor_feedback(
     from db.adapter import get_logger
     
     # Get full context snapshot from the original session
-    context_snapshot = get_logger.get_session_summary(session_id)
+    context_snapshot = AgentLogger.get_session_summary(session_id)
     
     # Create logger to record feedback
     logger = get_logger(session_id=session_id)

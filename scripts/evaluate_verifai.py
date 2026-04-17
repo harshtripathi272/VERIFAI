@@ -1,4 +1,6 @@
 import os
+import sys
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import time
 import csv
 import pandas as pd
@@ -193,19 +195,31 @@ def run_evaluation(output_csv: str = "output/verifai_evaluation_results.csv"):
 
 def generate_report_visuals(csv_path: str):
     """Generates graphs and charts for the final report."""
-    print("\n📊 GENERATING VISUAL REPORT...")
-    df = pd.read_csv(csv_path)
+    print(f"\n📊 GENERATING VISUAL REPORT from {csv_path}...")
+    
+    try:
+        df = pd.read_csv(csv_path)
+    except Exception as e:
+        print(f"   ❌ Error reading CSV: {e}")
+        return
+
+    print(f"   Detected columns: {list(df.columns)}")
     output_dir = "output/visuals/"
     os.makedirs(output_dir, exist_ok=True)
     
     sns.set_theme(style="whitegrid")
     
-    # 1. Latency Comparison
-    plt.figure(figsize=(10, 6))
-    latency_data = df[['latency_baseline', 'latency_verifai']].mean()
-    sns.barplot(x=latency_data.index, y=latency_data.values, palette="viridis")
-    plt.title("Average Latency: Baseline vs VERIFAI")
-    plt.ylabel("Time (seconds)")
+    # Check for required columns
+    required = ['latency_baseline', 'latency_verifai']
+    if not all(col in df.columns for col in required):
+        print(f"   ⚠️ Skipping latency plot: Missing columns. (Found: {list(df.columns)})")
+    else:
+        # 1. Latency Comparison
+        plt.figure(figsize=(10, 6))
+        latency_data = df[required].mean()
+        sns.barplot(x=latency_data.index, y=latency_data.values, palette="viridis")
+        plt.title("Average Latency: Baseline vs VERIFAI")
+        plt.ylabel("Time (seconds)")
     plt.savefig(f"{output_dir}latency_comparison.png")
     plt.close()
 

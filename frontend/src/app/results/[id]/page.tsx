@@ -332,6 +332,7 @@ export default function ResultsPage({ params }: { params: { id: string } }) {
   }
 
   const isRunning = workflowInfo.status === "running";
+  const isFailed = workflowInfo.status === "failed";
 
   // Uncertainty history from state (rolling last-2, shown as full list from current_state)
   const uncertaintyHistory: { agent: string; system_uncertainty: number }[] =
@@ -345,7 +346,9 @@ export default function ResultsPage({ params }: { params: { id: string } }) {
   let uncertainty = 0;
   let evidence: any = null;
 
-  if (workflowInfo.status === "completed" && workflowInfo.final_result) {
+  if (isFailed) {
+    finalDx = "Workflow failed";
+  } else if (workflowInfo.status === "completed" && workflowInfo.final_result) {
     finalDx = workflowInfo.final_result.diagnosis || "Undetermined";
     confidence = Math.round(workflowInfo.final_result.confidence * 100);
     evidence = workflowInfo.final_result.evidence_packet;
@@ -471,6 +474,20 @@ export default function ResultsPage({ params }: { params: { id: string } }) {
         </div>
       )}
 
+      {isFailed && (
+        <div className="mb-8 p-5 rounded-2xl border-2 border-red-500/40 bg-red-500/[0.03] shadow-[0_0_30px_rgba(239,68,68,0.08)] animate-fadeInUp">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="h-5 w-5 text-red-400 mt-0.5" />
+            <div>
+              <h2 className="text-xl font-bold text-red-300">Workflow Error</h2>
+              <p className="text-red-200/80 text-sm mt-2 leading-relaxed">
+                {workflowInfo.error_message || "The workflow failed before producing a diagnosis. Check model/download/configuration logs and retry."}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
       {workflowInfo!.status === "suspended" && !rerunInProgress && (
         <div className="mb-8 p-5 rounded-2xl border-2 border-[#00E5FF]/40 bg-[#00E5FF]/[0.02] shadow-[0_0_30px_rgba(0,229,255,0.05)] animate-fadeInUp">
           <div className="flex items-center gap-3 mb-4">
@@ -532,7 +549,7 @@ export default function ResultsPage({ params }: { params: { id: string } }) {
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#00E5FF] opacity-75"></span>
               <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-[#00E5FF]"></span>
             </span>
-            Study {params.id.slice(0, 8)} &bull; {workflowInfo!.status === "completed" ? "Finalized" : "Pending Review"}
+            Study {params.id.slice(0, 8)} &bull; {workflowInfo!.status === "completed" ? "Finalized" : workflowInfo!.status === "failed" ? "Failed" : "Pending Review"}
           </div>
           <h1 className="text-3xl md:text-5xl font-[var(--font-outfit)] font-bold text-white/90 leading-tight">
             <GradientText colors={["#00E5FF", "#64FFDA", "#00E5FF"]}>{finalDx}</GradientText>
@@ -907,7 +924,10 @@ export default function ResultsPage({ params }: { params: { id: string } }) {
                   <p className="text-[11px] uppercase tracking-[0.15em] text-white/40 mb-3 font-semibold ml-1">Execution Trace</p>
                   <div className="space-y-3 relative pl-8 mt-2">
                     <div className="absolute left-3 top-0 bottom-0 w-px bg-gradient-to-b from-[#00E5FF]/30 via-white/5 to-transparent" />
-                    {(workflowInfo!.current_state?.trace || workflowInfo!.final_result?.trace || [])?.map((traceStr: string, index: number) => (
+                    {([
+                      ...(workflowInfo!.current_state?.trace || workflowInfo!.final_result?.trace || []),
+                      ...(workflowInfo!.error_message ? [`[ERROR] ${workflowInfo!.error_message}`] : []),
+                    ])?.map((traceStr: string, index: number) => (
                       <div key={index} className="relative flex items-start gap-4 group">
                         <div
                           className="absolute -left-5 w-6 h-6 rounded-full border-2 flex items-center justify-center bg-[#050507] z-10 group-hover:scale-110 transition-transform cursor-pointer"
